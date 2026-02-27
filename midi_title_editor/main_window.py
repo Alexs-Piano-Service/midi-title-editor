@@ -40,15 +40,17 @@ from .midi_scan_worker import MidiProcessingWorker
 class MidiTitleWindow(QMainWindow):
     TITLE_COMPAT_LIMIT = 32
     SETTINGS_ORG = "AlexPianoServiceLLC"
-    SETTINGS_APP = "APSMIDImanager"
+    SETTINGS_APP = "APSMidiTitleEditor"
     SETTING_SHOW_COMPAT_WARNING = "show_compat_warning"
     SETTING_STORE_BACKUPS = "store_backups"
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("APS MIDI Manager")
+        self.setWindowTitle("APS MIDI Title Editor")
         self.resize(860, 800)
         self.pendingEdits = {}         # keys: full file paths, values: new titles
         self.settings = QSettings(self.SETTINGS_ORG, self.SETTINGS_APP)
+        self._did_apply_initial_column_sizing = False
+        self._is_adjusting_columns = False
 
         # Main widget and layout
         main_widget = QWidget()
@@ -70,10 +72,14 @@ class MidiTitleWindow(QMainWindow):
         self.table = DropTableWidget(0, 6)
         self.table.setStyleSheet("QTableWidget::item:selected { background-color: #FFB347; }")
         self.table.setHorizontalHeaderLabels(["X", "FullPath", "📋", "Filename", "Title", "32+"])
-        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setMinimumSectionSize(40)
+        header.sectionResized.connect(self._handle_section_resized)
         self.table.setColumnWidth(0, 50)
         self.table.setColumnWidth(2, 50)
+        self.table.setColumnWidth(3, 260)
+        self.table.setColumnWidth(4, 260)
         self.table.setColumnWidth(5, 65)
         self.table.setColumnHidden(1, True)  # Hide the full path column
         self.table.setSortingEnabled(False)
@@ -88,25 +94,29 @@ class MidiTitleWindow(QMainWindow):
         self.status_label.setMinimumHeight(42)
         main_layout.addWidget(self.status_label)
 
-        # Horizontal layout for options and save controls
-        hlayout = QHBoxLayout()
-        hlayout.setContentsMargins(0, 0, 0, 0)
-        hlayout.setSpacing(5)
-        hlayout.setAlignment(Qt.AlignLeft)
+        # Controls area: options stacked vertically on the left, action buttons on the right.
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
+
+        options_container = QWidget()
+        options_layout = QVBoxLayout(options_container)
+        options_layout.setContentsMargins(0, 0, 0, 0)
+        options_layout.setSpacing(2)
+        options_layout.addStretch()
 
         show_compat_warning = self.settings.value(self.SETTING_SHOW_COMPAT_WARNING, True, type=bool)
         self.compat_warning_checkbox = QCheckBox("Show >32-char warning")
         self.compat_warning_checkbox.setChecked(show_compat_warning)
         self.compat_warning_checkbox.toggled.connect(self.toggle_compat_warnings)
-        hlayout.addWidget(self.compat_warning_checkbox)
+        options_layout.addWidget(self.compat_warning_checkbox, alignment=Qt.AlignLeft)
 
         store_backups = self.settings.value(self.SETTING_STORE_BACKUPS, False, type=bool)
         self.backup_checkbox = QCheckBox("Store backups on save")
         self.backup_checkbox.setChecked(store_backups)
         self.backup_checkbox.toggled.connect(self.toggle_store_backups)
-        hlayout.addWidget(self.backup_checkbox)
-
-        hlayout.addStretch()
+        options_layout.addWidget(self.backup_checkbox, alignment=Qt.AlignLeft)
+        options_layout.addStretch()
 
         # Clear button (styled to match Save button)
         self.clearButton = QToolButton()
@@ -114,7 +124,6 @@ class MidiTitleWindow(QMainWindow):
         self.clearButton.setFont(QFont("Helvetica", 18, QFont.Bold))
         self.clearButton.setFixedWidth(200)
         self.clearButton.clicked.connect(self.clear_list)
-        hlayout.addWidget(self.clearButton)
 
         # Save button (using QToolButton with a menu)
         self.saveButton = QToolButton()
@@ -133,9 +142,17 @@ class MidiTitleWindow(QMainWindow):
         action_rename_all.triggered.connect(self.rename_all_for_disk)
         self.saveButton.setMenu(menu)
         self.saveButton.clicked.connect(self.save_pending_changes)
-        hlayout.addWidget(self.saveButton)
-        
-        main_layout.addLayout(hlayout)
+
+        buttons_container = QWidget()
+        buttons_layout = QVBoxLayout(buttons_container)
+        buttons_layout.setContentsMargins(0, 0, 0, 0)
+        buttons_layout.setSpacing(5)
+        buttons_layout.addWidget(self.clearButton)
+        buttons_layout.addWidget(self.saveButton)
+
+        controls_layout.addWidget(options_container, stretch=1)
+        controls_layout.addWidget(buttons_container, stretch=0, alignment=Qt.AlignRight | Qt.AlignVCenter)
+        main_layout.addLayout(controls_layout)
 
         # Logo Area
         logo_container = QWidget()
@@ -157,7 +174,7 @@ class MidiTitleWindow(QMainWindow):
         else:
             self.logo_label.setText("Logo image not found.")
         logo_layout.addWidget(self.logo_label)
-        prog_title = QLabel("APS MIDI Manager")
+        prog_title = QLabel("APS MIDI Title Editor")
         prog_title.setFont(QFont("Helvetica", 12))
         prog_title.setAlignment(Qt.AlignCenter)
         website = QLabel("https://www.alexanderpeppe.com/")
@@ -173,20 +190,85 @@ class MidiTitleWindow(QMainWindow):
         self.table.viewport().setMouseTracking(True)
         self.table.viewport().installEventFilter(self)
 
+        buttons_height = (
+            self.clearButton.sizeHint().height() +
+            self.saveButton.sizeHint().height() +
+            buttons_layout.spacing()
+        )
+        options_container.setFixedHeight(buttons_height)
+
     def eventFilter(self, obj, event):
-        if obj is self.table.viewport() and event.type() == QEvent.MouseMove:
-            pos = event.position().toPoint()
-            index = self.table.indexAt(pos)
-            # When hovering over the Title cell, show a pointing hand.
-            if index.isValid() and index.column() == 4:
-                self.table.viewport().setCursor(Qt.PointingHandCursor)
-            else:
-                self.table.viewport().setCursor(Qt.ArrowCursor)
+        if obj is self.table.viewport():
+            if event.type() == QEvent.Resize:
+                self._resize_table_columns_to_fill()
+            elif event.type() == QEvent.MouseMove:
+                pos = event.position().toPoint()
+                index = self.table.indexAt(pos)
+                # When hovering over the Title cell, show a pointing hand.
+                if index.isValid() and index.column() == 4:
+                    self.table.viewport().setCursor(Qt.PointingHandCursor)
+                else:
+                    self.table.viewport().setCursor(Qt.ArrowCursor)
         return super().eventFilter(obj, event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._did_apply_initial_column_sizing:
+            self._resize_table_columns_to_fill()
+            self._did_apply_initial_column_sizing = True
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._resize_table_columns_to_fill()
+
+    def _handle_section_resized(self, logical_index, old_size, new_size):
+        if self._is_adjusting_columns:
+            return
+        if logical_index != 1:
+            self._resize_table_columns_to_fill(preferred_column=logical_index)
+
+    def _resize_table_columns_to_fill(self, preferred_column=None):
+        if self._is_adjusting_columns:
+            return
+
+        available_width = self.table.viewport().width()
+        if available_width <= 0:
+            return
+
+        fixed_columns = [0, 2]
+        if not self.table.isColumnHidden(5):
+            fixed_columns.append(5)
+        fixed_total = sum(self.table.columnWidth(column) for column in fixed_columns)
+
+        min_section = self.table.horizontalHeader().minimumSectionSize()
+        remaining = max((min_section * 2), available_width - fixed_total)
+
+        filename_width = max(min_section, self.table.columnWidth(3))
+        title_width = max(min_section, self.table.columnWidth(4))
+
+        if preferred_column == 3:
+            filename_width = min(filename_width, remaining - min_section)
+            title_width = remaining - filename_width
+        elif preferred_column == 4:
+            title_width = min(title_width, remaining - min_section)
+            filename_width = remaining - title_width
+        else:
+            combined_width = max(1, filename_width + title_width)
+            filename_width = int(round(remaining * filename_width / combined_width))
+            filename_width = max(min_section, min(filename_width, remaining - min_section))
+            title_width = remaining - filename_width
+
+        self._is_adjusting_columns = True
+        try:
+            self.table.setColumnWidth(3, filename_width)
+            self.table.setColumnWidth(4, title_width)
+        finally:
+            self._is_adjusting_columns = False
 
     def toggle_compat_warnings(self, state):
         self.table.setColumnHidden(5, not state)
         self.settings.setValue(self.SETTING_SHOW_COMPAT_WARNING, bool(state))
+        self._resize_table_columns_to_fill()
         if state:
             self.refresh_compat_indicators()
 

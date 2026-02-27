@@ -3,13 +3,13 @@ from PySide6.QtWidgets import QMessageBox, QCheckBox
 
 
 def show_first_time_dialog():
-    settings = QSettings("AlexPianoServiceLLC", "APSMIDImanager")
+    settings = QSettings("AlexPianoServiceLLC", "APSMidiTitleEditor")
     skip_dialog = settings.value("skip_first_time_dialog", False, type=bool)
 
     if not skip_dialog:
         msgBox = QMessageBox()
         msgBox.setIcon(QMessageBox.Information)
-        msgBox.setWindowTitle("Welcome to APS MIDI Manager")
+        msgBox.setWindowTitle("Welcome to APS MIDI Title Editor")
         msgBox.setText("""<html>
       <head>
         <style type="text/css">
@@ -24,7 +24,7 @@ def show_first_time_dialog():
         </style>
       </head>
       <body>
-        <h1>APS MIDI Manager</h1>
+        <h1>APS MIDI Title Editor</h1>
         <p>
           This tool is designed to help you quickly update and manage the titles of your MIDI files.
           Whether you have a few or many files, renaming them is a breeze.
@@ -35,11 +35,16 @@ def show_first_time_dialog():
             <strong>Select a Folder:</strong> Click the <em>"Choose MIDI Folder"</em> button to load the folder containing your MIDI files.
           </li>
           <li>
-            <strong>View Your Files:</strong> Your files are displayed in a table showing both the filename and their current titles.
+            <strong>Or Drag and Drop:</strong> You can also drag <code>.mid</code> and <code>.midi</code> files directly into the table.
           </li>
           <li>
-            <strong>Edit Titles:</strong>
-                Simply click a title to open a dialog box for editing.
+            <strong>Edit Titles:</strong> Click a title cell to open the edit dialog. Changes are queued until you save.
+          </li>
+          <li>
+            <strong>Quick Copy:</strong> Click the clipboard icon or double-click a filename to copy the filename.
+          </li>
+          <li>
+            <strong>Save Options:</strong> Use <em>Save</em>, <em>Save As...</em>, or <em>Rename All to DOS 8.3</em> from the Save button menu.
           </li>
         </ol>
         <p>

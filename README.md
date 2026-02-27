@@ -1,6 +1,6 @@
-# APS MIDI Manager
+# APS MIDI Title Editor
 
-`APS MIDI Manager` is a desktop tool for editing MIDI track titles with legacy playback systems in mind.
+`APS MIDI Title Editor` is a desktop tool for editing MIDI track titles with legacy playback systems in mind.
 
 Built for the workflows at [AlexanderPeppe.com](https://www.alexanderpeppe.com/), this project helps players, technicians, and collectors keep MIDI files named properly and compatible with older Disklavier setups.
 
