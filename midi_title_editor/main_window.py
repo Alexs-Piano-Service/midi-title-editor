@@ -3,7 +3,7 @@ import os
 import shutil
 
 from PySide6.QtCore import Qt, QEvent, QSettings
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -24,6 +24,9 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QToolButton,
     QMenu,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
 )
 
 from .midi_metadata import (
@@ -35,6 +38,55 @@ from .dos83_renamer import rename_midi_files_dos83
 from .ui_utils import is_dark_theme, pixmap_from_base64, embedded_logo_dt, embedded_logo_lt
 from .drop_table_widget import DropTableWidget
 from .midi_scan_worker import MidiProcessingWorker
+
+
+class TitleOverflowDelegate(QStyledItemDelegate):
+    def __init__(self, limit, parent=None):
+        super().__init__(parent)
+        self.limit = limit
+        self.warning_color = QColor("#F5B041")
+        self.highlight_enabled = True
+
+    def set_highlight_enabled(self, enabled):
+        self.highlight_enabled = bool(enabled)
+
+    def paint(self, painter, option, index):
+        text = index.data(Qt.DisplayRole) or ""
+        if (
+            not self.highlight_enabled
+            or index.column() != 4
+            or len(text) <= self.limit
+            or option.state & QStyle.State_Selected
+        ):
+            super().paint(painter, option, index)
+            return
+
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        full_text = opt.text
+        normal_text = full_text[:self.limit]
+        overflow_text = full_text[self.limit:]
+
+        opt.text = ""
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+        text_rect = style.subElementRect(QStyle.SE_ItemViewItemText, opt, opt.widget).adjusted(4, 0, -2, 0)
+        if text_rect.width() <= 0:
+            return
+
+        painter.save()
+        painter.setClipRect(text_rect)
+        fm = opt.fontMetrics
+        baseline = text_rect.top() + (text_rect.height() + fm.ascent() - fm.descent()) // 2
+        x = text_rect.left()
+
+        painter.setPen(opt.palette.color(QPalette.Text))
+        painter.drawText(x, baseline, normal_text)
+        x += fm.horizontalAdvance(normal_text)
+
+        painter.setPen(self.warning_color)
+        painter.drawText(x, baseline, overflow_text)
+        painter.restore()
 
 
 class MidiTitleWindow(QMainWindow):
@@ -85,6 +137,8 @@ class MidiTitleWindow(QMainWindow):
         self.table.setSortingEnabled(False)
         self.table.cellClicked.connect(self.handle_cell_clicked)
         self.table.cellDoubleClicked.connect(self.handle_cell_double_clicked)
+        self.title_delegate = TitleOverflowDelegate(self.TITLE_COMPAT_LIMIT, self.table)
+        self.table.setItemDelegateForColumn(4, self.title_delegate)
         main_layout.addWidget(self.table, stretch=1)
 
         # Bottom: Status label
@@ -109,6 +163,7 @@ class MidiTitleWindow(QMainWindow):
         self.compat_warning_checkbox = QCheckBox("Show >32-char warning")
         self.compat_warning_checkbox.setChecked(show_compat_warning)
         self.compat_warning_checkbox.toggled.connect(self.toggle_compat_warnings)
+        self.title_delegate.set_highlight_enabled(show_compat_warning)
         options_layout.addWidget(self.compat_warning_checkbox, alignment=Qt.AlignLeft)
 
         store_backups = self.settings.value(self.SETTING_STORE_BACKUPS, False, type=bool)
@@ -268,6 +323,8 @@ class MidiTitleWindow(QMainWindow):
     def toggle_compat_warnings(self, state):
         self.table.setColumnHidden(5, not state)
         self.settings.setValue(self.SETTING_SHOW_COMPAT_WARNING, bool(state))
+        self.title_delegate.set_highlight_enabled(state)
+        self.table.viewport().update()
         self._resize_table_columns_to_fill()
         if state:
             self.refresh_compat_indicators()
@@ -530,12 +587,14 @@ class MidiTitleWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Edit Title")
         dialog.setModal(True)
+        dialog.setMinimumWidth(760)
         dialog_layout = QVBoxLayout(dialog)
 
         prompt = QLabel("Enter new title:")
         dialog_layout.addWidget(prompt)
 
         editor = QLineEdit(current_title)
+        editor.setMinimumWidth(720)
         dialog_layout.addWidget(editor)
 
         warning_label = QLabel("")
