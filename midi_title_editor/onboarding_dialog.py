@@ -44,7 +44,7 @@ def show_first_time_dialog():
             <strong>Quick Copy:</strong> Click the clipboard icon or double-click a filename to copy the filename.
           </li>
           <li>
-            <strong>Save Options:</strong> Use <em>Save</em>, <em>Save As...</em>, or <em>Rename All to DOS 8.3</em> from the Save button menu.
+            <strong>Save Options:</strong> Use <em>Save</em>, <em>Save As...</em>, <em>Rename All to DOS 8.3</em>, or <em>Convert All to MIDI Type 0</em> from the Save button menu.
           </li>
         </ol>
         <p>

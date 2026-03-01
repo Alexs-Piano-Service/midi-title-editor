@@ -35,6 +35,7 @@ from .midi_metadata import (
     validate_legacy_title_input,
 )
 from .dos83_renamer import rename_midi_files_dos83
+from .midi_type0_converter import convert_midi_files_to_type0
 from .ui_utils import is_dark_theme, pixmap_from_base64, embedded_logo_dt, embedded_logo_lt
 from .drop_table_widget import DropTableWidget
 from .midi_scan_worker import MidiProcessingWorker
@@ -95,6 +96,7 @@ class MidiTitleWindow(QMainWindow):
     SETTINGS_APP = "APSMidiTitleEditor"
     SETTING_SHOW_COMPAT_WARNING = "show_compat_warning"
     SETTING_STORE_BACKUPS = "store_backups"
+    SETTING_SKIP_TYPE0_WARNING = "skip_type0_warning"
     def __init__(self):
         super().__init__()
         self.setWindowTitle("APS MIDI Title Editor")
@@ -195,6 +197,8 @@ class MidiTitleWindow(QMainWindow):
         menu.addSeparator()
         action_rename_all = menu.addAction("Rename All to DOS 8.3")
         action_rename_all.triggered.connect(self.rename_all_for_disk)
+        action_convert_type0 = menu.addAction("Convert All to MIDI Type 0")
+        action_convert_type0.triggered.connect(self.convert_all_to_type0)
         self.saveButton.setMenu(menu)
         self.saveButton.clicked.connect(self.save_pending_changes)
 
@@ -514,6 +518,93 @@ class MidiTitleWindow(QMainWindow):
         if backup_count:
             status_parts.append(f"Created {backup_count} backup file(s).")
         self.status_label.setText("\n".join(status_parts))
+
+    def _confirm_type0_conversion(self, file_count):
+        skip_warning = self.settings.value(self.SETTING_SKIP_TYPE0_WARNING, False, type=bool)
+        if skip_warning:
+            return True
+
+        warning_box = QMessageBox(self)
+        warning_box.setIcon(QMessageBox.Warning)
+        warning_box.setWindowTitle("Convert All to MIDI Type 0")
+        warning_box.setText(
+            f"This will convert all {file_count} listed file(s) to MIDI Type 0 (single track).\n\n"
+            "This conversion is not compatible with Yamaha XG files."
+        )
+
+        backup_hint = (
+            "Backup recommendation: backups are currently enabled."
+            if self.backup_checkbox.isChecked()
+            else (
+                "Backup recommendation: enable \"Store backups on save\" before running this utility."
+            )
+        )
+        warning_box.setInformativeText(
+            f"{backup_hint}\n\nDo you want to continue?"
+        )
+        dont_show_checkbox = QCheckBox("Do not show this warning again")
+        warning_box.setCheckBox(dont_show_checkbox)
+        warning_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        warning_box.setDefaultButton(QMessageBox.No)
+        result = warning_box.exec()
+        confirmed = result == QMessageBox.Yes
+        if confirmed and dont_show_checkbox.isChecked():
+            self.settings.setValue(self.SETTING_SKIP_TYPE0_WARNING, True)
+        return confirmed
+
+    def convert_all_to_type0(self):
+        if not self.choose_button.isEnabled():
+            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+            return
+
+        row_count = self.table.rowCount()
+        if row_count == 0:
+            QMessageBox.information(self, "No Files", "Add one or more files first.")
+            return
+
+        all_paths = []
+        for row in range(row_count):
+            full_path_item = self.table.item(row, 1)
+            if not full_path_item:
+                continue
+            all_paths.append(full_path_item.text())
+
+        if not all_paths:
+            QMessageBox.information(self, "No Valid Files", "No valid files are currently listed.")
+            return
+
+        if not self._confirm_type0_conversion(len(all_paths)):
+            return
+
+        result = convert_midi_files_to_type0(
+            all_paths,
+            create_backups=self.backup_checkbox.isChecked(),
+            backup_path_builder=self._get_backup_path,
+        )
+
+        converted_count = len(result.converted)
+        unchanged_count = len(result.unchanged)
+        backup_count = len(result.backups_created)
+        failed_count = len(result.failed)
+
+        status_parts = [f"Converted {converted_count} file(s) to MIDI Type 0."]
+        if unchanged_count:
+            status_parts.append(f"{unchanged_count} already Type 0 and were left unchanged.")
+        if backup_count:
+            status_parts.append(f"Created {backup_count} backup file(s).")
+        if failed_count:
+            status_parts.append(f"{failed_count} file(s) failed conversion.")
+        self.status_label.setText("\n".join(status_parts))
+
+        if failed_count:
+            max_rows = 10
+            details = "\n".join(
+                f"{os.path.basename(path)}: {error}"
+                for path, error in result.failed[:max_rows]
+            )
+            if failed_count > max_rows:
+                details += f"\n...and {failed_count - max_rows} more."
+            QMessageBox.warning(self, "Type 0 Conversion Issues", details)
 
     def add_table_row(self, full_path, filename, title):
         row = self.table.rowCount()
