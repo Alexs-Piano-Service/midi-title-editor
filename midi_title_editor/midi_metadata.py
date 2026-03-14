@@ -15,6 +15,35 @@ _SYSTEM_MESSAGE_DATA_LENGTHS = {
 _LEGACY_TITLE_MIN_CODEPOINT = 0x20
 _LEGACY_TITLE_MAX_CODEPOINT = 0x7E
 
+
+def _extract_midi_format_type(midi_bytes):
+    if len(midi_bytes) < 14:
+        raise ValueError("File is too small to be a valid MIDI file.")
+    if midi_bytes[:4] != b"MThd":
+        raise ValueError("Missing MThd header chunk.")
+
+    header_len = int.from_bytes(midi_bytes[4:8], "big")
+    if header_len < 6:
+        raise ValueError("Invalid MIDI header length.")
+
+    header_end = 8 + header_len
+    if header_end > len(midi_bytes):
+        raise ValueError("Corrupt MIDI header length.")
+
+    return int.from_bytes(midi_bytes[8:10], "big")
+
+
+def extract_midi_type_label_from_midi(midi_path):
+    try:
+        with open(midi_path, "rb") as f:
+            midi_bytes = f.read()
+        format_type = _extract_midi_format_type(midi_bytes)
+        return f"Type {format_type}"
+    except Exception as e:
+        print(f"Error detecting MIDI type for {midi_path}: {e}")
+        return "Error"
+
+
 def _parse_vlq(data, offset, end):
     value = 0
     pos = offset

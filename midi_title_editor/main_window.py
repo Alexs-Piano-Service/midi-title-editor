@@ -33,6 +33,7 @@ from .midi_metadata import (
     update_midi_title,
     update_midi_title_to_destination,
     validate_legacy_title_input,
+    extract_midi_type_label_from_midi,
 )
 from .dos83_renamer import rename_midi_files_dos83
 from .midi_type0_converter import convert_midi_files_to_type0
@@ -97,6 +98,7 @@ class MidiTitleWindow(QMainWindow):
     SETTING_SHOW_COMPAT_WARNING = "show_compat_warning"
     SETTING_STORE_BACKUPS = "store_backups"
     SETTING_SKIP_TYPE0_WARNING = "skip_type0_warning"
+    SETTING_SHOW_MIDI_TYPE_COLUMN = "show_midi_type_column"
     def __init__(self):
         super().__init__()
         self.setWindowTitle("APS MIDI Title Editor")
@@ -122,10 +124,10 @@ class MidiTitleWindow(QMainWindow):
 
         # Middle: Table for displaying MIDI files (using our DropTableWidget subclass)
         # Column order:
-        # 0: Delete ("X"), 1: FullPath (hidden), 2: 📋, 3: Filename, 4: Title, 5: Compat warning (>32)
-        self.table = DropTableWidget(0, 6)
+        # 0: Delete ("X"), 1: FullPath (hidden), 2: 📋, 3: Filename, 4: Title, 5: Compat warning (>32), 6: MIDI type
+        self.table = DropTableWidget(0, 7)
         self.table.setStyleSheet("QTableWidget::item:selected { background-color: #FFB347; }")
-        self.table.setHorizontalHeaderLabels(["X", "FullPath", "📋", "Filename", "Title", "32+"])
+        self.table.setHorizontalHeaderLabels(["X", "FullPath", "📋", "Filename", "Title", "32+", "Type"])
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setMinimumSectionSize(40)
@@ -135,6 +137,7 @@ class MidiTitleWindow(QMainWindow):
         self.table.setColumnWidth(3, 260)
         self.table.setColumnWidth(4, 260)
         self.table.setColumnWidth(5, 65)
+        self.table.setColumnWidth(6, 70)
         self.table.setColumnHidden(1, True)  # Hide the full path column
         self.table.setSortingEnabled(False)
         self.table.cellClicked.connect(self.handle_cell_clicked)
@@ -167,6 +170,12 @@ class MidiTitleWindow(QMainWindow):
         self.compat_warning_checkbox.toggled.connect(self.toggle_compat_warnings)
         self.title_delegate.set_highlight_enabled(show_compat_warning)
         options_layout.addWidget(self.compat_warning_checkbox, alignment=Qt.AlignLeft)
+
+        show_midi_type_column = self.settings.value(self.SETTING_SHOW_MIDI_TYPE_COLUMN, False, type=bool)
+        self.midi_type_column_checkbox = QCheckBox("Show MIDI type column")
+        self.midi_type_column_checkbox.setChecked(show_midi_type_column)
+        self.midi_type_column_checkbox.toggled.connect(self.toggle_midi_type_column)
+        options_layout.addWidget(self.midi_type_column_checkbox, alignment=Qt.AlignLeft)
 
         store_backups = self.settings.value(self.SETTING_STORE_BACKUPS, False, type=bool)
         self.backup_checkbox = QCheckBox("Store backups on save")
@@ -244,6 +253,7 @@ class MidiTitleWindow(QMainWindow):
         main_layout.addWidget(logo_container)
 
         self.table.setColumnHidden(5, not self.compat_warning_checkbox.isChecked())
+        self.table.setColumnHidden(6, not self.midi_type_column_checkbox.isChecked())
 
         # Set mouse tracking and install an event filter on the table viewport.
         self.table.viewport().setMouseTracking(True)
@@ -297,6 +307,8 @@ class MidiTitleWindow(QMainWindow):
         fixed_columns = [0, 2]
         if not self.table.isColumnHidden(5):
             fixed_columns.append(5)
+        if not self.table.isColumnHidden(6):
+            fixed_columns.append(6)
         fixed_total = sum(self.table.columnWidth(column) for column in fixed_columns)
 
         min_section = self.table.horizontalHeader().minimumSectionSize()
@@ -332,6 +344,13 @@ class MidiTitleWindow(QMainWindow):
         self._resize_table_columns_to_fill()
         if state:
             self.refresh_compat_indicators()
+
+    def toggle_midi_type_column(self, state):
+        self.table.setColumnHidden(6, not state)
+        self.settings.setValue(self.SETTING_SHOW_MIDI_TYPE_COLUMN, bool(state))
+        self._resize_table_columns_to_fill()
+        if state:
+            self.refresh_midi_type_indicators()
 
     def toggle_store_backups(self, state):
         self.settings.setValue(self.SETTING_STORE_BACKUPS, bool(state))
@@ -369,6 +388,21 @@ class MidiTitleWindow(QMainWindow):
             title_item = self.table.item(row, 4)
             title = title_item.text() if title_item else ""
             self._update_compat_indicator(row, title)
+
+    def _update_midi_type_indicator(self, row, midi_type):
+        indicator = QTableWidgetItem(midi_type if midi_type else "Unknown")
+        indicator.setTextAlignment(Qt.AlignCenter)
+        indicator.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        self.table.setItem(row, 6, indicator)
+
+    def refresh_midi_type_indicators(self):
+        for row in range(self.table.rowCount()):
+            full_path_item = self.table.item(row, 1)
+            if full_path_item is None:
+                self._update_midi_type_indicator(row, "Unknown")
+                continue
+            midi_type = extract_midi_type_label_from_midi(full_path_item.text())
+            self._update_midi_type_indicator(row, midi_type)
 
     def browse_directory(self):
         directory = QFileDialog.getExistingDirectory(self, "Choose MIDI Folder")
@@ -595,6 +629,7 @@ class MidiTitleWindow(QMainWindow):
         if failed_count:
             status_parts.append(f"{failed_count} file(s) failed conversion.")
         self.status_label.setText("\n".join(status_parts))
+        self.refresh_midi_type_indicators()
 
         if failed_count:
             max_rows = 10
@@ -606,7 +641,7 @@ class MidiTitleWindow(QMainWindow):
                 details += f"\n...and {failed_count - max_rows} more."
             QMessageBox.warning(self, "Type 0 Conversion Issues", details)
 
-    def add_table_row(self, full_path, filename, title):
+    def add_table_row(self, full_path, filename, title, midi_type=""):
         row = self.table.rowCount()
         self.table.insertRow(row)
 
@@ -640,6 +675,9 @@ class MidiTitleWindow(QMainWindow):
 
         # Column 5: Compatibility indicator for titles > 32 characters
         self._update_compat_indicator(row, display_title)
+
+        # Column 6: MIDI type from file header bytes
+        self._update_midi_type_indicator(row, midi_type)
 
     def handle_cell_clicked(self, row, column):
         # Column 0: remove from list

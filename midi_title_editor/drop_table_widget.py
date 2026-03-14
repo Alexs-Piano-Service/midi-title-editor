@@ -3,7 +3,7 @@ import os
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QProgressDialog, QTableWidget
 
-from .midi_metadata import extract_first_title_from_midi
+from .midi_metadata import extract_first_title_from_midi, extract_midi_type_label_from_midi
 
 
 class DropTableWidget(QTableWidget):
@@ -46,7 +46,8 @@ class DropTableWidget(QTableWidget):
                 if file_path.lower().endswith(('.mid', '.midi')):
                     if not self.file_exists(file_path) and hasattr(main_window, "add_table_row"):
                         title = extract_first_title_from_midi(file_path)
-                        main_window.add_table_row(file_path, os.path.basename(file_path), title)
+                        midi_type = extract_midi_type_label_from_midi(file_path)
+                        main_window.add_table_row(file_path, os.path.basename(file_path), title, midi_type)
                 if progressDialog:
                     progressDialog.setValue(i + 1)
                     QApplication.processEvents()
