@@ -53,12 +53,6 @@ pip install PySide6
 python3 aps_midi_prep_tool.py
 ```
 
-Legacy launcher alias still available:
-
-```bash
-python3 midi_title_editor.py
-```
-
 ## Basic Workflow
 
 1. Launch the app.
