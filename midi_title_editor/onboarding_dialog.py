@@ -1,3 +1,5 @@
+import sys
+
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QMessageBox, QCheckBox
 
@@ -16,20 +18,27 @@ def show_first_time_dialog():
     skip_dialog = settings.value("skip_first_time_dialog", False, type=bool)
 
     if not skip_dialog:
+        if sys.platform.startswith("win"):
+            body_font_stack = '"Segoe UI", "Arial", sans-serif'
+        elif sys.platform == "darwin":
+            body_font_stack = '"Helvetica Neue", "Helvetica", sans-serif'
+        else:
+            body_font_stack = '"Noto Sans", "DejaVu Sans", "Arial", sans-serif'
+
         msgBox = QMessageBox()
         msgBox.setIcon(QMessageBox.Information)
         msgBox.setWindowTitle(f"Welcome to {APP_TITLE_WITH_VERSION}")
         msgBox.setText(f"""<html>
       <head>
         <style type="text/css">
-          body { font-family: "Helvetica", sans-serif; }
-          h1 { font-weight: bold; margin-bottom: 10px; text-align: center; }
-          h2 { text-align: center; }
-          p { margin: 10px 0; }
-          ul { margin: 10px 20px; }
-          li { margin-bottom: 6px; }
-          a { text-decoration: none; }
-          a:hover { text-decoration: underline; }
+          body {{ font-family: {body_font_stack}; }}
+          h1 {{ font-weight: bold; margin-bottom: 10px; text-align: center; }}
+          h2 {{ text-align: center; }}
+          p {{ margin: 10px 0; }}
+          ul {{ margin: 10px 20px; }}
+          li {{ margin-bottom: 6px; }}
+          a {{ text-decoration: none; }}
+          a:hover {{ text-decoration: underline; }}
         </style>
       </head>
       <body>
