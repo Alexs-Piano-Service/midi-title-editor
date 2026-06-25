@@ -382,6 +382,7 @@ DISK_FORMAT_TRACK_LAYOUTS = {
 }
 
 RAW_IMAGE_EXTENSIONS = {"bin", "img", "ima", "vfd"}
+DIRECT_FLOPPY_IMAGE_EXTENSIONS = RAW_IMAGE_EXTENSIONS | {"hfe"}
 
 SUPPORTED_IMAGE_EXTENSIONS = {
     "a2r",
@@ -2840,9 +2841,13 @@ def capture_floppy_drive_image(
     progress_callback=None,
     cancel_callback=None,
 ):
-    """Copy a physical floppy to a raw sector image without opening/scanning it."""
+    """Copy a physical floppy to an image without opening/scanning it."""
     if not isinstance(drive_info, FloppyDriveInfo):
         raise FloppyImageError("Invalid floppy drive selection.")
+
+    output_ext = image_extension(output_path) or "img"
+    if output_ext not in DIRECT_FLOPPY_IMAGE_EXTENSIONS:
+        raise FloppyImageError(_unsupported_image_type_message(output_ext, for_output=True))
 
     read_size = 0
     if isinstance(disk_format, DiskFormat):
@@ -2855,7 +2860,12 @@ def capture_floppy_drive_image(
         )
 
     output_path = os.path.abspath(output_path)
-    temp_path = _capture_temp_output_path(output_path)
+    raw_output = output_ext in RAW_IMAGE_EXTENSIONS
+    raw_temp_path = _capture_temp_output_path(
+        output_path,
+        suffix=None if raw_output else ".img",
+    )
+    converted_temp_path = ""
     try:
         _notify_progress(
             progress_callback,
@@ -2865,19 +2875,55 @@ def capture_floppy_drive_image(
         )
         _read_block_device(
             drive_info.path,
-            temp_path,
+            raw_temp_path,
             read_size,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
         )
         _raise_if_cancelled(cancel_callback)
-        _notify_progress(progress_callback, 95, 100, "Saving floppy image...")
-        final_path = _finish_capture_output(temp_path, output_path)
-        temp_path = ""
+
+        if raw_output:
+            _notify_progress(progress_callback, 95, 100, "Saving floppy image...")
+            final_path = _finish_capture_output(raw_temp_path, output_path)
+            raw_temp_path = ""
+        else:
+            if not isinstance(disk_format, DiskFormat):
+                raise FloppyImageError(
+                    "Could not choose a disk format for image conversion. "
+                    "Select the disk size before imaging the disk."
+                )
+            converted_temp_path = _capture_temp_output_path(
+                output_path,
+                suffix=f".{output_ext}",
+            )
+            _notify_progress(
+                progress_callback,
+                88,
+                100,
+                f"Converting floppy image to {output_ext.upper()}...",
+            )
+            _write_image_direct(
+                raw_temp_path,
+                converted_temp_path,
+                output_ext,
+                disk_format,
+            )
+            _raise_if_cancelled(cancel_callback)
+            _notify_progress(
+                progress_callback,
+                95,
+                100,
+                "Saving converted floppy image...",
+            )
+            final_path = _finish_capture_output(converted_temp_path, output_path)
+            converted_temp_path = ""
+
         _notify_progress(progress_callback, 100, 100, "Floppy image saved.")
         return final_path
     finally:
-        if temp_path:
+        for temp_path in (converted_temp_path, raw_temp_path):
+            if not temp_path:
+                continue
             try:
                 os.remove(temp_path)
             except OSError:

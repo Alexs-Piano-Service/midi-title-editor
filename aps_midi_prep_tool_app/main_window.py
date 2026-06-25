@@ -5015,6 +5015,7 @@ class MidiTitleWindow(QMainWindow):
     SETTING_READ_FLOPPY_SOURCE_KIND = "read_floppy_source_kind"
     SETTING_READ_FLOPPY_GW_ARCHIVAL = "read_floppy_gw_archival"
     SETTING_READ_FLOPPY_GW_IMAGE_TYPE = "read_floppy_gw_image_type"
+    SETTING_IMAGE_FLOPPY_DRIVE_IMAGE_TYPE = "image_floppy_drive_image_type"
     SETTING_READ_FLOPPY_GW_FORMAT = "read_floppy_gw_format"
     SETTING_READ_FLOPPY_GW_REVS = "read_floppy_gw_revs"
     SETTING_READ_FLOPPY_GW_RETRIES = "read_floppy_gw_retries"
@@ -13679,6 +13680,14 @@ class MidiTitleWindow(QMainWindow):
     def _greaseweazle_drive_options(self):
         return ["A", "B", "0", "1", "2"]
 
+    def _direct_drive_image_type_options(self):
+        return [
+            ("hfe", "HFE (Nalbantov) image"),
+            ("img", "IMG raw sector image"),
+            ("bin", "BIN raw sector image"),
+            ("ima", "IMA raw sector image"),
+        ]
+
     def _greaseweazle_image_type_options(self, *, include_none=False):
         options = []
         if include_none:
@@ -13720,6 +13729,28 @@ class MidiTitleWindow(QMainWindow):
         combo.clear()
         selected_index = 0
         for index, (ext, label) in enumerate(self._greaseweazle_image_type_options(include_none=include_none)):
+            combo.addItem(self._lt(label), ext)
+            if ext == default_ext:
+                selected_index = index
+        combo.setCurrentIndex(selected_index)
+
+    def _saved_direct_drive_image_type(self, *, default_ext="img"):
+        allowed = {ext for ext, _label in self._direct_drive_image_type_options()}
+        value = str(
+            self.settings.value(self.SETTING_IMAGE_FLOPPY_DRIVE_IMAGE_TYPE, "") or ""
+        ).strip().lower().lstrip(".")
+        if value in allowed:
+            return value
+        default_ext = str(default_ext or "img").lower().lstrip(".")
+        if default_ext in allowed:
+            return default_ext
+        return "img"
+
+    def _populate_direct_drive_image_type_combo(self, combo, *, default_ext="img"):
+        default_ext = str(default_ext or "img").lower().lstrip(".")
+        combo.clear()
+        selected_index = 0
+        for index, (ext, label) in enumerate(self._direct_drive_image_type_options()):
             combo.addItem(self._lt(label), ext)
             if ext == default_ext:
                 selected_index = index
@@ -13832,7 +13863,7 @@ class MidiTitleWindow(QMainWindow):
         layout.setSpacing(8)
 
         hint = QLabel(
-            "Create an image file from a physical floppy without opening, scanning, repairing, or converting its contents."
+            "Create an image file from a physical floppy without opening, scanning, or repairing its contents."
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -13868,8 +13899,22 @@ class MidiTitleWindow(QMainWindow):
             drive_format_combo,
             default_key=getattr(detected_drive_format, "key", "") or "ibm.720",
         )
+        drive_image_type_combo = QComboBox(drive_page)
+        self._populate_direct_drive_image_type_combo(
+            drive_image_type_combo,
+            default_ext=self._saved_direct_drive_image_type(default_ext="img"),
+        )
+        drive_image_type_combo.setToolTip(
+            "Choose HFE to convert the direct floppy read after capture. Raw sector image types are saved directly."
+        )
         drive_label = self._add_dialog_form_row(drive_grid, 0, "Floppy drive:", drive_combo)
         drive_format_label = self._add_dialog_form_row(drive_grid, 1, "Disk size:", drive_format_combo)
+        drive_image_type_label = self._add_dialog_form_row(
+            drive_grid,
+            2,
+            "Image type:",
+            drive_image_type_combo,
+        )
         layout.addWidget(drive_page)
 
         gw_page = QWidget(dialog)
@@ -13940,6 +13985,7 @@ class MidiTitleWindow(QMainWindow):
                 source_label,
                 drive_label,
                 drive_format_label,
+                drive_image_type_label,
                 gw_device_label,
                 gw_drive_label,
                 gw_format_label,
@@ -13999,12 +14045,17 @@ class MidiTitleWindow(QMainWindow):
                 )
                 return None
             self._remember_read_floppy_dialog_selection(source_kind)
+            output_ext = str(
+                drive_image_type_combo.currentData() or "img"
+            ).lower().lstrip(".")
+            self.settings.setValue(self.SETTING_IMAGE_FLOPPY_DRIVE_IMAGE_TYPE, output_ext)
+            self.settings.sync()
             return {
                 "source_kind": source_kind,
                 "source": drive_info,
                 "disk_format": disk_format,
                 "source_name": drive_info.display_name,
-                "output_ext": "img",
+                "output_ext": output_ext,
             }
 
         selected_device = gw_device_combo.currentData()
@@ -15736,6 +15787,7 @@ class MidiTitleWindow(QMainWindow):
             "source_name": source_name,
             "output_path": output_path,
             "source_kind": source_kind,
+            "output_ext": image_extension(output_path),
         }
         self._set_disk_load_busy(True)
         self._log_event(
@@ -15755,7 +15807,17 @@ class MidiTitleWindow(QMainWindow):
         output_path = payload.get("output_path") or self.diskImageCaptureContext.get("output_path", "")
         source_name = self.diskImageCaptureContext.get("source_name", "the selected floppy")
         source_kind = payload.get("source_kind") or self.diskImageCaptureContext.get("source_kind", "")
+        output_ext = (
+            payload.get("output_ext")
+            or self.diskImageCaptureContext.get("output_ext")
+            or image_extension(output_path)
+        )
+        output_ext = str(output_ext or "").lower().lstrip(".")
         is_image_conversion = source_kind == "image_convert"
+        is_direct_drive_conversion = (
+            source_kind == "floppy_usb"
+            and output_ext not in {"img", "bin", "ima", "vfd"}
+        )
         filename = os.path.basename(output_path) if output_path else "the selected image file"
         action = "Converted" if is_image_conversion else "Imaged"
         self._log_event(
@@ -15776,6 +15838,12 @@ class MidiTitleWindow(QMainWindow):
                 "The converted image was not opened, scanned, or repaired."
             )
             if is_image_conversion
+            else (
+                f"Saved {filename}.\n\n"
+                f"The disk contents were read directly, converted to {output_ext.upper()}, "
+                "and not opened, scanned, or repaired."
+            )
+            if is_direct_drive_conversion
             else f"Saved {filename}.\n\nThe disk contents were not opened, scanned, repaired, or converted.",
         )
         source = payload.get("source")
