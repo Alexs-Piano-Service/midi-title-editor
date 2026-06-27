@@ -212,11 +212,11 @@ output while the app is still running. The log now includes readable app events
 for major actions such as opening folders and images, reading floppies,
 saving, drag-and-drop imports, feedback, bug reports, warnings, and failures.
 
-Use `Help > Report a Bug...` to send a bug report. The dialog can include a
-recent section of the live console log along with app and operating-system
-details. Unexpected operation-failure dialogs may also offer `Report This
-Bug...`, which opens the same report form with the error details already filled
-in.
+Use `Help > Report a Bug...` to send a bug report. The dialog can include an
+optional sender email and a recent section of the live console log along with
+app and operating-system details. Unexpected operation-failure dialogs may also
+offer `Report This Bug...`, which opens the same report form with the error
+details already filled in.
 
 Use `Help > Send Feedback...` to send suggestions, workflow notes, or other
 general feedback through the same signed support channel.

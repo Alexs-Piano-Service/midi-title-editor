@@ -19730,6 +19730,7 @@ class MidiTitleWindow(QMainWindow):
 
     def _build_bug_report_payload(self, *, summary, description, contact, include_logs):
         report_id = uuid.uuid4().hex
+        sender_email = str(contact or "").strip()
         log_tail = ""
         total_log_chars = 0
         log_error = ""
@@ -19745,7 +19746,12 @@ class MidiTitleWindow(QMainWindow):
             "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "summary": str(summary or "").strip(),
             "description": str(description or "").strip(),
-            "contact": str(contact or "").strip(),
+            "contact": sender_email,
+            "email": sender_email,
+            "sender_email": sender_email,
+            "sender": {
+                "email": sender_email,
+            },
             "app": {
                 "name": APP_NAME,
                 "version": APP_VERSION,
@@ -19814,7 +19820,7 @@ class MidiTitleWindow(QMainWindow):
         if description:
             description_edit.setPlainText(str(description))
         contact_edit = QLineEdit(dialog)
-        contact_edit.setPlaceholderText(self._lt("Optional email or contact info"))
+        contact_edit.setPlaceholderText(self._lt("Optional email address"))
         if contact:
             contact_edit.setText(str(contact))
 
@@ -19822,7 +19828,7 @@ class MidiTitleWindow(QMainWindow):
         labels = [
             self._add_dialog_form_row(form_grid, 0, "Summary:", summary_edit),
             self._add_dialog_form_row(form_grid, 1, "Details:", description_edit),
-            self._add_dialog_form_row(form_grid, 2, "Contact:", contact_edit),
+            self._add_dialog_form_row(form_grid, 2, "Email (optional):", contact_edit),
         ]
         self._align_dialog_form_labels(labels)
         layout.addLayout(form_grid)
