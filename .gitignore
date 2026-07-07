@@ -29,7 +29,6 @@ aps_midi_prep_tool_app/soundfonts/*.sf3
 # Local AppImage build task
 .vscode/
 Makefile
-requirements-build.txt
 scripts/build_appimage.sh
 
 squashfs-root/

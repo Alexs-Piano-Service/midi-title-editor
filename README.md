@@ -51,6 +51,9 @@ before you write anything back.
 - Stages destructive or format-changing work until you choose `File > Save`,
   `File > Save As...`, `File > Save As ZIP...`, `File > Save As Image...`, or
   `Disk > Write Current Image to Floppy...`.
+- `File > Save As Image...` asks for output image type and disk size each time,
+  including from Image Mode, and can split or repack files into numbered images
+  when the selected disk size is too small.
 - Can write a `metadata_summary.txt` file on save with each saved MIDI file and
   its detected MIDI metadata.
 - Keeps save behavior in `File > Save Options`, including album subfolders,
@@ -126,12 +129,15 @@ does not affect `File > Save As Image...` or floppy writes.
 3. Drag MIDI or E-SEQ files into the table.
 4. In E-SEQ image mode, dropped MIDI files are staged as E-SEQ conversions.
 5. Edit titles and order as needed.
-6. Use `File > Save As Image...` and choose HFE output.
+6. Use `File > Save As Image...` and choose HFE output and the intended disk
+   size.
 
 Copy the finished HFE file to the USB stick prepared for the Nalbantov
 emulator. If you are preparing replacement USB media, keep the setup and
 configuration files from the original Nalbantov USB stick and use Nalbantov's
 instructions or software; formatting a blank stick by itself is not enough.
+HFE exports for IBM/Yamaha disk formats are written with Nalbantov/HxC-style
+IBM PC header metadata for better emulator compatibility.
 
 ### Convert MIDI Type 1 To Type 0
 

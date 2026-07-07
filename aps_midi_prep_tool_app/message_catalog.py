@@ -1628,6 +1628,7 @@ _BULGARIAN_TEXT_OVERRIDES = {
     "Disk size:": "Размер на диска:",
     "List all image formats": "Показване на всички формати на образи",
     "List all disk sizes": "Показване на всички размери на дискове",
+    "Convert E-SEQ files to MIDI after reading": "Конвертиране на E-SEQ файлове към MIDI след четене",
     "current image format": "текущ формат на образа",
     "current": "текущ",
     "image": "образ",
@@ -1860,8 +1861,8 @@ def translate_text(text, language_code=None, **kwargs):
         return tr(message_id, language_code, **kwargs)
     language = normalize_language_code(language_code)
     translations = COMMON_TEXT_TRANSLATIONS.get(source)
-    if translations:
-        return translations.get(language) or source
+    if translations and language in translations:
+        return translations[language]
     if source.endswith("..."):
         base = source[:-3]
         translations = COMMON_TEXT_TRANSLATIONS.get(base)

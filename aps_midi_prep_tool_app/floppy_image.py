@@ -383,6 +383,11 @@ DISK_FORMAT_TRACK_LAYOUTS = {
 
 RAW_IMAGE_EXTENSIONS = {"bin", "img", "ima", "vfd"}
 DIRECT_FLOPPY_IMAGE_EXTENSIONS = RAW_IMAGE_EXTENSIONS | {"hfe"}
+HFE_SIGNATURE = b"HXCPICFE"
+HFE_TRACK_ENCODING_OFFSET = 0x0B
+HFE_FLOPPY_INTERFACE_OFFSET = 0x10
+HFE_ENCODING_ISOIBM_MFM = 0x00
+HFE_INTERFACE_IBMPC = 0x01
 
 SUPPORTED_IMAGE_EXTENSIONS = {
     "a2r",
@@ -2137,7 +2142,34 @@ def _gw_convert(input_path, output_path, disk_format, cancel_callback=None, *, a
             capture_path=input_path,
             reason="sector_failure",
         )
+    _normalize_nalbantov_hfe_header(output_path, disk_format)
     return output
+
+
+def _normalize_nalbantov_hfe_header(output_path, disk_format):
+    if image_extension(output_path) != "hfe":
+        return False
+    if not _disk_format_key(disk_format).startswith("ibm."):
+        return False
+    try:
+        with open(output_path, "r+b") as handle:
+            header = bytearray(handle.read(32))
+            if len(header) <= HFE_FLOPPY_INTERFACE_OFFSET or header[:8] != HFE_SIGNATURE:
+                return False
+            changed = False
+            if header[HFE_TRACK_ENCODING_OFFSET] != HFE_ENCODING_ISOIBM_MFM:
+                header[HFE_TRACK_ENCODING_OFFSET] = HFE_ENCODING_ISOIBM_MFM
+                changed = True
+            if header[HFE_FLOPPY_INTERFACE_OFFSET] != HFE_INTERFACE_IBMPC:
+                header[HFE_FLOPPY_INTERFACE_OFFSET] = HFE_INTERFACE_IBMPC
+                changed = True
+            if not changed:
+                return False
+            handle.seek(0)
+            handle.write(header)
+            return True
+    except OSError as exc:
+        raise FloppyImageError(f"Could not update HFE compatibility header: {exc}") from exc
 
 
 def _parse_gw_track_values(set_spec):
@@ -2451,6 +2483,7 @@ def _gw_read_floppy(source, output_path, progress_callback=None, cancel_callback
             f"Greaseweazle read failed: {detail}. "
             "Check the selected drive, disk format, cable orientation, and that a readable disk is inserted."
         )
+    _normalize_nalbantov_hfe_header(output_path, source.disk_format)
     return _parse_gw_sector_map(output, source.disk_format)
 
 
@@ -7633,6 +7666,98 @@ class FloppyImageSession:
                 cancel_callback=cancel_callback,
             )
         finally:
+            if os.path.exists(modified_img):
+                os.remove(modified_img)
+
+    def export_to_images(
+        self,
+        output_path,
+        output_ext,
+        disk_format,
+        renames=None,
+        deletes=None,
+        additions=None,
+        replacements=None,
+        title_edits=None,
+        order_key_edits=None,
+        pianodir_metadata=None,
+        generate_pianodir=False,
+        eseq_variant=None,
+        eseq_directory_order=None,
+        delete_pianodir=False,
+        progress_callback=None,
+        cancel_callback=None,
+    ):
+        if not isinstance(disk_format, DiskFormat):
+            raise FloppyImageError("Invalid disk format for image export.")
+
+        modified_img = self.create_modified_image(
+            renames=renames,
+            deletes=deletes,
+            additions=additions,
+            replacements=replacements,
+            title_edits=title_edits,
+            order_key_edits=order_key_edits,
+            pianodir_metadata=pianodir_metadata,
+            generate_pianodir=generate_pianodir,
+            eseq_variant=eseq_variant,
+            eseq_directory_order=eseq_directory_order,
+            delete_pianodir=delete_pianodir,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+        )
+        extract_dir = tempfile.mkdtemp(prefix="aps_repack_image_", dir=self.temp_dir)
+        try:
+            if disk_format.size_bytes == self.disk_format.size_bytes:
+                self.write_image(
+                    modified_img,
+                    output_path,
+                    output_ext,
+                    progress_callback=progress_callback,
+                    cancel_callback=cancel_callback,
+                )
+                return [output_path]
+
+            listing = read_image_listing(modified_img)
+            file_specs = []
+            for index, entry in enumerate(listing.entries, start=1):
+                _raise_if_cancelled(cancel_callback)
+                if entry.directory:
+                    raise FloppyImageError(
+                        "Changing disk size for images with folders is not supported. "
+                        "Export to the same disk size, or save the files to a folder first."
+                    )
+                extracted_path = os.path.join(
+                    extract_dir,
+                    f"{index:04d}_{_clean_ascii_temp_filename(entry.name)}",
+                )
+                self._extract_from_image(
+                    modified_img,
+                    entry.path,
+                    extracted_path,
+                    cancel_callback=cancel_callback,
+                )
+                file_specs.append(
+                    {
+                        "host_path": extracted_path,
+                        "image_path": entry.path,
+                        "display_name": entry.path,
+                    }
+                )
+
+            reports = []
+            output_paths = create_floppy_images_from_files(
+                file_specs,
+                output_path,
+                output_ext,
+                disk_format,
+                progress_callback=progress_callback,
+                sector_report_callback=reports.append,
+            )
+            self.latest_gw_sector_reports = _gw_sector_reports(*reports)
+            return output_paths
+        finally:
+            shutil.rmtree(extract_dir, ignore_errors=True)
             if os.path.exists(modified_img):
                 os.remove(modified_img)
 

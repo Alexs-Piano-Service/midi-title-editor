@@ -5,6 +5,26 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
+## [Unreleased]
+
+### Changed
+
+- `File > Save As Image...` now asks for image type and disk size even when
+  already editing an image, and can repack the current image contents into the
+  newly selected disk size when needed.
+- The Read Floppy option `Convert E-SEQ files to MIDI after reading` now starts
+  unchecked for new users while still remembering the user's last accepted
+  choice.
+
+### Fixed
+
+- `File > Save As Image...` no longer skips the image-format and disk-size
+  prompt when used again while already in Image Mode.
+- HFE exports for IBM/Yamaha disk formats now normalize the HFE header metadata
+  used by Nalbantov/HxC-style emulators, avoiding `0xFF` unknown
+  encoding/interface values that could make some Disklaviers report
+  "Unformatted Disk" even when the virtual disk contained files.
+
 ## [0.6.10] - 2026-06-11
 
 ### Added

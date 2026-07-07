@@ -5020,6 +5020,7 @@ class MidiTitleWindow(QMainWindow):
     SETTING_READ_FLOPPY_GW_REVS = "read_floppy_gw_revs"
     SETTING_READ_FLOPPY_GW_RETRIES = "read_floppy_gw_retries"
     SETTING_READ_FLOPPY_CONVERT_TO_MIDI = "read_floppy_convert_to_midi"
+    DEFAULT_READ_FLOPPY_CONVERT_TO_MIDI = False
     SETTING_READ_FLOPPY_START_RECOVERY = "read_floppy_start_recovery"
     SETTING_READ_FLOPPY_TRIM_TITLES = "read_floppy_trim_titles"
     SETTING_RECOVERY_IMAGE_PATH = "disk_recovery_image_path"
@@ -14341,7 +14342,11 @@ class MidiTitleWindow(QMainWindow):
 
         convert_to_midi_checkbox = QCheckBox("Convert E-SEQ files to MIDI after reading")
         convert_to_midi_checkbox.setChecked(
-            self.settings.value(self.SETTING_READ_FLOPPY_CONVERT_TO_MIDI, False, type=bool)
+            self.settings.value(
+                self.SETTING_READ_FLOPPY_CONVERT_TO_MIDI,
+                self.DEFAULT_READ_FLOPPY_CONVERT_TO_MIDI,
+                type=bool,
+            )
         )
         convert_to_midi_checkbox.setToolTip(
             "After the floppy opens, queue detected Yamaha E-SEQ songs for Standard MIDI conversion."
@@ -20336,7 +20341,6 @@ class MidiTitleWindow(QMainWindow):
                 getattr(self.image_session.gw_source, "capture_output_ext", "") or ""
             ).lower().lstrip(".")
             default_ext = preferred_ext or "hfe"
-        filters, fallback_ext = output_filters(default_ext)
         if self.image_session.source_kind.startswith("floppy"):
             source_dir = os.path.expanduser("~")
             source_stem = "floppy_capture"
@@ -20350,20 +20354,17 @@ class MidiTitleWindow(QMainWindow):
             catalog_stem = ""
         source_dir = self._last_save_as_location(source_dir)
         default_suffix = "" if catalog_stem else "_edited"
-        default_path = os.path.join(source_dir, f"{source_stem}{default_suffix}.{default_ext or fallback_ext}")
-        output_path, selected_filter = QFileDialog.getSaveFileName(
-            self,
-            self._lt("Save As Image"),
-            default_path,
-            filters,
+        options = self._prompt_for_save_image_options(
+            default_ext=default_ext,
+            default_disk_format=self.image_session.disk_format,
+            default_basename=f"{source_stem}{default_suffix}",
+            default_dir=source_dir,
         )
-        if not output_path:
+        if options is None:
             return
 
+        output_path, selected_ext, disk_format = options
         self._reset_gw_sector_report_dedupe()
-        selected_ext = image_extension(output_path) or self._extension_from_filter(selected_filter) or fallback_ext
-        if not image_extension(output_path):
-            output_path = f"{output_path}.{selected_ext}"
 
         renames, deletes, additions, replacements, title_edits, delete_pianodir = self._collect_image_operations()
         order_key_edits = self._image_eseq_order_key_edits()
@@ -20380,11 +20381,13 @@ class MidiTitleWindow(QMainWindow):
             source=getattr(self.image_session, "source_name", ""),
             output=output_path,
             format=selected_ext,
+            disk_format=self._log_disk_format_label(disk_format),
         )
         try:
-            self.image_session.export_to(
+            output_paths = self.image_session.export_to_images(
                 output_path,
                 selected_ext,
+                disk_format,
                 renames=renames,
                 deletes=deletes,
                 additions=additions,
@@ -20401,27 +20404,49 @@ class MidiTitleWindow(QMainWindow):
             export_sector_reports = getattr(self.image_session, "latest_gw_sector_reports", ())
             if self.image_session.source_kind == "floppy_gw":
                 export_sector_reports = ()
+            if len(output_paths) != 1:
+                progressDialog.close()
+                self._remember_save_as_location(output_paths[0] if output_paths else output_path)
+                preview = "\n".join(os.path.basename(path) for path in output_paths[:10])
+                if len(output_paths) > 10:
+                    preview += f"\n...and {len(output_paths) - 10} more."
+                self._show_save_as_image_complete(
+                    "save_as_image.complete.created_multiple",
+                    count=len(output_paths),
+                    preview=preview,
+                )
+                self._show_greaseweazle_sector_reports(export_sector_reports)
+                self._log_event(
+                    "Image",
+                    "Save As Image completed",
+                    output=output_path,
+                    format=selected_ext,
+                    disk_format=self._log_disk_format_label(disk_format),
+                    images=len(output_paths),
+                )
+                return
             progress_callback(5, 9, "Opening saved floppy image...")
             session = FloppyImageSession.load(
-                output_path,
+                output_paths[0],
                 progress_callback=self._make_offset_progress_callback(progress_callback, 5),
             )
             listing = session.list_entries()
             progress_callback(9, 9, "Finalizing floppy export...")
             progressDialog.close()
             self._activate_disk_session(session, listing)
-            self._remember_save_as_location(output_path)
+            self._remember_save_as_location(output_paths[0])
             self._show_greaseweazle_sector_reports(export_sector_reports)
             self._show_save_as_image_complete(
                 "save_as_image.complete.saved_as",
-                filename=os.path.basename(output_path),
+                filename=os.path.basename(output_paths[0]),
             )
             self.status_label.setText(self._image_mode_summary())
             self._log_event(
                 "Image",
                 "Save As Image completed",
-                output=output_path,
+                output=output_paths[0],
                 format=selected_ext,
+                disk_format=self._log_disk_format_label(disk_format),
                 files=len(getattr(listing, "entries", ()) or ()),
             )
         except Exception as exc:
@@ -20448,7 +20473,14 @@ class MidiTitleWindow(QMainWindow):
             if disk_format.key in {"ibm.720", "ibm.1440"}
         ]
 
-    def _prompt_for_save_image_options(self):
+    def _prompt_for_save_image_options(
+        self,
+        *,
+        default_ext="hfe",
+        default_disk_format=None,
+        default_basename="midi_floppy",
+        default_dir="",
+    ):
         dialog = QDialog(self)
         apply_window_icon(dialog)
         dialog.setWindowTitle("Save As Image")
@@ -20485,9 +20517,20 @@ class MidiTitleWindow(QMainWindow):
         buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
         dialog_layout.addWidget(buttons)
 
+        default_ext = str(default_ext or "hfe").lower().lstrip(".")
+        default_disk_key = getattr(default_disk_format, "key", None) or "ibm.720"
+        if default_ext not in {ext for ext, _label in self._basic_image_export_types()}:
+            list_all_types_checkbox.setChecked(True)
+        if default_disk_key not in {disk_format.key for disk_format in self._basic_disk_export_formats()}:
+            list_all_disks_checkbox.setChecked(True)
+
         def refresh_type_combo():
-            current_ext = type_combo.currentData()
-            options = PREFERRED_OUTPUT_EXTENSIONS if list_all_types_checkbox.isChecked() else self._basic_image_export_types()
+            current_ext = type_combo.currentData() or default_ext
+            options = (
+                PREFERRED_OUTPUT_EXTENSIONS
+                if list_all_types_checkbox.isChecked()
+                else self._basic_image_export_types()
+            )
             type_combo.clear()
             selected_index = 0
             for index, (ext, label) in enumerate(options):
@@ -20497,7 +20540,11 @@ class MidiTitleWindow(QMainWindow):
             type_combo.setCurrentIndex(selected_index)
 
         def refresh_disk_combo():
-            current_key = disk_combo.currentData().key if disk_combo.currentData() is not None else "ibm.720"
+            current_key = (
+                disk_combo.currentData().key
+                if disk_combo.currentData() is not None
+                else default_disk_key
+            )
             options = DISK_FORMATS if list_all_disks_checkbox.isChecked() else self._basic_disk_export_formats()
             disk_combo.clear()
             selected_index = 0
@@ -20524,7 +20571,11 @@ class MidiTitleWindow(QMainWindow):
             return None
 
         output_label = type_combo.currentText() or f"{output_ext.upper()} image"
-        default_path = self._default_save_as_path(f"midi_floppy.{output_ext}")
+        default_filename = f"{default_basename or 'midi_floppy'}.{output_ext}"
+        if default_dir:
+            default_path = os.path.join(self._last_save_as_location(default_dir), default_filename)
+        else:
+            default_path = self._default_save_as_path(default_filename)
         output_path, _ = QFileDialog.getSaveFileName(
             self,
             self._lt("Save As Image"),
