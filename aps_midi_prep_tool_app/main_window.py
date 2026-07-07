@@ -10194,7 +10194,7 @@ class MidiTitleWindow(QMainWindow):
             or self._eseq_order_changed()
             or self._image_pianodir_metadata_changed()
             or self._image_directory_filename_mismatch()
-            or self.pendingGeneratePianodir
+            or self._should_generate_pianodir()
             or self.pendingDeletePianodir
             or (self.image_session and self.image_session.repair_changed)
         )
@@ -10621,7 +10621,7 @@ class MidiTitleWindow(QMainWindow):
     def _image_pianodir_metadata_for_save(self):
         if (
             not self.is_image_mode()
-            or not self.imageHasPianodir
+            or not (self.imageHasPianodir or self._should_generate_pianodir())
             or self.pendingDeletePianodir
             or self._is_clavinova_eseq_variant(self.imageEseqVariant)
         ):
@@ -10634,7 +10634,7 @@ class MidiTitleWindow(QMainWindow):
     def _regular_pianodir_metadata_for_save(self):
         if (
             not self.is_local_eseq_mode()
-            or not (self.regularHasPianodir or self.pendingGeneratePianodir)
+            or not (self.regularHasPianodir or self.pendingGeneratePianodir or self._should_generate_pianodir())
             or self._is_clavinova_eseq_variant(self.regularEseqVariant)
         ):
             return None
@@ -10650,9 +10650,9 @@ class MidiTitleWindow(QMainWindow):
             return (
                 self.imageEseqMode
                 and not self.pendingDeletePianodir
-                and (self.imageHasPianodir or self.pendingGeneratePianodir)
+                and (self.imageHasPianodir or self._should_generate_pianodir())
             )
-        return self.is_local_eseq_mode() and (self.regularHasPianodir or self.pendingGeneratePianodir)
+        return self.is_local_eseq_mode() and (self.regularHasPianodir or self._should_generate_pianodir())
 
     def _album_subfolder_metadata_available(self):
         return (
@@ -11670,10 +11670,10 @@ class MidiTitleWindow(QMainWindow):
         is_missing = self.regularEseqMode and not is_present
         refresh_on_save = self._should_generate_pianodir()
         title_text = "Present - will refresh on save" if (is_present and refresh_on_save) else ("Present" if is_present else "")
-        if is_missing and self.pendingGeneratePianodir:
+        if is_missing and refresh_on_save:
             title_text = "Missing - will generate on save"
         elif is_missing:
-            title_text = "Missing - click to generate"
+            title_text = "Missing - add E-SEQ files to generate"
 
         row_items[0].setText("")
         row_items[0].setToolTip(f"{directory_name} is managed automatically.")
@@ -11683,8 +11683,10 @@ class MidiTitleWindow(QMainWindow):
         row_items[3].setText(directory_name)
         row_items[3].setToolTip("Directory file for Yamaha E-SEQ folders.")
         row_items[4].setText(title_text)
-        if is_missing:
-            row_items[4].setToolTip(f"Click to offer {directory_name} generation.")
+        if is_missing and refresh_on_save:
+            row_items[4].setToolTip(f"{directory_name} will be generated automatically on save.")
+        elif is_missing:
+            row_items[4].setToolTip(f"{directory_name} will be generated automatically on save after E-SEQ files are listed.")
         elif refresh_on_save:
             row_items[4].setToolTip(f"{directory_name} will be refreshed on save because related E-SEQ metadata has changed.")
         else:
@@ -13210,10 +13212,10 @@ class MidiTitleWindow(QMainWindow):
         delete_text = ""
         refresh_on_save = self._should_generate_pianodir()
         title_text = "Present - will refresh on save" if (is_present and refresh_on_save) else ("Present" if is_present else "")
-        if is_missing and self.pendingGeneratePianodir:
+        if is_missing and refresh_on_save:
             title_text = "Missing - will generate on save"
         elif is_missing:
-            title_text = "Missing - click to generate"
+            title_text = "Missing - add E-SEQ files to generate"
 
         row_items[0].setText(delete_text)
         row_items[0].setToolTip(f"{directory_name} is managed automatically.")
@@ -13223,8 +13225,10 @@ class MidiTitleWindow(QMainWindow):
         row_items[3].setText(directory_name)
         row_items[3].setToolTip("Directory file for Yamaha E-SEQ disks.")
         row_items[4].setText(title_text)
-        if is_missing:
-            row_items[4].setToolTip(f"Click to offer {directory_name} generation.")
+        if is_missing and refresh_on_save:
+            row_items[4].setToolTip(f"{directory_name} will be generated automatically on save.")
+        elif is_missing:
+            row_items[4].setToolTip(f"{directory_name} will be generated automatically on save after E-SEQ files are listed.")
         elif refresh_on_save:
             row_items[4].setToolTip(f"{directory_name} will be refreshed on save because related E-SEQ metadata has changed.")
         else:
@@ -18160,21 +18164,20 @@ class MidiTitleWindow(QMainWindow):
             eseq_mode = self.imageEseqMode
             has_pianodir = self.imageHasPianodir
             pianodir_populated = self.imagePianodirPopulated
-            refresh_callback = self._refresh_pianodir_row
             directory_name = self._eseq_directory_filename(self.imageEseqVariant)
         elif self.is_local_eseq_mode():
             eseq_mode = self.regularEseqMode
             has_pianodir = self.regularHasPianodir
             pianodir_populated = self.regularPianodirPopulated
-            refresh_callback = self._refresh_regular_pianodir_row
             directory_name = self._eseq_directory_filename(self.regularEseqVariant)
         else:
             return
 
         if not eseq_mode:
             return
+        refresh_on_save = self._should_generate_pianodir()
         if has_pianodir and pianodir_populated:
-            if self._should_generate_pianodir():
+            if refresh_on_save:
                 message = f"{directory_name} is present and will be refreshed on save."
             else:
                 message = f"{directory_name} is present and will be left unchanged unless related E-SEQ data changes."
@@ -18184,59 +18187,62 @@ class MidiTitleWindow(QMainWindow):
                 message,
             )
             return
-        if self.pendingGeneratePianodir:
-            QMessageBox.information(
-                self,
-                directory_name,
-                f"{directory_name} is missing and will be generated on save.",
-            )
-            return
-
-        reply = QMessageBox.question(
+        if refresh_on_save:
+            message = f"{directory_name} is missing and will be generated automatically on save."
+        else:
+            message = f"{directory_name} is missing. Add E-SEQ files and it will be generated automatically on save."
+        QMessageBox.information(
             self,
-            f"Generate {directory_name}",
-            f"Generate {directory_name} for these Yamaha E-SEQ files on save?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
+            directory_name,
+            message,
         )
-        if reply != QMessageBox.Yes:
-            return
-
-        self.pendingGeneratePianodir = True
-        refresh_callback()
-        self.status_label.setText(f"{directory_name} will be generated on save.")
 
     def _ensure_pianodir_generation_for_save(self):
         if self.is_image_mode():
             eseq_mode = self.imageEseqMode
             has_pianodir = self.imageHasPianodir
+            pianodir_populated = self.imagePianodirPopulated
             refresh_callback = self._refresh_pianodir_row
             directory_name = self._eseq_directory_filename(self.imageEseqVariant)
         elif self.is_local_eseq_mode():
             eseq_mode = self.regularEseqMode
             has_pianodir = self.regularHasPianodir
+            pianodir_populated = self.regularPianodirPopulated
             refresh_callback = self._refresh_regular_pianodir_row
             directory_name = self._eseq_directory_filename(self.regularEseqVariant)
         else:
             return True
 
-        if not eseq_mode or has_pianodir or self.pendingGeneratePianodir:
+        if not eseq_mode or (has_pianodir and pianodir_populated) or self.pendingGeneratePianodir:
             return True
 
-        reply = QMessageBox.question(
-            self,
-            f"Generate {directory_name}",
-            f"These files look like Yamaha E-SEQ files, but {directory_name} is missing.\n\n"
-            f"Generate {directory_name} while saving?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        if reply == QMessageBox.Yes:
+        if self._should_generate_pianodir():
             self.pendingGeneratePianodir = True
             refresh_callback()
+            self.status_label.setText(f"{directory_name} will be generated on save.")
         return True
 
+    def _pianodir_can_be_generated_from_current_rows(self):
+        if self.is_image_mode():
+            return bool(self._image_eseq_rows())
+        if self.is_local_eseq_mode():
+            return bool(self._regular_eseq_rows())
+        return False
+
+    def _pianodir_missing_or_empty(self):
+        if self.is_image_mode():
+            return (
+                self.imageEseqMode
+                and not self.pendingDeletePianodir
+                and not (self.imageHasPianodir and self.imagePianodirPopulated)
+            )
+        if self.is_local_eseq_mode():
+            return self.regularEseqMode and not (self.regularHasPianodir and self.regularPianodirPopulated)
+        return False
+
     def _should_generate_pianodir(self, *, for_export=False):
+        if self._pianodir_missing_or_empty() and self._pianodir_can_be_generated_from_current_rows():
+            return True
         if self.is_local_eseq_mode():
             if not self.regularEseqMode:
                 return False
@@ -18756,7 +18762,7 @@ class MidiTitleWindow(QMainWindow):
             new_size = allocated_size(os.path.getsize(host_path), cluster_size)
             replacement_delta += new_size - old_size
 
-        if self.imageEseqMode and not self.imageHasPianodir and self.pendingGeneratePianodir:
+        if self.imageEseqMode and not self.imageHasPianodir and self._should_generate_pianodir():
             used += allocated_size(self._generated_eseq_directory_size(), cluster_size)
 
         return free_space + freed - used - replacement_delta
@@ -18785,7 +18791,7 @@ class MidiTitleWindow(QMainWindow):
             if os.path.isfile(host_path):
                 used += allocated_size(os.path.getsize(host_path), cluster_size)
 
-        if self.imageEseqMode and not self.imageHasPianodir and self.pendingGeneratePianodir:
+        if self.imageEseqMode and not self.imageHasPianodir and self._should_generate_pianodir():
             used += allocated_size(self._generated_eseq_directory_size(), cluster_size)
 
         return max(0, used)
@@ -20650,7 +20656,12 @@ class MidiTitleWindow(QMainWindow):
                     if self.regularEseqVariant == ESEQ_VARIANT_CLAVINOVA:
                         handle.write(build_music_dir_bytes(track_entries))
                     else:
-                        handle.write(build_pianodir_bytes(track_entries))
+                        handle.write(
+                            build_pianodir_bytes(
+                                track_entries,
+                                metadata=self._regular_pianodir_metadata_for_save(),
+                            )
+                        )
                 file_specs.append(
                     {
                         "host_path": generated_path,
