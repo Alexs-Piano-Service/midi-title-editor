@@ -1570,7 +1570,6 @@ _BULGARIAN_TEXT_OVERRIDES = {
     "FullPath": "Пълен път",
     "No Files": "Няма файлове",
     "No Changes": "Няма промени",
-    "No folder selected": "Няма избрана папка",
     "No Image Selected": "Няма избран образ",
     "Image Not Found": "Образът не е намерен",
     "Open Floppy Image": "Отваряне на образ на дискета",
@@ -1781,6 +1780,18 @@ COMMON_TEXT_TRANSLATIONS.update(
         "The SoundFont archive could not be unpacked.": {"es": "No se pudo descomprimir el archivo SoundFont.", "fr": "L'archive SoundFont n'a pas pu être décompressée.", "de": "Das SoundFont-Archiv konnte nicht entpackt werden.", "it": "Non è stato possibile estrarre l'archivio SoundFont.", "pt-BR": "Não foi possível extrair o arquivo SoundFont.", "nl": "Het SoundFont-archief kon niet worden uitgepakt.", "pl": "Nie można było rozpakować archiwum SoundFont.", "ja": "SoundFont アーカイブを展開できませんでした。", "ko": "SoundFont 압축 파일을 풀 수 없습니다.", "zh-Hans": "无法解包 SoundFont 压缩包。", "bg": "Архивът със SoundFont не можа да бъде разопакован."},
     }
 )
+
+
+MESSAGES.update({
+    "update.available.title": {"en": "Update Available", "es": "Actualización disponible", "fr": "Mise à jour disponible", "de": "Update verfügbar", "it": "Aggiornamento disponibile", "pt-BR": "Atualização disponível", "bg": "Налично е обновление", "nl": "Update beschikbaar", "pl": "Dostępna aktualizacja", "ja": "更新があります", "ko": "업데이트 사용 가능", "zh-Hans": "有可用更新"},
+    "update.available.message": {"en": "APS MIDI Prep Tool v{version} is available.", "es": "APS MIDI Prep Tool v{version} está disponible.", "fr": "APS MIDI Prep Tool v{version} est disponible.", "de": "APS MIDI Prep Tool v{version} ist verfügbar.", "it": "È disponibile APS MIDI Prep Tool v{version}.", "pt-BR": "APS MIDI Prep Tool v{version} está disponível.", "bg": "Наличен е APS MIDI Prep Tool v{version}.", "nl": "APS MIDI Prep Tool v{version} is beschikbaar.", "pl": "Dostępny jest APS MIDI Prep Tool v{version}.", "ja": "APS MIDI Prep Tool v{version} を利用できます。", "ko": "APS MIDI Prep Tool v{version}을(를) 사용할 수 있습니다.", "zh-Hans": "APS MIDI Prep Tool v{version} 已发布。"},
+    "update.current_version": {"en": "You are running v{version}.", "es": "Estás usando la versión {version}.", "fr": "Vous utilisez la version {version}.", "de": "Sie verwenden Version {version}.", "it": "Stai usando la versione {version}.", "pt-BR": "Você está usando a versão {version}.", "bg": "Използвате версия {version}.", "nl": "U gebruikt versie {version}.", "pl": "Używasz wersji {version}.", "ja": "現在のバージョンは {version} です。", "ko": "현재 버전은 {version}입니다.", "zh-Hans": "您当前使用的是 {version} 版。"},
+    "update.release_notes": {"en": "Release notes: {url}", "es": "Notas de la versión: {url}", "fr": "Notes de version : {url}", "de": "Versionshinweise: {url}", "it": "Note di rilascio: {url}", "pt-BR": "Notas da versão: {url}", "bg": "Бележки по версията: {url}", "nl": "Uitgaveopmerkingen: {url}", "pl": "Informacje o wydaniu: {url}", "ja": "リリースノート: {url}", "ko": "릴리스 정보: {url}", "zh-Hans": "发行说明：{url}"},
+    "update.startup_reminder_help": {"en": "You can turn off startup update reminders from this notice or the Help menu.", "es": "Puedes desactivar los avisos de actualización al iniciar desde este mensaje o el menú Ayuda.", "fr": "Vous pouvez désactiver les rappels au démarrage depuis cet avis ou le menu Aide.", "de": "Sie können Update-Hinweise beim Start hier oder im Hilfe-Menü deaktivieren.", "it": "Puoi disattivare i promemoria all'avvio da questo avviso o dal menu Aiuto.", "pt-BR": "Você pode desativar os lembretes ao iniciar neste aviso ou no menu Ajuda.", "bg": "Можете да изключите напомнянията при стартиране от това известие или менюто Помощ.", "nl": "U kunt updateherinneringen bij het opstarten hier of via het Help-menu uitschakelen.", "pl": "Przypomnienia przy uruchamianiu można wyłączyć tutaj lub w menu Pomoc.", "ja": "起動時の更新通知は、この画面またはヘルプメニューから無効にできます。", "ko": "시작 시 업데이트 알림은 이 안내 또는 도움말 메뉴에서 끌 수 있습니다.", "zh-Hans": "您可以在此通知或“帮助”菜单中关闭启动时更新提醒。"},
+    "update.open_download": {"en": "Open Download Page", "es": "Abrir página de descarga", "fr": "Ouvrir la page de téléchargement", "de": "Download-Seite öffnen", "it": "Apri pagina di download", "pt-BR": "Abrir página de download", "bg": "Отваряне на страницата за изтегляне", "nl": "Downloadpagina openen", "pl": "Otwórz stronę pobierania", "ja": "ダウンロードページを開く", "ko": "다운로드 페이지 열기", "zh-Hans": "打开下载页面"},
+    "update.remind_later": {"en": "Remind Me Later", "es": "Recordármelo más tarde", "fr": "Me le rappeler plus tard", "de": "Später erinnern", "it": "Ricordamelo più tardi", "pt-BR": "Lembrar mais tarde", "bg": "Напомни ми по-късно", "nl": "Later herinneren", "pl": "Przypomnij później", "ja": "後で通知", "ko": "나중에 알림", "zh-Hans": "稍后提醒"},
+    "update.turn_off_reminders": {"en": "Turn Off Reminders", "es": "Desactivar recordatorios", "fr": "Désactiver les rappels", "de": "Erinnerungen deaktivieren", "it": "Disattiva promemoria", "pt-BR": "Desativar lembretes", "bg": "Изключване на напомнянията", "nl": "Herinneringen uitschakelen", "pl": "Wyłącz przypomnienia", "ja": "通知を無効にする", "ko": "알림 끄기", "zh-Hans": "关闭提醒"},
+})
 
 
 def _apply_language_overrides(language, message_overrides, text_overrides):

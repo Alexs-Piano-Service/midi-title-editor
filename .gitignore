@@ -26,9 +26,8 @@ aps_midi_prep_tool_app/soundfonts/*.sf2
 aps_midi_prep_tool_app/soundfonts/*.sf3
 !aps_midi_prep_tool_app/soundfonts/README.md
 
-# Local AppImage build task
-.vscode/
-Makefile
-scripts/build_appimage.sh
+# Keep the shared build task while leaving other editor settings local.
+.vscode/*
+!.vscode/tasks.json
 
 squashfs-root/

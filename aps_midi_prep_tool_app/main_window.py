@@ -2703,6 +2703,125 @@ class MidiPreviewRenderWorker(QThread):
                     pass
 
 
+def _midi_output_ports():
+    """Return system MIDI outputs without making the optional backend mandatory."""
+    try:
+        import rtmidi
+        output = rtmidi.MidiOut()
+        ports = list(output.get_ports())
+        del output
+        return ports, ""
+    except Exception as exc:
+        return [], str(exc)
+
+
+def _midi_output_events(midi_bytes):
+    """Convert an SMF into timestamped channel messages."""
+    _header_end, _format_type, _declared_tracks, chunks = _parse_midi_chunks(midi_bytes)
+    division = int.from_bytes(midi_bytes[12:14], "big")
+    events = []
+    tempos = [(0, 500000)]
+    sequence = 0
+    for chunk in chunks:
+        if chunk["id"] != b"MTrk":
+            continue
+        track_data = midi_bytes[chunk["data_start"]:chunk["data_end"]]
+        track_events, _end_tick = _parse_track_events(track_data)
+        for tick, order, raw in track_events:
+            sequence += 1
+            if raw[:2] == b"\xFF\x51":
+                _meta_type, payload = _midi_meta_payload(raw)
+                if len(payload) == 3:
+                    tempos.append((tick, int.from_bytes(payload, "big")))
+            elif raw and 0x80 <= raw[0] <= 0xEF:
+                events.append((tick, order, sequence, bytes(raw)))
+
+    events.sort(key=lambda event: (event[0], event[1], event[2]))
+    if division & 0x8000:
+        frames_per_second = 256 - ((division >> 8) & 0xFF)
+        ticks_per_frame = division & 0xFF
+        seconds_per_tick = 1.0 / max(1, frames_per_second * ticks_per_frame)
+        return [(tick * seconds_per_tick, raw) for tick, _order, _seq, raw in events]
+
+    ticks_per_quarter = max(1, division)
+    tempo_by_tick = {int(tick): max(1, int(tempo)) for tick, tempo in tempos}
+    tempo_points = sorted(tempo_by_tick.items())
+    timed_events = []
+    elapsed = 0.0
+    previous_tick = 0
+    tempo = 500000
+    tempo_index = 0
+    for tick, _order, _seq, raw in events:
+        while tempo_index < len(tempo_points) and tempo_points[tempo_index][0] <= tick:
+            tempo_tick, next_tempo = tempo_points[tempo_index]
+            elapsed += (tempo_tick - previous_tick) * tempo / (ticks_per_quarter * 1_000_000.0)
+            previous_tick = tempo_tick
+            tempo = next_tempo
+            tempo_index += 1
+        seconds = elapsed + (tick - previous_tick) * tempo / (ticks_per_quarter * 1_000_000.0)
+        timed_events.append((seconds, raw))
+    return timed_events
+
+
+class MidiOutputWorker(QThread):
+    playbackStarted = Signal(int, float)
+    playbackFailed = Signal(str)
+
+    def __init__(self, midi_bytes, port_index, start_seconds=0.0, parent=None):
+        super().__init__(parent)
+        self.midi_bytes = bytes(midi_bytes or b"")
+        self.port_index = int(port_index)
+        self.start_seconds = max(0.0, float(start_seconds or 0.0))
+
+    def stop(self):
+        self.requestInterruption()
+
+    @staticmethod
+    def _silence(output):
+        for channel in range(16):
+            output.send_message([0xB0 | channel, 64, 0])
+            output.send_message([0xB0 | channel, 123, 0])
+
+    def run(self):
+        output = None
+        try:
+            import rtmidi
+            events = _midi_output_events(self.midi_bytes)
+            output = rtmidi.MidiOut()
+            ports = output.get_ports()
+            if self.port_index < 0 or self.port_index >= len(ports):
+                raise RuntimeError("The selected MIDI output is no longer available.")
+            output.open_port(self.port_index)
+            for seconds, raw in events:
+                if seconds >= self.start_seconds:
+                    break
+                if (raw[0] & 0xF0) not in (0x80, 0x90, 0xA0):
+                    output.send_message(list(raw))
+            started_at = time.monotonic()
+            self.playbackStarted.emit(int(self.start_seconds * 1000), started_at)
+            for seconds, raw in events:
+                if seconds < self.start_seconds:
+                    continue
+                target = seconds - self.start_seconds
+                while not self.isInterruptionRequested():
+                    remaining = target - (time.monotonic() - started_at)
+                    if remaining <= 0:
+                        break
+                    self.msleep(max(1, min(10, int(remaining * 1000))))
+                if self.isInterruptionRequested():
+                    break
+                output.send_message(list(raw))
+        except Exception as exc:
+            self.playbackFailed.emit(str(exc))
+        finally:
+            if output is not None:
+                try:
+                    self._silence(output)
+                    output.close_port()
+                except Exception:
+                    pass
+
+
 class SoundFontCatalogWorker(QThread):
     catalogLoaded = Signal(object)
     catalogFailed = Signal(str)
@@ -4061,10 +4180,12 @@ class FileInspectionDialog(QDialog):
         self.channel_levels = {channel: 100 for channel in range(1, 17)}
         self.preview_audio_path = ""
         self.preview_render_worker = None
+        self.midi_output_worker = None
         self.preview_engine_label = ""
         self._position_slider_dragging = False
         self._playback_clock_position_ms = 0
         self._playback_clock_started_at = 0.0
+        self._midi_playback_clock_active = False
         self._closing = False
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
@@ -4200,6 +4321,16 @@ class FileInspectionDialog(QDialog):
         soundfont_row.addWidget(self.soundfont_button)
         right_layout.addLayout(soundfont_row)
 
+        output_row = QHBoxLayout()
+        self.output_label = QLabel(t("Playback output:"), self)
+        self.output_combo = QComboBox(self)
+        self.output_combo.setMinimumWidth(240)
+        self.refresh_outputs_button = QPushButton(t("Refresh"), self)
+        output_row.addWidget(self.output_label)
+        output_row.addWidget(self.output_combo, stretch=1)
+        output_row.addWidget(self.refresh_outputs_button)
+        right_layout.addLayout(output_row)
+
         controls = QHBoxLayout()
         self.play_button = QPushButton(t("Play"), self)
         self.stop_button = QPushButton(t("Stop"), self)
@@ -4248,6 +4379,8 @@ class FileInspectionDialog(QDialog):
         self.play_button.clicked.connect(self._play_current_file)
         self.stop_button.clicked.connect(self._stop_playback)
         self.soundfont_button.clicked.connect(self.show_soundfont_manager)
+        self.refresh_outputs_button.clicked.connect(self.refresh_midi_outputs)
+        self.output_combo.currentIndexChanged.connect(self._on_output_changed)
         self.soundfont_combo.currentIndexChanged.connect(self._on_soundfont_changed)
         self.player.positionChanged.connect(self._on_player_position_changed)
         self.player.durationChanged.connect(self._on_player_duration_changed)
@@ -4261,6 +4394,7 @@ class FileInspectionDialog(QDialog):
         self.position_slider.valueChanged.connect(self._on_position_slider_changed)
         self.piano_roll.seekRequested.connect(self._seek_to_seconds)
         close_button.clicked.connect(self.close)
+        self.refresh_midi_outputs()
         self.refresh_soundfonts()
         if self.file_tree.topLevelItemCount():
             self.file_tree.setCurrentItem(initial_tree_item or self.file_tree.topLevelItem(0))
@@ -4348,6 +4482,38 @@ class FileInspectionDialog(QDialog):
             self._clear_preview_audio()
             self.preview_progress_label.setVisible(False)
             self.preview_progress_bar.setVisible(False)
+
+    def refresh_midi_outputs(self):
+        previous = self.output_combo.currentData() if self.output_combo.count() else ("audio", -1)
+        ports, error = _midi_output_ports()
+        self.output_combo.blockSignals(True)
+        self.output_combo.clear()
+        self.output_combo.addItem(self.t("Audio preview"), ("audio", -1))
+        selected = 0
+        for port_index, name in enumerate(ports):
+            self.output_combo.addItem(name, ("midi", port_index))
+            if previous == ("midi", port_index):
+                selected = self.output_combo.count() - 1
+        self.output_combo.setCurrentIndex(selected)
+        self.output_combo.blockSignals(False)
+        tooltip = (
+            self.t("USB MIDI output support is unavailable. Install the python-rtmidi package.")
+            if error else
+            self.t("Play through the audio preview or send MIDI directly to a connected USB MIDI adapter.")
+        )
+        self.output_combo.setToolTip(tooltip)
+        self._on_output_changed()
+
+    def _using_midi_output(self):
+        data = self.output_combo.currentData()
+        return isinstance(data, tuple) and data[0] == "midi"
+
+    def _on_output_changed(self, _index=None):
+        using_midi = self._using_midi_output()
+        for widget in (self.soundfont_label, self.soundfont_combo, self.soundfont_button,
+                       self.volume_label, self.volume_slider, self.volume_value_label):
+            widget.setVisible(not using_midi)
+        self._stop_playback()
 
     def refresh_soundfonts(self):
         current_path = self.soundfont_combo.currentData()
@@ -4554,6 +4720,9 @@ class FileInspectionDialog(QDialog):
     def _play_current_file(self):
         if not self.visible_notes or self.preview_render_worker is not None:
             return
+        if self._using_midi_output():
+            self._start_midi_output_playback()
+            return
         if self.preview_audio_path and os.path.exists(self.preview_audio_path):
             self._start_preview_playback()
             return
@@ -4577,6 +4746,77 @@ class FileInspectionDialog(QDialog):
         self._set_preview_rendering(True)
         self._on_preview_render_progress(0, 100, "Preparing preview...")
         worker.start()
+
+    def _start_midi_output_playback(self):
+        if self.midi_output_worker is not None:
+            return
+        data = self.output_combo.currentData()
+        if not isinstance(data, tuple) or data[0] != "midi":
+            return
+        try:
+            midi_bytes = self._filtered_midi_bytes_for_preview()
+        except Exception as exc:
+            self._on_midi_output_failed(str(exc))
+            return
+        worker = MidiOutputWorker(
+            midi_bytes,
+            data[1],
+            start_seconds=self._slider_seconds(),
+            parent=self,
+        )
+        worker.playbackStarted.connect(
+            lambda position_ms, started_at, active_worker=worker: self._on_midi_output_started(
+                active_worker,
+                position_ms,
+                started_at,
+            )
+        )
+        worker.playbackFailed.connect(self._on_midi_output_failed)
+        worker.finished.connect(self._on_midi_output_finished)
+        self.midi_output_worker = worker
+        self._midi_playback_clock_active = False
+        self.play_button.setEnabled(False)
+        self.output_combo.setEnabled(False)
+        self.refresh_outputs_button.setEnabled(False)
+        worker.start()
+
+    def _on_midi_output_started(self, worker, position_ms, started_at):
+        if worker is not self.midi_output_worker or self._closing:
+            return
+        self._midi_playback_clock_active = True
+        self._sync_playback_clock(position_ms, started_at=started_at)
+        self._set_playback_position_display(self._smoothed_playback_position_ms())
+        if not self.playback_timer.isActive():
+            self.playback_timer.start()
+
+    def _on_midi_output_failed(self, message):
+        if self._midi_playback_clock_active:
+            position_ms = self._smoothed_playback_position_ms()
+            self._midi_playback_clock_active = False
+            self.playback_timer.stop()
+            self._set_playback_position_display(position_ms)
+        QMessageBox.warning(
+            self,
+            self.t("MIDI Output Failed"),
+            f"{self.t('The MIDI file could not be sent to the selected output.')}\n\n{message}",
+        )
+
+    def _on_midi_output_finished(self):
+        worker = self.midi_output_worker
+        final_position_ms = None
+        if self._midi_playback_clock_active:
+            final_position_ms = self._smoothed_playback_position_ms()
+        self._midi_playback_clock_active = False
+        if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            self.playback_timer.stop()
+        self.midi_output_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if final_position_ms is not None:
+            self._set_playback_position_display(final_position_ms)
+        self.output_combo.setEnabled(True)
+        self.refresh_outputs_button.setEnabled(True)
+        self.play_button.setEnabled(bool(self.visible_notes) and self.preview_render_worker is None)
 
     def _on_preview_render_progress(self, step, total, message):
         self.preview_progress_label.setVisible(True)
@@ -4637,6 +4877,10 @@ class FileInspectionDialog(QDialog):
 
     def _seek_to_seconds(self, seconds):
         seconds = max(0.0, min(float(seconds or 0.0), max(0.0, self.current_duration)))
+        if self.midi_output_worker is not None:
+            self._midi_playback_clock_active = False
+            self.playback_timer.stop()
+            self.midi_output_worker.stop()
         maximum = max(1, self.position_slider.maximum())
         value = int((seconds / max(0.1, self.current_duration)) * maximum) if self.current_duration > 0 else 0
         self.position_slider.blockSignals(True)
@@ -4666,6 +4910,8 @@ class FileInspectionDialog(QDialog):
             self._sync_playback_clock(position_ms)
 
     def _on_player_position_changed(self, position_ms):
+        if self._midi_playback_clock_active:
+            return
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             if abs(int(position_ms or 0) - self._smoothed_playback_position_ms()) > 180:
                 self._sync_playback_clock(position_ms)
@@ -4673,15 +4919,23 @@ class FileInspectionDialog(QDialog):
         self._sync_playback_clock(position_ms)
         self._set_playback_position_display(position_ms)
 
-    def _sync_playback_clock(self, position_ms=None):
+    def _sync_playback_clock(self, position_ms=None, *, started_at=None):
         if position_ms is None:
             position_ms = self.player.position()
         self._playback_clock_position_ms = max(0, int(position_ms or 0))
-        self._playback_clock_started_at = time.monotonic()
+        self._playback_clock_started_at = (
+            time.monotonic() if started_at is None else float(started_at)
+        )
+
+    def _smooth_playback_is_active(self):
+        return (
+            self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            or self._midi_playback_clock_active
+        )
 
     def _smoothed_playback_position_ms(self):
         position_ms = self._playback_clock_position_ms
-        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+        if self._smooth_playback_is_active():
             position_ms += int((time.monotonic() - self._playback_clock_started_at) * 1000)
         duration_ms = self.player.duration()
         if duration_ms <= 0:
@@ -4689,6 +4943,9 @@ class FileInspectionDialog(QDialog):
         return max(0, min(max(0, duration_ms), position_ms))
 
     def _refresh_playback_position(self):
+        if self._midi_playback_clock_active:
+            self._set_playback_position_display(self._smoothed_playback_position_ms())
+            return
         if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
             self.playback_timer.stop()
             self._set_playback_position_display(self.player.position())
@@ -4696,6 +4953,8 @@ class FileInspectionDialog(QDialog):
         self._set_playback_position_display(self._smoothed_playback_position_ms())
 
     def _on_player_playback_state_changed(self, state):
+        if self._midi_playback_clock_active:
+            return
         if state == QMediaPlayer.PlaybackState.PlayingState:
             self._sync_playback_clock(self.player.position())
             if not self.playback_timer.isActive():
@@ -4716,7 +4975,7 @@ class FileInspectionDialog(QDialog):
             self.position_slider.blockSignals(False)
         self.elapsed_label.setText(_format_duration(seconds))
         smooth_follow = (
-            self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            self._smooth_playback_is_active()
             and not self._position_slider_dragging
         )
         self.piano_roll.set_playhead(seconds, smooth_follow=smooth_follow)
@@ -4740,12 +4999,20 @@ class FileInspectionDialog(QDialog):
         self.piano_roll.set_zoom_percent(percent)
 
     def _stop_playback(self):
+        self._midi_playback_clock_active = False
+        if self.midi_output_worker is not None:
+            self.midi_output_worker.stop()
         self.playback_timer.stop()
         self.player.stop()
         self._seek_to_seconds(0.0)
 
     def closeEvent(self, event):
         self._closing = True
+        self._midi_playback_clock_active = False
+        self.playback_timer.stop()
+        if self.midi_output_worker is not None:
+            self.midi_output_worker.stop()
+            self.midi_output_worker.wait(2000)
         if self.preview_render_worker is not None:
             self.preview_render_worker.cancel()
             self.preview_render_worker.wait(3000)
@@ -10714,7 +10981,7 @@ class MidiTitleWindow(QMainWindow):
     def _abbreviated_context_path(self, path):
         clean_path = os.path.abspath(path) if path else ""
         if not clean_path:
-            return "No folder selected"
+            return self._lt("No Files")
 
         home = os.path.expanduser("~")
         if clean_path == home:
@@ -20266,36 +20533,30 @@ class MidiTitleWindow(QMainWindow):
 
     def _update_message_text(self, data, *, startup_notice):
         latest_version = str(data.get("latest_version") or data.get("version") or "").strip()
-        message = str(data.get("message") or "").strip()
-        release_notes = str(data.get("release_notes") or "").strip()
         release_notes_url = str(data.get("release_notes_url") or "").strip()
 
         lines = [
-            f"{APP_NAME} v{latest_version} is available.",
-            f"You are running v{APP_VERSION}.",
+            self._t("update.available.message", version=latest_version),
+            self._t("update.current_version", version=APP_VERSION),
         ]
-        if message:
-            lines.extend(["", message])
-        if release_notes:
-            lines.extend(["", release_notes])
         if release_notes_url:
-            lines.extend(["", f"Release notes: {release_notes_url}"])
+            lines.extend(["", self._t("update.release_notes", url=release_notes_url)])
         if startup_notice:
-            lines.extend(["", "You can turn off startup update reminders from this notice or the Help menu."])
+            lines.extend(["", self._t("update.startup_reminder_help")])
         return "\n".join(lines)
 
     def _show_update_available_dialog(self, data, *, startup_notice):
         dialog = QMessageBox(self)
         apply_window_icon(dialog)
         dialog.setIcon(QMessageBox.Information)
-        dialog.setWindowTitle("Update Available")
+        dialog.setWindowTitle(self._t("update.available.title"))
         dialog.setText(self._update_message_text(data, startup_notice=startup_notice))
 
-        download_button = dialog.addButton("Open Download Page", QMessageBox.AcceptRole)
-        later_button = dialog.addButton("Remind Me Later", QMessageBox.RejectRole)
+        download_button = dialog.addButton(self._t("update.open_download"), QMessageBox.AcceptRole)
+        later_button = dialog.addButton(self._t("update.remind_later"), QMessageBox.RejectRole)
         disable_button = None
         if startup_notice:
-            disable_button = dialog.addButton("Turn Off Reminders", QMessageBox.DestructiveRole)
+            disable_button = dialog.addButton(self._t("update.turn_off_reminders"), QMessageBox.DestructiveRole)
         dialog.setDefaultButton(download_button)
         self._exec_child_dialog(dialog)
 

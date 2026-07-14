@@ -1,0 +1,22 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build AppImage",
+      "type": "shell",
+      "command": "${workspaceFolder}/scripts/build_appimage.sh",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "BUNDLE_FLUIDSYNTH": "0",
+          "BUNDLE_LAME": "1"
+        }
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    }
+  ]
+}

@@ -310,6 +310,19 @@ pip install PySide6
 python3 aps_midi_prep_tool.py
 ```
 
+## Build the Linux AppImage
+
+Run the default `Build AppImage` build task in VS Code, or run the equivalent
+command from a terminal:
+
+```bash
+make appimage
+```
+
+The build writes the versioned AppImage to `release/`. It bundles the APS icon
+for Qt to use in the window title bar and installs the same artwork as the
+AppImage desktop, launcher, and directory icon.
+
 ## Update Checks
 
 `Help -> Check for Updates...` reads this public JSON URL:
@@ -320,6 +333,17 @@ https://www.alexanderpeppe.com/aps-midi-prep-tool-data/update.json
 
 Startup update checks are enabled by default and can be disabled from the Help
 menu or from the startup update notice.
+
+The update manifest supplies version and destination URLs only. Alert wording is
+bundled with the application and follows the language selected in Settings.
+
+## USB MIDI Playback
+
+The File Inspection player can send playback directly to a connected USB MIDI
+adapter. Choose the adapter under **Playback output**, then use the normal Play,
+Stop, channel, and seek controls. **Refresh** rescans MIDI ports connected after
+the player was opened. Choosing **Audio preview** keeps the SoundFont-based local
+playback path.
 
 ## Project Files
 
