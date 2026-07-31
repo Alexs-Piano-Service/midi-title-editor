@@ -43,6 +43,18 @@ before you write anything back.
   converting them to standard MIDI.
 - Extracts Yamaha V50/SY77 NSEQ sequences when the V50/SY77 signature is
   present, converting them to standard MIDI.
+- Recognizes Yamaha PSR-600 `.BLK` Page Memory files on disks or as standalone
+  files and converts each BLK to one multitrack Type 1 MIDI, with recorded
+  Melody banks on separate zero-aligned tracks and approximate General MIDI
+  instruments. When a Melody setup contains a second voice descriptor with
+  the recurring `0x7F` setup flag, the converter adds a clearly questioned
+  layer track for auditioning and preserves both raw descriptors in MIDI
+  metadata. The flag's meaning is not yet confirmed; proprietary
+  accompaniment and Page Memory data remain in the original `.BLK` files.
+  Each apparent layer needs another MIDI channel to carry its second
+  instrument, so five primary banks can yield as many as ten audition
+  channels; this does not imply that the undecoded Conductor played every
+  bank simultaneously.
 - Reads Yamaha Electone MDR floppy images, including some images with blank or
   nonstandard boot sectors, and converts `.EVT` performance files to standard
   MIDI while preserving millisecond timing and SysEx events.
@@ -62,7 +74,9 @@ before you write anything back.
   `File > Write Protection > Write-Protect Original`.
 - Shows song lists, file inspection metadata, piano-roll previews, channels, and
   playback previews, with a SoundFont picker and manager for optional
-  downloadable SoundFonts.
+  downloadable SoundFonts. File Inspection includes per-channel
+  instrument and level controls, adjustable preview tempo, and Space to start
+  or stop playback, plus selected-song WAV/MP3 rendering with those settings.
 - Renders all currently listed MIDI or E-SEQ files to WAV or MP3 from
   `Utilities > Render Audio...` using a selected SoundFont.
 - Provides a `View` menu for title-warning display, Disklavier title formatting,
@@ -183,7 +197,18 @@ because binary values and cleanup can remove half-pedal or archival detail.
 
 Use `Utilities > File Inspection...`, or double-click a song's `Type` field.
 The inspection window shows a piano roll, metadata, tracks, channels, controller
-notes, selectable channels, position control, and playback preview.
+notes, selectable channels, position control, and playback preview. Channel
+selectors use the same colors as their piano-roll notes, forming a compact
+legend. Tempo can be changed from 5%-400% while a preview is playing.
+Instrument choices are grouped by General MIDI family and can be found by
+typing part of a name; changes do not edit the source and take effect without
+returning to the beginning. Channel checkboxes likewise mute and restore
+realtime SoundFont or direct MIDI channels without restarting the song.
+When FluidSynth and a SoundFont are available, these controls are sent directly
+to the realtime synth instead of rebuilding or swapping the preview audio.
+Choose `Render Song...` to export the selected song or every loaded song using
+the current channel selection, channel levels, instruments, tempo, SoundFont,
+and preview volume. This does not change the source files.
 
 ### Make A Copyable Song List
 
@@ -235,9 +260,10 @@ commands.
 
 Use `Utilities > File Inspection...` to inspect a file, preview it, choose the
 SoundFont used for FluidSynth previews, and open `Download SoundFonts...` when
-you want additional SoundFonts. Use `Utilities > Render Audio...` to
-batch-render every currently listed MIDI or E-SEQ file through a selected
-SoundFont.
+you want additional SoundFonts. Its `Render Song...` menu exports the selected
+song or all loaded songs with the current inspection settings. Use
+`Utilities > Render Audio...` to batch-render every currently listed MIDI or
+E-SEQ file through a selected SoundFont.
 
 SoundFont preview and WAV rendering require FluidSynth installed on the system
 or supplied through `APS_MIDI_PREP_FLUIDSYNTH`. MP3 rendering first creates a

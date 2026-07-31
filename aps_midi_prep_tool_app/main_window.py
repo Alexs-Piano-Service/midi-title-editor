@@ -7,6 +7,7 @@ import io
 import json
 import os
 import platform
+import queue
 import re
 import shutil
 import socket
@@ -27,8 +28,8 @@ from array import array
 from math import exp, pi, sin
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, QEvent, QSettings, QStandardPaths, QThread, QTimer, QUrl, Signal, qVersion
-from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QPolygonF, QShortcut
+from PySide6.QtCore import QPoint, QPointF, QProcess, QRectF, QSize, Qt, QEvent, QSettings, QStandardPaths, QThread, QTimer, QUrl, Signal, qVersion
+from PySide6.QtGui import QAction, QActionGroup, QBrush, QColor, QDesktopServices, QFont, QFontMetrics, QIcon, QImage, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QPolygonF, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QAbstractButton,
@@ -62,6 +63,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QStyleOptionViewItem,
     QComboBox,
+    QCompleter,
     QSlider,
     QSplitter,
     QSpinBox,
@@ -71,6 +73,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem,
     QFrame,
     QLayout,
+    QMenu,
     QPlainTextEdit,
 )
 
@@ -122,7 +125,12 @@ from .disk_session_worker import (
 from .icon_utils import apply_window_icon
 from .onboarding_dialog import show_first_time_dialog
 from .console_log import ConsoleLogDialog, get_console_log_bus
-from .additional_formats import electone_mdr_to_midi, mpc_seq_to_midi, v50_nseq_to_midi
+from .additional_formats import (
+    electone_mdr_to_midi,
+    mpc_seq_to_midi,
+    psr600_blk_to_midi,
+    v50_nseq_to_midi,
+)
 from .floppy_image import (
     DISK_FORMATS,
     GW_IMAGE_FORMATS,
@@ -1404,6 +1412,25 @@ GM_PROGRAM_NAMES = [
     "Guitar Fret Noise", "Breath Noise", "Seashore", "Bird Tweet", "Telephone Ring", "Helicopter", "Applause", "Gunshot",
 ]
 
+GM_PROGRAM_FAMILIES = [
+    "Piano",
+    "Chromatic Percussion",
+    "Organ",
+    "Guitar",
+    "Bass",
+    "Strings",
+    "Ensemble",
+    "Brass",
+    "Reed",
+    "Pipe",
+    "Synth Lead",
+    "Synth Pad",
+    "Synth Effects",
+    "Ethnic",
+    "Percussive",
+    "Sound Effects",
+]
+
 PIANO_LOW_PITCH = 21
 PIANO_HIGH_PITCH = 108
 PIANO_KEY_COUNT = PIANO_HIGH_PITCH - PIANO_LOW_PITCH + 1
@@ -1423,6 +1450,25 @@ PEDAL_COLORS = {
     66: QColor("#7D6BC4"),
     67: QColor("#3AA76D"),
 }
+MIDI_CHANNEL_COLOR_HEX = (
+    "#2E86AB",
+    "#3AA76D",
+    "#D08A2D",
+    "#C84C4C",
+    "#7D6BC4",
+    "#C05C9A",
+    "#1F9E9A",
+    "#B99A28",
+    "#4F6FD8",
+    "#72A83B",
+    "#D46A32",
+    "#A8478A",
+    "#2F7F88",
+    "#8B8F36",
+    "#9656C7",
+    "#D15B72",
+)
+FLUIDSYNTH_PREVIEW_TEMPO_BASE_PERCENT = 50
 PIANO_ROLL_DEFAULT_PIXELS_PER_SECOND = 36
 PIANO_ROLL_MIN_TIMELINE_WIDTH = 900
 PIANO_ROLL_MAX_TIMELINE_WIDTH = 120000
@@ -1436,6 +1482,28 @@ def _program_name(program):
     if 0 <= program < len(GM_PROGRAM_NAMES):
         return f"{program + 1}: {GM_PROGRAM_NAMES[program]}"
     return f"Program {program + 1}"
+
+
+def _midi_channel_color(channel):
+    try:
+        channel_index = max(1, min(int(channel), 16)) - 1
+    except (TypeError, ValueError):
+        channel_index = 0
+    return QColor(MIDI_CHANNEL_COLOR_HEX[channel_index])
+
+
+def _midi_channel_swatch_icon(channel):
+    color = _midi_channel_color(channel)
+    pixmap = QPixmap(12, 12)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    outline = QColor(color).darker(135)
+    painter.setPen(QPen(outline, 1))
+    painter.setBrush(color)
+    painter.drawRoundedRect(QRectF(1, 1, 10, 10), 2, 2)
+    painter.end()
+    return QIcon(pixmap)
 
 
 def _channel_event_channel(raw):
@@ -1465,6 +1533,46 @@ def _normalized_channel_levels(channel_levels):
     return levels
 
 
+def _normalized_program_overrides(program_overrides):
+    if not isinstance(program_overrides, dict):
+        return {}
+    overrides = {}
+    for channel, program in program_overrides.items():
+        try:
+            channel_int = int(channel)
+            program_int = int(program)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= channel_int <= 16 and 0 <= program_int <= 127:
+            overrides[channel_int] = program_int
+    return overrides
+
+
+def _normalized_tempo_percent(value):
+    try:
+        return max(5, min(int(round(float(value))), 400))
+    except (TypeError, ValueError):
+        return 100
+
+
+def _scale_preview_timed_items(items, tempo_percent):
+    tempo_percent = _normalized_tempo_percent(tempo_percent)
+    if tempo_percent == 100:
+        return list(items or [])
+    time_scale = 100.0 / tempo_percent
+    scaled = []
+    for item in items or []:
+        copy = dict(item)
+        for key in ("start_sec", "end_sec"):
+            if key in copy:
+                copy[key] = max(
+                    0.0,
+                    float(copy.get(key, 0.0) or 0.0) * time_scale,
+                )
+        scaled.append(copy)
+    return scaled
+
+
 def _scaled_midi_value(value, percent):
     value = max(0, min(int(value or 0), 127))
     percent = _clamped_percent(percent, default=100)
@@ -1491,6 +1599,32 @@ def _channel_level_events(channel_levels):
                 -1000 + channel,
                 bytes([0xB0 | (channel - 1), 7, _scaled_midi_value(127, level)]),
             )
+        )
+    return events
+
+
+def _channel_program_override_events(program_overrides):
+    events = []
+    for channel, program in sorted(program_overrides.items()):
+        status_channel = channel - 1
+        events.extend(
+            [
+                (
+                    0,
+                    -2400 + channel,
+                    bytes([0xB0 | status_channel, 0, 0]),
+                ),
+                (
+                    0,
+                    -2200 + channel,
+                    bytes([0xB0 | status_channel, 32, 0]),
+                ),
+                (
+                    0,
+                    -2000 + channel,
+                    bytes([0xC0 | status_channel, program]),
+                ),
+            ]
         )
     return events
 
@@ -1566,7 +1700,12 @@ def _notes_with_sustain_pedal(notes, pedals):
     return adjusted
 
 
-def _filter_midi_bytes_to_channels(midi_bytes, channels, channel_levels=None):
+def _filter_midi_bytes_to_channels(
+    midi_bytes,
+    channels,
+    channel_levels=None,
+    program_overrides=None,
+):
     allowed = {int(channel) for channel in (channels or []) if 1 <= int(channel) <= 16}
     if not allowed:
         raise ValueError("No MIDI channels are selected for preview.")
@@ -1576,12 +1715,20 @@ def _filter_midi_bytes_to_channels(midi_bytes, channels, channel_levels=None):
         for channel, level in _normalized_channel_levels(channel_levels).items()
         if channel in allowed and level != 100
     }
-    if len(allowed) == 16 and not levels:
+    overrides = {
+        channel: program
+        for channel, program in _normalized_program_overrides(
+            program_overrides
+        ).items()
+        if channel in allowed
+    }
+    if len(allowed) == 16 and not levels and not overrides:
         return midi_bytes
 
     header_end, _format_type, _declared_tracks, chunks = _parse_midi_chunks(midi_bytes)
     rebuilt = bytearray(midi_bytes[:header_end])
     inserted_channel_levels = False
+    inserted_program_overrides = False
     for chunk in chunks:
         if chunk["id"] != b"MTrk":
             rebuilt.extend(midi_bytes[chunk["start"]:chunk["data_end"]])
@@ -1593,17 +1740,30 @@ def _filter_midi_bytes_to_channels(midi_bytes, channels, channel_levels=None):
         if levels and not inserted_channel_levels:
             level_events = _channel_level_events(levels)
             inserted_channel_levels = True
+        program_events = []
+        if overrides and not inserted_program_overrides:
+            program_events = _channel_program_override_events(overrides)
+            inserted_program_overrides = True
 
         events_to_write = []
         for tick, order, raw in events:
             channel = _channel_event_channel(raw)
             if channel and channel not in allowed:
                 continue
+            if (
+                channel in overrides
+                and raw
+                and (raw[0] & 0xF0) == 0xC0
+            ):
+                continue
             events_to_write.append((tick, order, _scale_channel_volume_event(raw, levels)))
 
         filtered_track = bytearray()
         prev_tick = 0
-        for tick, _order, raw in sorted(level_events + events_to_write, key=lambda item: (item[0], item[1])):
+        for tick, _order, raw in sorted(
+            program_events + level_events + events_to_write,
+            key=lambda item: (item[0], item[1]),
+        ):
             filtered_track.extend(_encode_vlq(tick - prev_tick))
             filtered_track.extend(raw)
             prev_tick = tick
@@ -1612,6 +1772,104 @@ def _filter_midi_bytes_to_channels(midi_bytes, channels, channel_levels=None):
         rebuilt.extend(b"MTrk")
         rebuilt.extend(len(filtered_track).to_bytes(4, "big"))
         rebuilt.extend(filtered_track)
+    return bytes(rebuilt)
+
+
+def _scale_midi_tempo_bytes(midi_bytes, tempo_percent):
+    tempo_percent = _normalized_tempo_percent(tempo_percent)
+    if tempo_percent == 100:
+        return midi_bytes
+
+    header_end, _format_type, _declared_tracks, chunks = _parse_midi_chunks(
+        midi_bytes
+    )
+    division = int.from_bytes(midi_bytes[12:14], "big")
+    smpte_timing = bool(division & 0x8000)
+    parsed_tracks = {}
+    has_tempo_at_zero = False
+    for chunk in chunks:
+        if chunk["id"] != b"MTrk":
+            continue
+        track_data = midi_bytes[chunk["data_start"]:chunk["data_end"]]
+        events, end_tick = _parse_track_events(track_data)
+        parsed_tracks[chunk["start"]] = (events, end_tick)
+        if not smpte_timing:
+            for tick, _order, raw in events:
+                meta_type, payload = _midi_meta_payload(raw)
+                if tick == 0 and meta_type == 0x51 and len(payload) == 3:
+                    has_tempo_at_zero = True
+                    break
+
+    rebuilt = bytearray(midi_bytes[:header_end])
+    inserted_default_tempo = False
+    time_scale = 100.0 / tempo_percent
+    for chunk in chunks:
+        if chunk["id"] != b"MTrk":
+            rebuilt.extend(midi_bytes[chunk["start"]:chunk["data_end"]])
+            continue
+
+        events, end_tick = parsed_tracks[chunk["start"]]
+        scaled_events = []
+        if (
+            not smpte_timing
+            and not has_tempo_at_zero
+            and not inserted_default_tempo
+        ):
+            scaled_default = max(
+                1,
+                min(int(round(500000 * time_scale)), 0xFFFFFF),
+            )
+            scaled_events.append(
+                (
+                    0,
+                    -3000,
+                    b"\xFF\x51\x03"
+                    + scaled_default.to_bytes(3, "big"),
+                )
+            )
+            inserted_default_tempo = True
+
+        for tick, order, raw in events:
+            scaled_tick = (
+                int(round(tick * time_scale))
+                if smpte_timing
+                else tick
+            )
+            if not smpte_timing:
+                meta_type, payload = _midi_meta_payload(raw)
+                if meta_type == 0x51 and len(payload) == 3:
+                    mpqn = int.from_bytes(payload, "big")
+                    scaled_mpqn = max(
+                        1,
+                        min(int(round(mpqn * time_scale)), 0xFFFFFF),
+                    )
+                    raw = (
+                        b"\xFF\x51\x03"
+                        + scaled_mpqn.to_bytes(3, "big")
+                    )
+            scaled_events.append((scaled_tick, order, raw))
+
+        scaled_end_tick = (
+            int(round(end_tick * time_scale))
+            if smpte_timing
+            else end_tick
+        )
+        scaled_track = bytearray()
+        previous_tick = 0
+        for tick, _order, raw in sorted(
+            scaled_events,
+            key=lambda item: (item[0], item[1]),
+        ):
+            scaled_track.extend(_encode_vlq(max(0, tick - previous_tick)))
+            scaled_track.extend(raw)
+            previous_tick = tick
+        scaled_track.extend(
+            _encode_vlq(max(0, scaled_end_tick - previous_tick))
+        )
+        scaled_track.extend(b"\xFF\x2F\x00")
+        rebuilt.extend(b"MTrk")
+        rebuilt.extend(len(scaled_track).to_bytes(4, "big"))
+        rebuilt.extend(scaled_track)
     return bytes(rebuilt)
 
 
@@ -1837,7 +2095,10 @@ def _inspect_midi_bytes(midi_bytes, *, source_label=""):
         lines.extend(mute_notes[:12])
         if len(mute_notes) > 12:
             lines.append(f"...and {len(mute_notes) - 12} more mute/volume note(s).")
-    lines.append("Channel toggles affect this inspection preview only; they do not edit the file.")
+    lines.append(
+        "Channel, instrument, level, and tempo controls affect this "
+        "inspection preview only; they do not edit the file."
+    )
     lines.append("")
     lines.append("Pedals / Controllers:")
     if pedal_events:
@@ -2422,7 +2683,13 @@ def _find_soundfont_file_in_directory(directory):
     return candidates[0][1]
 
 
-def _render_midi_file_to_wav(midi_path, soundfont_path, output_path, cancel_callback=None):
+def _render_midi_file_to_wav(
+    midi_path,
+    soundfont_path,
+    output_path,
+    cancel_callback=None,
+    gain=0.8,
+):
     command = _find_fluidsynth_command()
     if not command:
         raise RuntimeError("FluidSynth is required to render MIDI with a SoundFont.")
@@ -2433,7 +2700,7 @@ def _render_midi_file_to_wav(midi_path, soundfont_path, output_path, cancel_call
         "-ni",
         "-q",
         "-g",
-        "0.8",
+        f"{max(0.0, min(float(gain or 0.0), 10.0)):.4f}",
         "-F",
         output_path,
         "-T",
@@ -2450,6 +2717,7 @@ def _render_midi_file_to_wav(midi_path, soundfont_path, output_path, cancel_call
         text=True,
         **windows_subprocess_kwargs(),
     )
+    _deprioritize_preview_process(process)
     while process.poll() is None:
         if cancel_callback is not None and cancel_callback():
             try:
@@ -2566,6 +2834,21 @@ def _write_preview_wav(notes, output_path, duration, progress_callback=None, can
         wav_file.writeframes(samples.tobytes())
 
 
+def _deprioritize_preview_process(process):
+    """Keep offline rendering from starving the active audio stream."""
+    if (
+        process is None
+        or os.name == "nt"
+        or not hasattr(os, "setpriority")
+        or not hasattr(os, "PRIO_PROCESS")
+    ):
+        return
+    try:
+        os.setpriority(os.PRIO_PROCESS, process.pid, 10)
+    except (OSError, PermissionError):
+        pass
+
+
 class MidiPreviewRenderWorker(QThread):
     progressChanged = Signal(int, int, str)
     previewReady = Signal(str, str)
@@ -2632,6 +2915,7 @@ class MidiPreviewRenderWorker(QThread):
             text=True,
             **windows_subprocess_kwargs(),
         )
+        _deprioritize_preview_process(self._process)
         while self._process.poll() is None:
             if self._cancel_requested():
                 self.cancel()
@@ -2763,24 +3047,407 @@ def _midi_output_events(midi_bytes):
     return timed_events
 
 
+def _midi_tick_for_seconds(midi_bytes, target_seconds):
+    """Convert source-time seconds to the closest SMF tick."""
+    _header_end, _format_type, _declared_tracks, chunks = _parse_midi_chunks(
+        midi_bytes
+    )
+    division = int.from_bytes(midi_bytes[12:14], "big")
+    target_seconds = max(0.0, float(target_seconds or 0.0))
+    maximum_tick = 0
+    tempos = {0: 500000}
+    for chunk in chunks:
+        if chunk["id"] != b"MTrk":
+            continue
+        track_data = midi_bytes[chunk["data_start"]:chunk["data_end"]]
+        track_events, end_tick = _parse_track_events(track_data)
+        maximum_tick = max(maximum_tick, int(end_tick or 0))
+        for tick, _order, raw in track_events:
+            if raw[:2] != b"\xFF\x51":
+                continue
+            _meta_type, payload = _midi_meta_payload(raw)
+            if len(payload) == 3:
+                tempos[int(tick)] = max(
+                    1,
+                    int.from_bytes(payload, "big"),
+                )
+
+    if division & 0x8000:
+        frames_per_second = 256 - ((division >> 8) & 0xFF)
+        ticks_per_frame = division & 0xFF
+        ticks_per_second = max(1, frames_per_second * ticks_per_frame)
+        return min(maximum_tick, int(round(target_seconds * ticks_per_second)))
+
+    ticks_per_quarter = max(1, division)
+    tempo_points = sorted(tempos.items())
+    current_tick = 0
+    current_tempo = tempos[0]
+    elapsed_seconds = 0.0
+    for tempo_tick, next_tempo in tempo_points[1:]:
+        segment_seconds = (
+            (tempo_tick - current_tick)
+            * current_tempo
+            / (ticks_per_quarter * 1_000_000.0)
+        )
+        if target_seconds <= elapsed_seconds + segment_seconds:
+            seconds_into_segment = target_seconds - elapsed_seconds
+            tick = current_tick + int(
+                round(
+                    seconds_into_segment
+                    * ticks_per_quarter
+                    * 1_000_000.0
+                    / current_tempo
+                )
+            )
+            return min(maximum_tick, max(0, tick))
+        elapsed_seconds += segment_seconds
+        current_tick = tempo_tick
+        current_tempo = next_tempo
+
+    tick = current_tick + int(
+        round(
+            (target_seconds - elapsed_seconds)
+            * ticks_per_quarter
+            * 1_000_000.0
+            / current_tempo
+        )
+    )
+    return min(maximum_tick, max(0, tick))
+
+
+def _recorded_program_state_at_seconds(
+    midi_bytes,
+    channel,
+    target_seconds,
+):
+    """Return the recorded bank/program active at a source-time position."""
+    channel = max(1, min(int(channel), 16))
+    bank_msb = 1 if channel == 10 else 0
+    bank_lsb = 0
+    program = 0
+    target_seconds = max(0.0, float(target_seconds or 0.0))
+    for seconds, raw in _midi_output_events(midi_bytes):
+        if seconds > target_seconds + 1e-9:
+            break
+        if _channel_event_channel(raw) != channel:
+            continue
+        message_type = raw[0] & 0xF0
+        if message_type == 0xB0 and len(raw) >= 3:
+            if raw[1] == 0:
+                bank_msb = raw[2]
+            elif raw[1] == 32:
+                bank_lsb = raw[2]
+        elif message_type == 0xC0 and len(raw) >= 2:
+            program = raw[1]
+    return bank_msb * 128 + bank_lsb, program
+
+
+def _recorded_controller_value_at_seconds(
+    midi_bytes,
+    channel,
+    controller,
+    target_seconds,
+    *,
+    default=0,
+):
+    """Return the recorded controller value active at a source position."""
+    channel = max(1, min(int(channel), 16))
+    controller = max(0, min(int(controller), 127))
+    value = max(0, min(int(default), 127))
+    target_seconds = max(0.0, float(target_seconds or 0.0))
+    for seconds, raw in _midi_output_events(midi_bytes):
+        if seconds > target_seconds + 1e-9:
+            break
+        if (
+            _channel_event_channel(raw) == channel
+            and (raw[0] & 0xF0) == 0xB0
+            and len(raw) >= 3
+            and raw[1] == controller
+        ):
+            value = raw[2]
+    return value
+
+
+def _controller_change_times_by_channel(
+    midi_bytes,
+    controllers,
+):
+    controllers = {
+        max(0, min(int(controller), 127))
+        for controller in controllers
+    }
+    changes = {}
+    for seconds, raw in _midi_output_events(midi_bytes):
+        if (
+            raw
+            and (raw[0] & 0xF0) == 0xB0
+            and len(raw) >= 3
+            and raw[1] in controllers
+        ):
+            changes.setdefault(_channel_event_channel(raw), []).append(
+                float(seconds)
+            )
+    return changes
+
+
+def _program_change_times_by_channel(midi_bytes):
+    changes = {}
+    for seconds, raw in _midi_output_events(midi_bytes):
+        if raw and (raw[0] & 0xF0) == 0xC0:
+            changes.setdefault(_channel_event_channel(raw), []).append(
+                float(seconds)
+            )
+    return changes
+
+
 class MidiOutputWorker(QThread):
     playbackStarted = Signal(int, float)
     playbackFailed = Signal(str)
 
-    def __init__(self, midi_bytes, port_index, start_seconds=0.0, parent=None):
+    def __init__(
+        self,
+        midi_bytes,
+        port_index,
+        start_seconds=0.0,
+        tempo_percent=100,
+        program_overrides=None,
+        enabled_channels=None,
+        channel_levels=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.midi_bytes = bytes(midi_bytes or b"")
         self.port_index = int(port_index)
         self.start_seconds = max(0.0, float(start_seconds or 0.0))
+        self.tempo_percent = _normalized_tempo_percent(tempo_percent)
+        self.program_overrides = _normalized_program_overrides(
+            program_overrides
+        )
+        self.enabled_channels = {
+            int(channel)
+            for channel in (
+                range(1, 17)
+                if enabled_channels is None
+                else enabled_channels
+            )
+            if 1 <= int(channel) <= 16
+        }
+        self.channel_levels = _normalized_channel_levels(channel_levels)
+        self._commands = queue.SimpleQueue()
 
     def stop(self):
         self.requestInterruption()
+
+    def set_tempo_percent(self, tempo_percent):
+        self._commands.put(
+            ("tempo", _normalized_tempo_percent(tempo_percent))
+        )
+
+    def set_program_override(self, channel, program):
+        channel = int(channel)
+        if not 1 <= channel <= 16:
+            return
+        if program is not None:
+            program = int(program)
+            if not 0 <= program <= 127:
+                return
+        self._commands.put(("program", channel, program))
+
+    def set_channel_enabled(self, channel, enabled):
+        channel = int(channel)
+        if 1 <= channel <= 16:
+            self._commands.put(("channel", channel, bool(enabled)))
+
+    def set_channel_level(self, channel, percent):
+        channel = int(channel)
+        if 1 <= channel <= 16:
+            self._commands.put(
+                (
+                    "level",
+                    channel,
+                    _clamped_percent(percent, default=100),
+                )
+            )
 
     @staticmethod
     def _silence(output):
         for channel in range(16):
             output.send_message([0xB0 | channel, 64, 0])
             output.send_message([0xB0 | channel, 123, 0])
+
+    @staticmethod
+    def _silence_channel(output, channel):
+        channel_index = max(1, min(int(channel), 16)) - 1
+        output.send_message([0xB0 | channel_index, 64, 0])
+        output.send_message([0xB0 | channel_index, 123, 0])
+
+    @staticmethod
+    def _send_program(output, channel, program, recorded_state=None):
+        channel_index = int(channel) - 1
+        state = (recorded_state or {}).get(channel, {})
+        bank_msb = int(state.get("bank_msb", 0)) if program is None else 0
+        bank_lsb = int(state.get("bank_lsb", 0)) if program is None else 0
+        selected_program = (
+            int(state.get("program", 0))
+            if program is None
+            else int(program)
+        )
+        output.send_message([0xB0 | channel_index, 0, bank_msb])
+        output.send_message([0xB0 | channel_index, 32, bank_lsb])
+        output.send_message([0xC0 | channel_index, selected_program])
+
+    @classmethod
+    def _restore_channel(
+        cls,
+        output,
+        channel,
+        recorded_state,
+        channel_levels,
+        program_override=None,
+    ):
+        cls._send_program(
+            output,
+            channel,
+            program_override,
+            recorded_state,
+        )
+        state = (recorded_state or {}).get(channel, {})
+        controllers = state.get("controllers", {})
+        channel_index = channel - 1
+        for controller, value in sorted(controllers.items()):
+            if controller in (0, 32) or controller >= 120:
+                continue
+            if controller == 7:
+                value = _scaled_midi_value(
+                    value,
+                    channel_levels.get(channel, 100),
+                )
+            output.send_message(
+                [0xB0 | channel_index, controller, value]
+            )
+
+    def _drain_commands(
+        self,
+        output,
+        tempo_percent,
+        program_overrides,
+        recorded_state,
+        enabled_channels=None,
+        channel_levels=None,
+    ):
+        if enabled_channels is None:
+            enabled_channels = self.enabled_channels
+        if channel_levels is None:
+            channel_levels = self.channel_levels
+        while True:
+            try:
+                command = self._commands.get_nowait()
+            except queue.Empty:
+                break
+            if command[0] == "tempo":
+                tempo_percent = command[1]
+            elif command[0] == "program":
+                _kind, channel, program = command
+                if program is None:
+                    program_overrides.pop(channel, None)
+                else:
+                    program_overrides[channel] = program
+                if channel in enabled_channels:
+                    self._send_program(
+                        output,
+                        channel,
+                        program,
+                        recorded_state,
+                    )
+            elif command[0] == "channel":
+                _kind, channel, enabled = command
+                if enabled:
+                    if channel not in enabled_channels:
+                        enabled_channels.add(channel)
+                        self._restore_channel(
+                            output,
+                            channel,
+                            recorded_state,
+                            channel_levels,
+                            program_overrides.get(channel),
+                        )
+                elif channel in enabled_channels:
+                    enabled_channels.discard(channel)
+                    self._silence_channel(output, channel)
+            elif command[0] == "level":
+                _kind, channel, percent = command
+                channel_levels[channel] = percent
+                if channel in enabled_channels:
+                    recorded_volume = (
+                        recorded_state
+                        .get(channel, {})
+                        .get("controllers", {})
+                        .get(7, 127)
+                    )
+                    output.send_message([
+                        0xB0 | (channel - 1),
+                        7,
+                        _scaled_midi_value(
+                            recorded_volume,
+                            percent,
+                        ),
+                    ])
+        return tempo_percent
+
+    @staticmethod
+    def _record_program_state(raw, recorded_state):
+        if not raw:
+            return
+        message_type = raw[0] & 0xF0
+        channel = (raw[0] & 0x0F) + 1
+        state = recorded_state.setdefault(channel, {})
+        if message_type == 0xC0 and len(raw) >= 2:
+            state["program"] = raw[1]
+        elif message_type == 0xB0 and len(raw) >= 3:
+            state.setdefault("controllers", {})[raw[1]] = raw[2]
+            if raw[1] == 0:
+                state["bank_msb"] = raw[2]
+            elif raw[1] == 32:
+                state["bank_lsb"] = raw[2]
+
+    @classmethod
+    def _send_recorded_event(
+        cls,
+        output,
+        raw,
+        program_overrides,
+        recorded_state,
+        enabled_channels=None,
+        channel_levels=None,
+    ):
+        cls._record_program_state(raw, recorded_state)
+        message_type = raw[0] & 0xF0
+        channel = (raw[0] & 0x0F) + 1
+        if (
+            enabled_channels is not None
+            and channel not in enabled_channels
+        ):
+            return
+        if channel in program_overrides:
+            if message_type == 0xC0:
+                return
+            if message_type == 0xB0 and len(raw) >= 2 and raw[1] in (0, 32):
+                return
+        if (
+            message_type == 0xB0
+            and len(raw) >= 3
+            and raw[1] == 7
+            and channel_levels
+        ):
+            raw = bytes([
+                raw[0],
+                raw[1],
+                _scaled_midi_value(
+                    raw[2],
+                    channel_levels.get(channel, 100),
+                ),
+            ])
+        output.send_message(list(raw))
 
     def run(self):
         output = None
@@ -2792,25 +3459,85 @@ class MidiOutputWorker(QThread):
             if self.port_index < 0 or self.port_index >= len(ports):
                 raise RuntimeError("The selected MIDI output is no longer available.")
             output.open_port(self.port_index)
+            recorded_state = {}
+            program_overrides = dict(self.program_overrides)
+            enabled_channels = self.enabled_channels
+            channel_levels = self.channel_levels
+            tempo_percent = self.tempo_percent
             for seconds, raw in events:
                 if seconds >= self.start_seconds:
                     break
                 if (raw[0] & 0xF0) not in (0x80, 0x90, 0xA0):
-                    output.send_message(list(raw))
+                    self._send_recorded_event(
+                        output,
+                        raw,
+                        program_overrides,
+                        recorded_state,
+                        enabled_channels,
+                        channel_levels,
+                    )
+            for channel, program in sorted(program_overrides.items()):
+                if channel in enabled_channels:
+                    self._send_program(
+                        output,
+                        channel,
+                        program,
+                        recorded_state,
+                    )
+            for channel, percent in sorted(channel_levels.items()):
+                if channel in enabled_channels and percent != 100:
+                    recorded_volume = (
+                        recorded_state
+                        .get(channel, {})
+                        .get("controllers", {})
+                        .get(7, 127)
+                    )
+                    output.send_message([
+                        0xB0 | (channel - 1),
+                        7,
+                        _scaled_midi_value(
+                            recorded_volume,
+                            percent,
+                        ),
+                    ])
             started_at = time.monotonic()
             self.playbackStarted.emit(int(self.start_seconds * 1000), started_at)
+            source_position = self.start_seconds
+            previous_wall_time = started_at
             for seconds, raw in events:
                 if seconds < self.start_seconds:
                     continue
-                target = seconds - self.start_seconds
                 while not self.isInterruptionRequested():
-                    remaining = target - (time.monotonic() - started_at)
+                    now = time.monotonic()
+                    source_position += (
+                        now - previous_wall_time
+                    ) * (tempo_percent / 100.0)
+                    previous_wall_time = now
+                    tempo_percent = self._drain_commands(
+                        output,
+                        tempo_percent,
+                        program_overrides,
+                        recorded_state,
+                        enabled_channels,
+                        channel_levels,
+                    )
+                    remaining = seconds - source_position
                     if remaining <= 0:
                         break
-                    self.msleep(max(1, min(10, int(remaining * 1000))))
+                    wall_remaining = remaining * 100.0 / tempo_percent
+                    self.msleep(
+                        max(1, min(10, int(wall_remaining * 1000)))
+                    )
                 if self.isInterruptionRequested():
                     break
-                output.send_message(list(raw))
+                self._send_recorded_event(
+                    output,
+                    raw,
+                    program_overrides,
+                    recorded_state,
+                    enabled_channels,
+                    channel_levels,
+                )
         except Exception as exc:
             self.playbackFailed.emit(str(exc))
         finally:
@@ -2820,6 +3547,391 @@ class MidiOutputWorker(QThread):
                     output.close_port()
                 except Exception:
                     pass
+
+
+class FluidSynthPlaybackProcess(QProcess):
+    """Realtime SoundFont player controlled through FluidSynth's shell."""
+
+    playbackStarted = Signal(int, float)
+    playbackFailed = Signal(str)
+    playbackEnded = Signal()
+
+    READY_MARKER = "APS_MIDI_PREVIEW_READY"
+
+    def __init__(
+        self,
+        midi_bytes,
+        soundfont_path,
+        *,
+        start_seconds=0.0,
+        tempo_percent=100,
+        volume_percent=35,
+        program_overrides=None,
+        enabled_channels=None,
+        available_channels=None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.midi_bytes = bytes(midi_bytes or b"")
+        self.soundfont_path = str(soundfont_path or "")
+        self.start_seconds = max(0.0, float(start_seconds or 0.0))
+        self.tempo_percent = _normalized_tempo_percent(tempo_percent)
+        self.volume_percent = _clamped_percent(
+            volume_percent,
+            default=35,
+        )
+        self.program_overrides = _normalized_program_overrides(
+            program_overrides
+        )
+        self.available_channels = {
+            int(channel)
+            for channel in (
+                range(1, 17)
+                if available_channels is None
+                else available_channels
+            )
+            if 1 <= int(channel) <= 16
+        }
+        self.enabled_channels = {
+            int(channel)
+            for channel in (
+                self.available_channels
+                if enabled_channels is None
+                else enabled_channels
+            )
+            if int(channel) in self.available_channels
+        }
+        self._midi_path = ""
+        self._config_path = ""
+        self._output_text = ""
+        self._pending_commands = []
+        self._start_tick = 0
+        self._ready = False
+        self._stopping = False
+        self._failure_emitted = False
+        self._ended_emitted = False
+
+        self.setProcessChannelMode(
+            QProcess.ProcessChannelMode.MergedChannels
+        )
+        self.started.connect(self._on_process_started)
+        self.readyReadStandardOutput.connect(self._read_process_output)
+        self.errorOccurred.connect(self._on_process_error)
+        self.finished.connect(self._on_process_finished)
+        self.startup_timer = QTimer(self)
+        self.startup_timer.setSingleShot(True)
+        self.startup_timer.timeout.connect(self._on_startup_timeout)
+
+    @staticmethod
+    def _gain_for_percent(volume_percent):
+        return max(
+            0.001,
+            min(5.0, 0.8 * _clamped_percent(
+                volume_percent,
+                default=35,
+            ) / 100.0),
+        )
+
+    @staticmethod
+    def _tempo_command(tempo_percent):
+        multiplier = (
+            _normalized_tempo_percent(tempo_percent)
+            / FLUIDSYNTH_PREVIEW_TEMPO_BASE_PERCENT
+        )
+        # FluidSynth 2.4's shell rejects its nominal 0.1 lower
+        # boundary after parsing, so keep the 5% endpoint just above it.
+        multiplier = max(0.100001, min(multiplier, 10.0))
+        return f"player_tempo_int {multiplier:.6f}"
+
+    @staticmethod
+    def _program_command(channel, program, bank=None):
+        channel = max(1, min(int(channel), 16))
+        program = max(0, min(int(program), 127))
+        if bank is None:
+            bank = 128 if channel == 10 else 0
+        bank = max(0, min(int(bank), 16383))
+        return f"select {channel - 1} 1 {bank} {program}"
+
+    @staticmethod
+    def _cc_command(channel, controller, value):
+        channel = max(1, min(int(channel), 16))
+        controller = max(0, min(int(controller), 127))
+        value = max(0, min(int(value), 127))
+        return f"cc {channel - 1} {controller} {value}"
+
+    @classmethod
+    def _channel_mute_commands(cls, channel):
+        return (
+            cls._cc_command(channel, 7, 0),
+            cls._cc_command(channel, 64, 0),
+            cls._cc_command(channel, 123, 0),
+        )
+
+    def _startup_config_commands(self):
+        commands = [self._tempo_command(self.tempo_percent)]
+        if self._start_tick > 0:
+            commands.append(f"player_seek {self._start_tick}")
+        for channel, program in sorted(self.program_overrides.items()):
+            commands.append(
+                self._program_command(channel, program)
+            )
+        enabled_channels = getattr(self, "enabled_channels", set())
+        for channel in sorted(
+            getattr(self, "available_channels", set())
+            - enabled_channels
+        ):
+            commands.extend(self._channel_mute_commands(channel))
+        return commands
+
+    @staticmethod
+    def _tempo_rebased_midi_bytes(midi_bytes):
+        return _scale_midi_tempo_bytes(
+            midi_bytes,
+            FLUIDSYNTH_PREVIEW_TEMPO_BASE_PERCENT,
+        )
+
+    def start_playback(self):
+        command = _find_fluidsynth_command()
+        if not command:
+            self._emit_failure(
+                "FluidSynth is not available for realtime preview."
+            )
+            self._emit_ended()
+            return
+        if not self.soundfont_path or not os.path.isfile(
+            self.soundfont_path
+        ):
+            self._emit_failure(
+                "The selected SoundFont is not available."
+            )
+            self._emit_ended()
+            return
+
+        playback_midi_bytes = self._tempo_rebased_midi_bytes(
+            self.midi_bytes
+        )
+        midi_handle, self._midi_path = tempfile.mkstemp(
+            prefix="aps_live_preview_",
+            suffix=".mid",
+        )
+        with os.fdopen(midi_handle, "wb") as handle:
+            handle.write(playback_midi_bytes)
+
+        self._start_tick = _midi_tick_for_seconds(
+            playback_midi_bytes,
+            (
+                self.start_seconds
+                * 100.0
+                / FLUIDSYNTH_PREVIEW_TEMPO_BASE_PERCENT
+            ),
+        )
+        config_handle, self._config_path = tempfile.mkstemp(
+            prefix="aps_live_preview_",
+            suffix=".cfg",
+            text=True,
+        )
+        with os.fdopen(config_handle, "w", encoding="utf-8") as handle:
+            handle.write(
+                "\n".join(self._startup_config_commands()) + "\n"
+            )
+
+        self.setProgram(command)
+        self.setArguments(
+            [
+                "-n",
+                "-g",
+                f"{self._gain_for_percent(self.volume_percent):.4f}",
+                "-f",
+                self._config_path,
+                self.soundfont_path,
+                self._midi_path,
+            ]
+        )
+        self.startup_timer.start(30000)
+        self.start()
+
+    def _on_process_started(self):
+        self.write(
+            (
+                self._tempo_command(self.tempo_percent)
+                + f"\necho {self.READY_MARKER}\n"
+            ).encode("utf-8")
+        )
+
+    def set_tempo_percent(self, tempo_percent):
+        self.tempo_percent = _normalized_tempo_percent(tempo_percent)
+        self._send_command(
+            self._tempo_command(self.tempo_percent)
+        )
+
+    def set_program(self, channel, program, *, bank=None):
+        self._send_command(
+            self._program_command(channel, program, bank)
+        )
+
+    def set_channel_enabled(
+        self,
+        channel,
+        enabled,
+        *,
+        volume=100,
+        force=False,
+    ):
+        channel = max(1, min(int(channel), 16))
+        if channel not in self.available_channels:
+            return
+        enabled = bool(enabled)
+        was_enabled = channel in self.enabled_channels
+        if enabled:
+            self.enabled_channels.add(channel)
+        else:
+            self.enabled_channels.discard(channel)
+        if was_enabled == enabled and not force:
+            return
+        commands = (
+            (self._cc_command(channel, 7, volume),)
+            if enabled
+            else self._channel_mute_commands(channel)
+        )
+        for command in commands:
+            self._send_command(command)
+
+    def set_volume_percent(self, volume_percent):
+        self.volume_percent = _clamped_percent(
+            volume_percent,
+            default=35,
+        )
+        self._send_command(
+            f"gain {self._gain_for_percent(self.volume_percent):.4f}"
+        )
+
+    def seek_ticks(self, delta_ticks):
+        delta_ticks = int(delta_ticks or 0)
+        if (
+            len(self.midi_bytes) >= 14
+            and int.from_bytes(self.midi_bytes[12:14], "big") & 0x8000
+        ):
+            delta_ticks = int(round(
+                delta_ticks
+                * 100.0
+                / FLUIDSYNTH_PREVIEW_TEMPO_BASE_PERCENT
+            ))
+        if delta_ticks:
+            self._send_command(f"player_seek {delta_ticks}")
+
+    def stop_playback(self):
+        self._stopping = True
+        self.startup_timer.stop()
+        if self.state() == QProcess.ProcessState.NotRunning:
+            self._cleanup_temporary_files()
+            return
+        self.write(b"reset\nquit\n")
+        QTimer.singleShot(500, self._terminate_if_running)
+
+    def _send_command(self, command):
+        command = str(command or "").strip()
+        if not command:
+            return
+        if (
+            self._ready
+            and self.state() == QProcess.ProcessState.Running
+        ):
+            self.write((command + "\n").encode("utf-8"))
+        else:
+            self._pending_commands.append(command)
+
+    def _read_process_output(self):
+        output = bytes(self.readAllStandardOutput()).decode(
+            "utf-8",
+            errors="replace",
+        )
+        self._output_text = (self._output_text + output)[-12000:]
+        if self._ready or self.READY_MARKER not in self._output_text:
+            return
+        self._ready = True
+        self.startup_timer.stop()
+        commands = list(self._pending_commands)
+        self._pending_commands.clear()
+        for command in commands:
+            self.write((command + "\n").encode("utf-8"))
+        self.playbackStarted.emit(
+            int(self.start_seconds * 1000),
+            time.monotonic(),
+        )
+
+    def _on_startup_timeout(self):
+        if self._ready or self._stopping:
+            return
+        self._emit_failure(
+            "FluidSynth did not start realtime audio preview in time."
+        )
+        self.stop_playback()
+
+    def _on_process_error(self, error):
+        if self._stopping:
+            return
+        self._emit_failure(
+            f"FluidSynth realtime preview failed: {self.errorString()}"
+        )
+        if error == QProcess.ProcessError.FailedToStart:
+            self._cleanup_temporary_files()
+            self._emit_ended()
+
+    def _on_process_finished(self, exit_code, _exit_status):
+        self.startup_timer.stop()
+        if not self._stopping and exit_code != 0:
+            detail = self._process_detail()
+            self._emit_failure(
+                "FluidSynth realtime preview stopped unexpectedly"
+                + (f": {detail}" if detail else ".")
+            )
+        elif not self._stopping and not self._ready:
+            detail = self._process_detail()
+            self._emit_failure(
+                "FluidSynth could not start realtime preview"
+                + (f": {detail}" if detail else ".")
+            )
+        self._cleanup_temporary_files()
+        self._emit_ended()
+
+    def _process_detail(self):
+        lines = [
+            line.strip()
+            for line in self._output_text.splitlines()
+            if line.strip() and self.READY_MARKER not in line
+        ]
+        return lines[-1] if lines else ""
+
+    def _emit_failure(self, message):
+        if self._failure_emitted:
+            return
+        self._failure_emitted = True
+        self.playbackFailed.emit(str(message or ""))
+
+    def _emit_ended(self):
+        if self._ended_emitted:
+            return
+        self._ended_emitted = True
+        self.playbackEnded.emit()
+
+    def _terminate_if_running(self):
+        if self.state() != QProcess.ProcessState.NotRunning:
+            self.terminate()
+            QTimer.singleShot(500, self._kill_if_running)
+
+    def _kill_if_running(self):
+        if self.state() != QProcess.ProcessState.NotRunning:
+            self.kill()
+
+    def _cleanup_temporary_files(self):
+        for path in (self._midi_path, self._config_path):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        self._midi_path = ""
+        self._config_path = ""
 
 
 class SoundFontCatalogWorker(QThread):
@@ -2847,6 +3959,118 @@ class SoundFontCatalogWorker(QThread):
             self.catalogLoaded.emit(_normalize_soundfont_catalog(data, self.url))
         except Exception as exc:
             self.catalogFailed.emit(str(exc))
+
+
+class InstrumentComboBox(QComboBox):
+    """Compact, searchable General MIDI program picker."""
+
+    selectionCommitted = Signal()
+
+    def __init__(self, translate=lambda value: value, parent=None):
+        super().__init__(parent)
+        self._translate = translate
+        self._last_valid_index = 0
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setMinimumWidth(165)
+        self.setMaximumWidth(260)
+        self.setMinimumContentsLength(18)
+        self.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.setMaxVisibleItems(14)
+
+        self.addItem(translate("As recorded"), None)
+        completion_labels = []
+        self._completion_programs = {}
+        for family_index, family in enumerate(GM_PROGRAM_FAMILIES):
+            self.addItem(f"— {translate(family)} —", ("family", family_index))
+            family_item = self.model().item(self.count() - 1)
+            if family_item is not None:
+                family_item.setEnabled(False)
+                family_font = family_item.font()
+                family_font.setBold(True)
+                family_item.setFont(family_font)
+            family_start = family_index * 8
+            for program in range(family_start, family_start + 8):
+                label = f"{program + 1}: {GM_PROGRAM_NAMES[program]}"
+                self.addItem(label, program)
+                completion_labels.append(label)
+                self._completion_programs[label.casefold()] = program
+
+        completer = QCompleter(completion_labels, self)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        completer.setMaxVisibleItems(14)
+        completer.activated[str].connect(self._select_completion)
+        self.setCompleter(completer)
+        self.lineEdit().setClearButtonEnabled(True)
+        self.lineEdit().setPlaceholderText(translate("Type an instrument name"))
+        self.lineEdit().editingFinished.connect(self._commit_typed_text)
+        self.activated.connect(self._commit_popup_selection)
+        self.view().setMaximumHeight(360)
+
+    def remember_current_selection(self):
+        if self._is_selectable_index(self.currentIndex()):
+            self._last_valid_index = self.currentIndex()
+
+    def set_recorded_text(self, text):
+        self.setItemText(0, str(text or self._translate("As recorded")))
+        if self.currentIndex() == 0:
+            self.lineEdit().setText(self.itemText(0))
+
+    def _is_selectable_index(self, index):
+        if index < 0:
+            return False
+        data = self.itemData(index)
+        return data is None or isinstance(data, int)
+
+    def _set_committed_index(self, index):
+        if not self._is_selectable_index(index):
+            return
+        self.setCurrentIndex(index)
+        self._last_valid_index = index
+        self.lineEdit().setText(self.itemText(index))
+        self.selectionCommitted.emit()
+
+    def _select_completion(self, text):
+        program = self._completion_programs.get(str(text or "").casefold())
+        index = self.findData(program) if program is not None else -1
+        if index >= 0:
+            self._set_committed_index(index)
+
+    def _commit_popup_selection(self, index):
+        if self._is_selectable_index(index):
+            self._last_valid_index = index
+            self.selectionCommitted.emit()
+
+    def _commit_typed_text(self):
+        text = self.lineEdit().text().strip()
+        if not text:
+            self._set_committed_index(self._last_valid_index)
+            return
+
+        folded = text.casefold()
+        exact_program = self._completion_programs.get(folded)
+        if exact_program is None:
+            matches = []
+            for program, name in enumerate(GM_PROGRAM_NAMES):
+                numbered_name = f"{program + 1}: {name}"
+                if folded in name.casefold() or folded in numbered_name.casefold():
+                    matches.append(program)
+            exact_program = matches[0] if len(matches) == 1 else None
+        if exact_program is not None:
+            self._set_committed_index(self.findData(exact_program))
+            return
+        if folded in {
+            self._translate("As recorded").casefold(),
+            self.itemText(0).casefold(),
+        }:
+            self._set_committed_index(0)
+            return
+        self.setCurrentIndex(self._last_valid_index)
+        self.lineEdit().setText(self.itemText(self._last_valid_index))
 
 
 class SoundFontDownloadWorker(QThread):
@@ -3030,12 +4254,41 @@ class BatchAudioRenderWorker(QThread):
     renderFinished = Signal(int, object)
     renderFailed = Signal(str)
 
-    def __init__(self, items, soundfont_path, output_dir, output_format, parent=None):
+    def __init__(
+        self,
+        items,
+        soundfont_path,
+        output_dir,
+        output_format,
+        parent=None,
+        *,
+        channels=None,
+        channel_levels=None,
+        program_overrides=None,
+        tempo_percent=100,
+        volume_percent=100,
+    ):
         super().__init__(parent)
         self.items = list(items or [])
         self.soundfont_path = str(soundfont_path or "")
         self.output_dir = str(output_dir or "")
         self.output_format = str(output_format or "wav").lower()
+        self.channels = (
+            None
+            if channels is None
+            else {
+                int(channel)
+                for channel in channels
+                if 1 <= int(channel) <= 16
+            }
+        )
+        self.channel_levels = dict(channel_levels or {})
+        self.program_overrides = dict(program_overrides or {})
+        self.tempo_percent = _normalized_tempo_percent(tempo_percent)
+        self.volume_percent = _clamped_percent(
+            volume_percent,
+            default=100,
+        )
 
     def cancel(self):
         self.requestInterruption()
@@ -3065,6 +4318,17 @@ class BatchAudioRenderWorker(QThread):
             payload = handle.read()
         if is_eseq_file(path):
             payload = convert_eseq_bytes_to_midi_bytes(payload, include_conversion_text=False)
+        if self.channels is not None:
+            payload = _filter_midi_bytes_to_channels(
+                payload,
+                self.channels,
+                self.channel_levels,
+                self.program_overrides,
+            )
+            payload = _scale_midi_tempo_bytes(
+                payload,
+                self.tempo_percent,
+            )
         return payload
 
     def run(self):
@@ -3097,6 +4361,7 @@ class BatchAudioRenderWorker(QThread):
                         self.soundfont_path,
                         wav_path,
                         cancel_callback=self._cancel_requested,
+                        gain=0.8 * self.volume_percent / 100.0,
                     )
                     _convert_wav_for_audio_export(
                         wav_path,
@@ -3122,6 +4387,114 @@ class BatchAudioRenderWorker(QThread):
             self.renderFinished.emit(rendered_count, failures)
         except Exception as exc:
             self.renderFailed.emit(str(exc))
+
+
+class InspectionAudioRenderWorker(QThread):
+    renderProgress = Signal(str)
+    renderFinished = Signal(str)
+    renderFailed = Signal(str)
+
+    def __init__(
+        self,
+        midi_bytes,
+        soundfont_path,
+        output_path,
+        output_format,
+        volume_percent=100,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.midi_bytes = bytes(midi_bytes or b"")
+        self.soundfont_path = str(soundfont_path or "")
+        self.output_path = str(output_path or "")
+        self.output_format = str(output_format or "wav").lower()
+        self.volume_percent = _clamped_percent(
+            volume_percent,
+            default=100,
+        )
+
+    def cancel(self):
+        self.requestInterruption()
+
+    def _cancel_requested(self):
+        return self.isInterruptionRequested()
+
+    def run(self):
+        midi_path = ""
+        wav_path = ""
+        staged_output_path = ""
+        try:
+            if not self.midi_bytes:
+                raise RuntimeError("No MIDI data is available to render.")
+            if not self.output_path:
+                raise RuntimeError("Choose an output file before rendering.")
+            if self.output_format not in ("wav", "mp3"):
+                raise RuntimeError(
+                    f"Unsupported audio format: {self.output_format}"
+                )
+
+            output_dir = os.path.dirname(
+                os.path.abspath(self.output_path)
+            )
+            if not os.path.isdir(output_dir):
+                raise RuntimeError(
+                    "The selected output folder is not available."
+                )
+
+            self.renderProgress.emit("Preparing inspected song...")
+            midi_handle, midi_path = tempfile.mkstemp(
+                prefix="aps_inspection_render_",
+                suffix=".mid",
+            )
+            with os.fdopen(midi_handle, "wb") as handle:
+                handle.write(self.midi_bytes)
+            wav_handle, wav_path = tempfile.mkstemp(
+                prefix="aps_inspection_render_",
+                suffix=".wav",
+            )
+            os.close(wav_handle)
+            staged_handle, staged_output_path = tempfile.mkstemp(
+                prefix=".aps_inspection_render_",
+                suffix=f".{self.output_format}",
+                dir=output_dir,
+            )
+            os.close(staged_handle)
+
+            self.renderProgress.emit("Rendering selected song...")
+            _render_midi_file_to_wav(
+                midi_path,
+                self.soundfont_path,
+                wav_path,
+                cancel_callback=self._cancel_requested,
+                gain=0.8 * self.volume_percent / 100.0,
+            )
+            self.renderProgress.emit(
+                (
+                    "Encoding MP3..."
+                    if self.output_format == "mp3"
+                    else "Finishing WAV..."
+                )
+            )
+            _convert_wav_for_audio_export(
+                wav_path,
+                staged_output_path,
+                self.output_format,
+                cancel_callback=self._cancel_requested,
+            )
+            if self._cancel_requested():
+                raise RuntimeError("Audio rendering cancelled.")
+            os.replace(staged_output_path, self.output_path)
+            staged_output_path = ""
+            self.renderFinished.emit(self.output_path)
+        except Exception as exc:
+            self.renderFailed.emit(str(exc))
+        finally:
+            for path in (midi_path, wav_path, staged_output_path):
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
 
 
 class PianoRollTimelineWidget(QWidget):
@@ -3359,14 +4732,6 @@ class PianoRollTimelineWidget(QWidget):
             painter.drawText(rect, Qt.AlignCenter, "No note or pedal events to display")
             return
 
-        colors = [
-            QColor("#2E86AB"),
-            QColor("#3AA76D"),
-            QColor("#D08A2D"),
-            QColor("#C84C4C"),
-            QColor("#7D6BC4"),
-            QColor("#C05C9A"),
-        ]
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setPen(Qt.NoPen)
         lane_height = max(2, int(round(key_rect.height() / max(1, PIANO_KEY_COUNT - 1))))
@@ -3379,7 +4744,7 @@ class PianoRollTimelineWidget(QWidget):
             width = max(2, x2 - x)
             pitch = int(note.get("pitch", PIANO_LOW_PITCH))
             y = self._pitch_y(key_rect, pitch)
-            color = colors[(int(note.get("channel", 1)) - 1) % len(colors)]
+            color = _midi_channel_color(note.get("channel", 1))
             painter.setBrush(color)
             painter.drawRect(
                 QRectF(
@@ -4178,10 +5543,29 @@ class FileInspectionDialog(QDialog):
         self.current_channel_info = {}
         self.current_piano_channels = set()
         self.channel_levels = {channel: 100 for channel in range(1, 17)}
+        self.channel_program_overrides = {}
         self.preview_audio_path = ""
         self.preview_render_worker = None
+        self.inspection_render_worker = None
+        self._inspection_render_scope = "selected"
+        self._inspection_render_output_dir = ""
         self.midi_output_worker = None
+        self.live_synth_process = None
         self.preview_engine_label = ""
+        self._rendered_tempo_percent = 100
+        self._last_tempo_percent = 100
+        self._preview_rebuild_pending = False
+        self._preview_render_autoplay = False
+        self._preview_audio_stale = False
+        self._live_synth_clock_active = False
+        self._live_synth_fallback_pending = False
+        self._program_change_times = {}
+        self._channel_volume_change_times = {}
+        self._last_live_program_sync_seconds = 0.0
+        self._live_recorded_program_channels = set()
+        self._pending_audio_start = None
+        self._updating_playback_rate = False
+        self._audio_handoff = None
         self._position_slider_dragging = False
         self._playback_clock_position_ms = 0
         self._playback_clock_started_at = 0.0
@@ -4195,6 +5579,12 @@ class FileInspectionDialog(QDialog):
         self.playback_timer.setTimerType(Qt.PreciseTimer)
         self.playback_timer.setInterval(16)
         self.playback_timer.timeout.connect(self._refresh_playback_position)
+        self.audio_handoff_timer = QTimer(self)
+        self.audio_handoff_timer.setTimerType(Qt.PreciseTimer)
+        self.audio_handoff_timer.setInterval(15)
+        self.audio_handoff_timer.timeout.connect(
+            self._advance_audio_handoff
+        )
 
         apply_window_icon(self)
         language = _message_parent_language(parent)
@@ -4202,7 +5592,7 @@ class FileInspectionDialog(QDialog):
         self.t = lambda text: translate_text(text, language)
         t = self.t
         self.setWindowTitle(t("File Inspection"))
-        self.resize(940, 640)
+        self.resize(1120, 680)
         layout = QVBoxLayout(self)
 
         splitter = QSplitter(Qt.Horizontal, self)
@@ -4229,27 +5619,67 @@ class FileInspectionDialog(QDialog):
         self.channel_group = QGroupBox(t("Channels"), self)
         channel_layout = QVBoxLayout(self.channel_group)
         self.show_piano_only_checkbox = QCheckBox(t("Show Piano Channels Only"), self)
-        self.show_piano_only_checkbox.setToolTip(t("Limit the piano roll and preview to channels that look like piano parts."))
-        channel_layout.addWidget(self.show_piano_only_checkbox)
+        self.show_piano_only_checkbox.setToolTip(t("Show only likely piano parts."))
         self.tie_channel_levels_checkbox = QCheckBox(t("Tie channel levels to preview volume"), self)
         self.tie_channel_levels_checkbox.setChecked(True)
-        self.tie_channel_levels_checkbox.setToolTip(
-            t("Keep every channel level tied to the main preview volume. Turn this off to set channel levels independently.")
-        )
-        channel_layout.addWidget(self.tie_channel_levels_checkbox)
+        self.tie_channel_levels_checkbox.setToolTip(t("Use the main volume for every channel."))
+        channel_options = QHBoxLayout()
+        channel_options.addWidget(self.show_piano_only_checkbox)
+        channel_options.addSpacing(12)
+        channel_options.addWidget(self.tie_channel_levels_checkbox)
+        channel_options.addStretch()
+        channel_layout.addLayout(channel_options)
         channel_grid = QGridLayout()
+        self.channel_grid = channel_grid
         channel_grid.setColumnStretch(1, 1)
-        channel_grid.setColumnStretch(4, 1)
+        channel_grid.setColumnMinimumWidth(4, 14)
+        channel_grid.setColumnStretch(6, 1)
+        self.channel_headers = {}
+        for column in (0, 5):
+            channel_header = QLabel(t("Ch."), self)
+            instrument_header = QLabel(t("Instrument"), self)
+            level_header = QLabel(t("Preview level"), self)
+            header_font = channel_header.font()
+            header_font.setBold(True)
+            channel_header.setFont(header_font)
+            instrument_header.setFont(header_font)
+            level_header.setFont(header_font)
+            level_header.setAlignment(Qt.AlignCenter)
+            channel_grid.addWidget(channel_header, 0, column)
+            channel_grid.addWidget(instrument_header, 0, column + 1)
+            channel_grid.addWidget(level_header, 0, column + 2, 1, 2)
+            self.channel_headers[column] = (
+                channel_header,
+                instrument_header,
+                level_header,
+            )
         self.channel_checkboxes = {}
+        self.channel_program_combos = {}
         self.channel_level_sliders = {}
         self.channel_level_labels = {}
         for channel in range(1, 17):
             checkbox = QCheckBox(str(channel), self)
+            checkbox.setIcon(_midi_channel_swatch_icon(channel))
+            checkbox.setIconSize(QSize(12, 12))
             checkbox.setChecked(True)
             checkbox.setVisible(False)
-            checkbox.setToolTip(f"Show and preview MIDI channel {channel}. Uncheck to mute it in the preview.")
+            checkbox.setToolTip(
+                f"Show or mute channel {channel}. "
+                "The color matches its piano-roll notes."
+            )
             checkbox.toggled.connect(self._update_visible_channels)
             self.channel_checkboxes[channel] = checkbox
+            program_combo = InstrumentComboBox(t, self)
+            program_combo.setVisible(False)
+            program_combo.setAccessibleName(
+                f"{t('Instrument for MIDI channel')} {channel}"
+            )
+            program_combo.selectionCommitted.connect(
+                lambda channel=channel: self._on_channel_program_changed(
+                    channel
+                )
+            )
+            self.channel_program_combos[channel] = program_combo
             level_slider = QSlider(Qt.Horizontal, self)
             level_slider.setRange(0, 100)
             level_slider.setValue(100)
@@ -4257,7 +5687,7 @@ class FileInspectionDialog(QDialog):
             level_slider.setPageStep(10)
             level_slider.setFixedWidth(92)
             level_slider.setVisible(False)
-            level_slider.setToolTip(f"Preview level for MIDI channel {channel}.")
+            level_slider.setToolTip(f"Channel {channel} preview level.")
             level_slider.valueChanged.connect(
                 lambda value, channel=channel: self._on_channel_level_changed(channel, value)
             )
@@ -4267,11 +5697,12 @@ class FileInspectionDialog(QDialog):
             level_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             level_label.setVisible(False)
             self.channel_level_labels[channel] = level_label
-            row = (channel - 1) % 8
-            column = 0 if channel <= 8 else 3
+            row = 1 + ((channel - 1) % 8)
+            column = 0 if channel <= 8 else 5
             channel_grid.addWidget(checkbox, row, column)
-            channel_grid.addWidget(level_slider, row, column + 1)
-            channel_grid.addWidget(level_label, row, column + 2)
+            channel_grid.addWidget(program_combo, row, column + 1)
+            channel_grid.addWidget(level_slider, row, column + 2)
+            channel_grid.addWidget(level_label, row, column + 3)
         channel_layout.addLayout(channel_grid)
         right_layout.addWidget(self.channel_group)
 
@@ -4309,50 +5740,88 @@ class FileInspectionDialog(QDialog):
         position_row.addWidget(self.duration_label)
         right_layout.addLayout(position_row)
 
-        soundfont_row = QHBoxLayout()
+        self.playback_group = QGroupBox(t("Playback"), self)
+        playback_layout = QGridLayout(self.playback_group)
         self.soundfont_label = QLabel(t("SoundFont:"), self)
         self.soundfont_combo = QComboBox(self)
         self.soundfont_combo.setMinimumWidth(240)
-        self.soundfont_combo.setToolTip(t("Choose the SoundFont used for FluidSynth preview rendering."))
+        self.soundfont_combo.setToolTip(t("Sound set used for audio preview."))
         self.soundfont_button = QPushButton(t("Download SoundFonts..."), self)
-        self.soundfont_button.setToolTip(t("Download additional SoundFonts for MIDI preview and audio rendering. APS MIDI Prep Tool will use installed SoundFonts automatically."))
-        soundfont_row.addWidget(self.soundfont_label)
-        soundfont_row.addWidget(self.soundfont_combo, stretch=1)
-        soundfont_row.addWidget(self.soundfont_button)
-        right_layout.addLayout(soundfont_row)
+        self.soundfont_button.setToolTip(t("Add or download SoundFonts."))
+        playback_layout.addWidget(self.soundfont_label, 0, 0)
+        playback_layout.addWidget(self.soundfont_combo, 0, 1, 1, 4)
+        playback_layout.addWidget(self.soundfont_button, 0, 5)
 
-        output_row = QHBoxLayout()
         self.output_label = QLabel(t("Playback output:"), self)
         self.output_combo = QComboBox(self)
         self.output_combo.setMinimumWidth(240)
         self.refresh_outputs_button = QPushButton(t("Refresh"), self)
-        output_row.addWidget(self.output_label)
-        output_row.addWidget(self.output_combo, stretch=1)
-        output_row.addWidget(self.refresh_outputs_button)
-        right_layout.addLayout(output_row)
+        self.refresh_outputs_button.setToolTip(t("Rescan connected MIDI outputs."))
+        playback_layout.addWidget(self.output_label, 1, 0)
+        playback_layout.addWidget(self.output_combo, 1, 1, 1, 4)
+        playback_layout.addWidget(self.refresh_outputs_button, 1, 5)
 
         controls = QHBoxLayout()
         self.play_button = QPushButton(t("Play"), self)
         self.stop_button = QPushButton(t("Stop"), self)
+        self.render_song_button = QPushButton(
+            t("Render Song..."),
+            self,
+        )
+        self.render_song_button.setToolTip(
+            t("Render one or all songs with the current settings.")
+        )
+        self.render_song_menu = QMenu(self.render_song_button)
+        self.render_selected_song_action = (
+            self.render_song_menu.addAction(
+                t("Selected Song...")
+            )
+        )
+        self.render_song_menu.addSeparator()
+        self.render_all_wav_action = self.render_song_menu.addAction(
+            t("All Songs as WAV...")
+        )
+        self.render_all_mp3_action = self.render_song_menu.addAction(
+            t("All Songs as MP3...")
+        )
+        self.render_song_button.setMenu(self.render_song_menu)
         controls.addWidget(self.play_button)
         controls.addWidget(self.stop_button)
+        controls.addWidget(self.render_song_button)
+        controls.addSpacing(16)
+        self.tempo_label = QLabel(t("Tempo"), self)
+        self.tempo_spinbox = QSpinBox(self)
+        self.tempo_spinbox.setRange(5, 400)
+        self.tempo_spinbox.setSingleStep(5)
+        self.tempo_spinbox.setValue(100)
+        self.tempo_spinbox.setSuffix("%")
+        self.tempo_spinbox.setFixedWidth(76)
+        self.tempo_spinbox.setAlignment(Qt.AlignRight)
+        self.tempo_spinbox.setKeyboardTracking(False)
+        self.tempo_spinbox.setAccelerated(True)
+        self.tempo_spinbox.setToolTip(t("Playback speed; file unchanged."))
+        self.tempo_label.setToolTip(self.tempo_spinbox.toolTip())
+        controls.addWidget(self.tempo_label)
+        controls.addWidget(self.tempo_spinbox)
         controls.addStretch()
         self.volume_label = QLabel(t("Preview volume"), self)
-        self.volume_label.setToolTip(t("Playback volume for the generated preview."))
+        self.volume_label.setToolTip(t("Audio preview volume."))
         self.volume_slider = QSlider(Qt.Horizontal, self)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(35)
         self.volume_slider.setSingleStep(5)
         self.volume_slider.setPageStep(10)
         self.volume_slider.setFixedWidth(150)
-        self.volume_slider.setToolTip(t("Playback volume for the generated preview."))
+        self.volume_slider.setToolTip(t("Audio preview volume."))
         self.volume_value_label = QLabel("35%", self)
         self.volume_value_label.setMinimumWidth(42)
         self.volume_value_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         controls.addWidget(self.volume_label)
         controls.addWidget(self.volume_slider)
         controls.addWidget(self.volume_value_label)
-        right_layout.addLayout(controls)
+        playback_layout.addLayout(controls, 2, 0, 1, 6)
+        playback_layout.setColumnStretch(1, 1)
+        right_layout.addWidget(self.playback_group)
 
         self.preview_progress_label = QLabel("", self)
         self.preview_progress_label.setVisible(False)
@@ -4361,13 +5830,17 @@ class FileInspectionDialog(QDialog):
         self.preview_progress_bar.setVisible(False)
         right_layout.addWidget(self.preview_progress_bar)
 
-        self.details_box = QPlainTextEdit(self)
+        self.details_group = QGroupBox(t("File details"), self)
+        details_layout = QVBoxLayout(self.details_group)
+        details_layout.setContentsMargins(6, 6, 6, 6)
+        self.details_box = QPlainTextEdit(self.details_group)
         self.details_box.setReadOnly(True)
-        right_layout.addWidget(self.details_box, stretch=2)
+        details_layout.addWidget(self.details_box)
+        right_layout.addWidget(self.details_group, stretch=2)
 
         splitter.addWidget(self.file_tree)
         splitter.addWidget(right_panel)
-        splitter.setSizes([260, 680])
+        splitter.setSizes([250, 850])
 
         close_row = QHBoxLayout()
         close_row.addStretch()
@@ -4378,14 +5851,32 @@ class FileInspectionDialog(QDialog):
         self.file_tree.currentItemChanged.connect(lambda _current, _previous: self._load_current_file())
         self.play_button.clicked.connect(self._play_current_file)
         self.stop_button.clicked.connect(self._stop_playback)
+        self.render_selected_song_action.triggered.connect(
+            self._render_inspected_song
+        )
+        self.render_all_wav_action.triggered.connect(
+            lambda _checked=False: self._render_all_inspected_songs(
+                "wav"
+            )
+        )
+        self.render_all_mp3_action.triggered.connect(
+            lambda _checked=False: self._render_all_inspected_songs(
+                "mp3"
+            )
+        )
+        self.playback_toggle_shortcut = QShortcut(QKeySequence("Space"), self)
+        self.playback_toggle_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self.playback_toggle_shortcut.setAutoRepeat(False)
+        self.playback_toggle_shortcut.activated.connect(self._toggle_playback)
         self.soundfont_button.clicked.connect(self.show_soundfont_manager)
         self.refresh_outputs_button.clicked.connect(self.refresh_midi_outputs)
         self.output_combo.currentIndexChanged.connect(self._on_output_changed)
         self.soundfont_combo.currentIndexChanged.connect(self._on_soundfont_changed)
-        self.player.positionChanged.connect(self._on_player_position_changed)
-        self.player.durationChanged.connect(self._on_player_duration_changed)
-        self.player.playbackStateChanged.connect(self._on_player_playback_state_changed)
+        self._connect_player_signals(self.player)
         self.volume_slider.valueChanged.connect(self._on_volume_changed)
+        self.tempo_spinbox.valueChanged.connect(
+            self._on_tempo_percent_changed
+        )
         self.zoom_slider.valueChanged.connect(self._on_zoom_changed)
         self.show_piano_only_checkbox.toggled.connect(self._update_visible_channels)
         self.tie_channel_levels_checkbox.toggled.connect(self._on_tie_channel_levels_toggled)
@@ -4436,8 +5927,27 @@ class FileInspectionDialog(QDialog):
 
     def _on_tie_channel_levels_toggled(self, _checked):
         self._refresh_channel_level_controls()
-        self._reset_preview_for_filter_change()
-        self.play_button.setEnabled(bool(self.visible_notes) and self.preview_render_worker is None)
+        for channel in self._available_preview_channels():
+            percent = (
+                100
+                if self._channel_levels_tied()
+                else self.channel_levels.get(channel, 100)
+            )
+            if self.midi_output_worker is not None:
+                self.midi_output_worker.set_channel_level(
+                    channel,
+                    percent,
+                )
+        if self.live_synth_process is not None:
+            self._apply_live_channel_selection(force=True)
+        elif self.preview_audio_path or self.preview_render_worker is not None:
+            self._preview_audio_stale = True
+        self.play_button.setEnabled(
+            bool(self.visible_notes)
+            and self.preview_render_worker is None
+            and self.midi_output_worker is None
+            and self.live_synth_process is None
+        )
 
     def _on_channel_level_changed(self, channel, value):
         if self._channel_levels_tied():
@@ -4450,21 +5960,232 @@ class FileInspectionDialog(QDialog):
         label = self.channel_level_labels.get(channel)
         if label is not None:
             label.setText(f"{percent}%")
-        self._reset_preview_for_filter_change()
-        self.play_button.setEnabled(bool(self.visible_notes) and self.preview_render_worker is None)
+        if self.midi_output_worker is not None:
+            self.midi_output_worker.set_channel_level(channel, percent)
+        elif self.live_synth_process is not None:
+            self.live_synth_process.set_channel_enabled(
+                channel,
+                channel in self._preview_channels(),
+                volume=self._live_channel_volume(channel),
+                force=True,
+            )
+        elif self.preview_audio_path or self.preview_render_worker is not None:
+            self._preview_audio_stale = True
+        self.play_button.setEnabled(
+            bool(self.visible_notes)
+            and self.preview_render_worker is None
+            and self.midi_output_worker is None
+            and self.live_synth_process is None
+        )
 
-    def _effective_channel_levels(self):
+    def _effective_channel_levels(self, channels=None):
         if self._channel_levels_tied():
             return {}
-        channels = self._preview_channels()
+        channels = (
+            self._preview_channels()
+            if channels is None
+            else set(channels)
+        )
         return {
             channel: self.channel_levels.get(channel, 100)
             for channel in channels
         }
 
+    def _on_channel_program_changed(self, channel):
+        channel = int(channel)
+        combo = self.channel_program_combos.get(channel)
+        if combo is None:
+            return
+        program = combo.currentData()
+        if program is None:
+            if channel not in self.channel_program_overrides:
+                return
+            self.channel_program_overrides.pop(channel, None)
+        else:
+            program = int(program)
+            if self.channel_program_overrides.get(channel) == program:
+                return
+            self.channel_program_overrides[channel] = program
+        if self.midi_output_worker is not None:
+            self.midi_output_worker.set_program_override(channel, program)
+        elif self.live_synth_process is not None:
+            if program is None:
+                self._live_recorded_program_channels.add(channel)
+                bank, recorded_program = (
+                    _recorded_program_state_at_seconds(
+                        self.current_midi_bytes,
+                        channel,
+                        self._current_base_seconds(),
+                    )
+                )
+                self.live_synth_process.set_program(
+                    channel,
+                    recorded_program,
+                    bank=bank,
+                )
+            else:
+                self._live_recorded_program_channels.discard(channel)
+                self.live_synth_process.set_program(
+                    channel,
+                    program,
+                )
+        elif self.preview_audio_path or self.preview_render_worker is not None:
+            self._preview_audio_stale = True
+            if self._smooth_playback_is_active():
+                self.preview_progress_label.setText(
+                    self.t(
+                        "Instrument saved for the next rendered preview."
+                    )
+                )
+                self.preview_progress_label.setVisible(True)
+        self.play_button.setEnabled(bool(self.visible_notes))
+
+    def _effective_channel_program_overrides(self, channels=None):
+        channels = (
+            self._preview_channels()
+            if channels is None
+            else set(channels)
+        )
+        return {
+            channel: program
+            for channel, program in self.channel_program_overrides.items()
+            if channel in channels
+        }
+
+    def _preview_tempo_percent(self):
+        return _normalized_tempo_percent(self.tempo_spinbox.value())
+
+    def _current_preview_position_ms(self):
+        if self._smooth_playback_is_active():
+            return self._smoothed_playback_position_ms()
+        return self._current_slider_position_ms()
+
+    def _current_base_seconds(self):
+        return (
+            self._current_preview_position_ms()
+            / 1000.0
+            * self._preview_tempo_percent()
+            / 100.0
+        )
+
+    def _preview_duration_for_tempo(self, tempo_percent):
+        return (
+            max(0.0, self.current_duration)
+            * 100.0
+            / _normalized_tempo_percent(tempo_percent)
+        )
+
+    def _preview_duration(self):
+        return self._preview_duration_for_tempo(
+            self._preview_tempo_percent()
+        )
+
+    def _tempo_scaled_visible_notes(self):
+        return _scale_preview_timed_items(
+            self.visible_notes,
+            self._preview_tempo_percent(),
+        )
+
+    def _tempo_scaled_visible_pedals(self):
+        return _scale_preview_timed_items(
+            self.visible_pedals,
+            self._preview_tempo_percent(),
+        )
+
+    def _refresh_preview_timing(self):
+        self.piano_roll.set_notes(
+            self._tempo_scaled_visible_notes(),
+            self._preview_duration(),
+            self._tempo_scaled_visible_pedals(),
+        )
+        self.duration_label.setText(
+            _format_duration(self._preview_duration())
+        )
+
+    def _on_tempo_percent_changed(self, value):
+        old_tempo = _normalized_tempo_percent(
+            self._last_tempo_percent
+        )
+        new_tempo = _normalized_tempo_percent(value)
+        playback_active = self._smooth_playback_is_active()
+        if (
+            playback_active
+            and self.preview_audio_path
+            and self.player.position() >= 0
+        ):
+            base_position_ms = (
+                self.player.position()
+                * self._rendered_tempo_percent
+                / 100.0
+            )
+        elif playback_active:
+            old_position_ms = self._smoothed_playback_position_ms()
+            base_position_ms = old_position_ms * old_tempo / 100.0
+        else:
+            old_duration = self._preview_duration_for_tempo(old_tempo)
+            old_position_ms = int(
+                self.position_slider.value()
+                / max(1, self.position_slider.maximum())
+                * old_duration
+                * 1000
+            )
+            base_position_ms = old_position_ms * old_tempo / 100.0
+        self._last_tempo_percent = new_tempo
+
+        if self.preview_audio_path:
+            self._updating_playback_rate = True
+            self.player.setPlaybackRate(
+                new_tempo / max(5, self._rendered_tempo_percent)
+            )
+            handoff = getattr(self, "_audio_handoff", None)
+            if handoff is not None:
+                handoff["new_player"].setPlaybackRate(
+                    new_tempo
+                    / max(5, handoff["rendered_tempo"])
+                )
+        if self.midi_output_worker is not None:
+            self.midi_output_worker.set_tempo_percent(new_tempo)
+        live_synth_process = getattr(
+            self,
+            "live_synth_process",
+            None,
+        )
+        if live_synth_process is not None:
+            live_synth_process.set_tempo_percent(new_tempo)
+
+        self._refresh_preview_timing()
+        new_position_ms = int(
+            base_position_ms * 100.0 / new_tempo
+        )
+        if playback_active:
+            self._sync_playback_clock(new_position_ms)
+        self._set_playback_position_display(new_position_ms)
+        if self._updating_playback_rate:
+            QTimer.singleShot(0, self._finish_playback_rate_update)
+        self.play_button.setEnabled(bool(self.visible_notes))
+
+    def _finish_playback_rate_update(self):
+        self._updating_playback_rate = False
+        if (
+            self.player.playbackState()
+            == QMediaPlayer.PlaybackState.PlayingState
+        ):
+            self._sync_playback_clock(
+                self._audio_source_to_preview_ms(
+                    self.player.position()
+                )
+            )
+
     def _notes_for_preview_render(self):
         notes = _notes_with_sustain_pedal(self.visible_notes, self.visible_pedals)
-        return _notes_with_channel_levels(notes, self._effective_channel_levels())
+        notes = _notes_with_channel_levels(
+            notes,
+            self._effective_channel_levels(),
+        )
+        return _scale_preview_timed_items(
+            notes,
+            self._preview_tempo_percent(),
+        )
 
     def _current_item(self):
         current = self.file_tree.currentItem()
@@ -4497,9 +6218,9 @@ class FileInspectionDialog(QDialog):
         self.output_combo.setCurrentIndex(selected)
         self.output_combo.blockSignals(False)
         tooltip = (
-            self.t("USB MIDI output support is unavailable. Install the python-rtmidi package.")
+            self.t("MIDI output unavailable; install python-rtmidi.")
             if error else
-            self.t("Play through the audio preview or send MIDI directly to a connected USB MIDI adapter.")
+            self.t("Choose audio preview or a connected MIDI output.")
         )
         self.output_combo.setToolTip(tooltip)
         self._on_output_changed()
@@ -4514,6 +6235,7 @@ class FileInspectionDialog(QDialog):
                        self.volume_label, self.volume_slider, self.volume_value_label):
             widget.setVisible(not using_midi)
         self._stop_playback()
+        self._refresh_inspection_render_button()
 
     def refresh_soundfonts(self):
         current_path = self.soundfont_combo.currentData()
@@ -4536,30 +6258,55 @@ class FileInspectionDialog(QDialog):
             if selected_index >= 0:
                 self.soundfont_combo.setCurrentIndex(selected_index)
         self.soundfont_combo.blockSignals(False)
+        self._refresh_inspection_render_button()
 
     def _on_soundfont_changed(self, _index=None):
         self._clear_preview_audio()
         self.preview_progress_label.setVisible(False)
         self.preview_progress_bar.setVisible(False)
+        self._refresh_inspection_render_button()
 
     def _clear_preview_audio(self):
+        self._cancel_audio_handoff(remove_new_path=True)
+        pending = self._pending_audio_start
+        self._pending_audio_start = None
+        paths_to_remove = {self.preview_audio_path}
+        if pending:
+            paths_to_remove.add(pending.get("path") or "")
+            paths_to_remove.add(pending.get("old_path") or "")
         self.playback_timer.stop()
         self.player.stop()
-        if self.preview_audio_path and os.path.exists(self.preview_audio_path):
+        self.player.setSource(QUrl())
+        self.player.setPlaybackRate(1.0)
+        for path in paths_to_remove:
+            if not path or not os.path.exists(path):
+                continue
             try:
-                os.remove(self.preview_audio_path)
+                os.remove(path)
             except OSError:
                 pass
         self.preview_audio_path = ""
         self.preview_engine_label = ""
+        self._preview_audio_stale = False
+        self._rendered_tempo_percent = self._preview_tempo_percent()
 
     def _set_preview_rendering(self, rendering):
         self.file_tree.setEnabled(not rendering)
         self.channel_group.setEnabled(not rendering)
         self.soundfont_combo.setEnabled((not rendering) and self.soundfont_combo.count() > 0 and bool(self.soundfont_combo.currentData()))
         self.soundfont_button.setEnabled(not rendering)
-        self.play_button.setEnabled((not rendering) and bool(self.visible_notes))
-        self.stop_button.setEnabled(not rendering)
+        self.play_button.setEnabled(
+            bool(self.visible_notes)
+            and (
+                not rendering
+                or bool(self.preview_audio_path)
+            )
+        )
+        self.stop_button.setEnabled(True)
+        if rendering:
+            self.render_song_button.setEnabled(False)
+        else:
+            self._refresh_inspection_render_button()
         if not rendering:
             self.preview_progress_bar.setVisible(False)
             self.preview_progress_label.setVisible(bool(self.preview_engine_label))
@@ -4567,6 +6314,12 @@ class FileInspectionDialog(QDialog):
                 self.preview_progress_label.setText(f"Preview renderer: {self.preview_engine_label}")
 
     def _load_current_file(self):
+        if (
+            self._smooth_playback_is_active()
+            or self.midi_output_worker is not None
+            or self.live_synth_process is not None
+        ):
+            self._stop_playback()
         if self.preview_render_worker is not None:
             self.preview_render_worker.cancel()
         self._clear_preview_audio()
@@ -4580,18 +6333,36 @@ class FileInspectionDialog(QDialog):
                 payload = convert_eseq_bytes_to_midi_bytes(payload, include_conversion_text=False)
             inspection = _inspect_midi_bytes(payload, source_label=label)
             self.current_midi_bytes = bytes(payload)
+            self._program_change_times = (
+                _program_change_times_by_channel(
+                    self.current_midi_bytes
+                )
+            )
+            self._channel_volume_change_times = (
+                _controller_change_times_by_channel(
+                    self.current_midi_bytes,
+                    {7, 121},
+                )
+            )
             self.all_notes = inspection["notes"]
             self.all_pedals = inspection.get("pedals", [])
             self.current_channel_info = dict(inspection.get("channel_info") or {})
             self.current_piano_channels = set(inspection.get("piano_channels") or set())
+            self.channel_program_overrides = {}
             self.current_notes = list(self.all_notes)
             self.visible_notes = list(self.all_notes)
             self.current_pedals = list(self.all_pedals)
             self.visible_pedals = list(self.all_pedals)
             self.current_duration = inspection["duration"]
+            self.tempo_spinbox.blockSignals(True)
+            self.tempo_spinbox.setValue(100)
+            self.tempo_spinbox.blockSignals(False)
+            self._last_tempo_percent = 100
             self.position_slider.setValue(0)
             self.elapsed_label.setText("0:00")
-            self.duration_label.setText(_format_duration(self.current_duration))
+            self.duration_label.setText(
+                _format_duration(self._preview_duration())
+            )
             self.details_box.setPlainText(inspection["metadata_text"])
             self._reset_channel_levels()
             self._update_channel_controls()
@@ -4600,17 +6371,25 @@ class FileInspectionDialog(QDialog):
             self.stop_button.setEnabled(True)
             self.preview_progress_label.setVisible(False)
             self.preview_progress_bar.setVisible(False)
+            self._refresh_inspection_render_button()
         except Exception as exc:
             self.current_midi_bytes = b""
+            self._program_change_times = {}
+            self._channel_volume_change_times = {}
             self.all_notes = []
             self.visible_notes = []
             self.all_pedals = []
             self.visible_pedals = []
             self.current_channel_info = {}
             self.current_piano_channels = set()
+            self.channel_program_overrides = {}
             self.current_notes = []
             self.current_pedals = []
             self.current_duration = 0.0
+            self.tempo_spinbox.blockSignals(True)
+            self.tempo_spinbox.setValue(100)
+            self.tempo_spinbox.blockSignals(False)
+            self._last_tempo_percent = 100
             self.piano_roll.set_notes([], 0.0)
             self.position_slider.setValue(0)
             self.elapsed_label.setText("0:00")
@@ -4619,6 +6398,7 @@ class FileInspectionDialog(QDialog):
             self._reset_channel_levels()
             self._update_channel_controls()
             self.play_button.setEnabled(False)
+            self._refresh_inspection_render_button()
 
     def _update_channel_controls(self):
         used_channels = set(self.current_channel_info) | {
@@ -4626,6 +6406,27 @@ class FileInspectionDialog(QDialog):
             for note in self.all_notes
             if int(note.get("channel", 0))
         }
+        ordered_channels = sorted(used_channels)
+        use_two_columns = len(ordered_channels) > 4
+        second_column_start = (
+            (len(ordered_channels) + 1) // 2
+            if use_two_columns
+            else len(ordered_channels)
+        )
+        channel_positions = {}
+        for visible_index, channel in enumerate(ordered_channels):
+            in_second_column = visible_index >= second_column_start
+            column = 5 if in_second_column else 0
+            row_index = (
+                visible_index - second_column_start
+                if in_second_column
+                else visible_index
+            )
+            channel_positions[channel] = (row_index + 1, column)
+        for column, headers in self.channel_headers.items():
+            visible = column == 0 or use_two_columns
+            for header in headers:
+                header.setVisible(visible)
         self.show_piano_only_checkbox.blockSignals(True)
         self.show_piano_only_checkbox.setEnabled(bool(self.current_piano_channels))
         self.show_piano_only_checkbox.setChecked(False)
@@ -4643,27 +6444,68 @@ class FileInspectionDialog(QDialog):
             if info.get("piano_candidate"):
                 label_parts.append("piano candidate")
             note_count = int(info.get("note_count", 0) or 0)
-            control_count = int(info.get("control_count", 0) or 0)
             label_parts.append(f"{note_count} note(s)")
-            label_parts.append(f"{control_count} control change(s)")
-            programs = info.get("programs") or []
-            if programs:
-                program_text = ", ".join(_program_name(program) for program in programs[:6])
-                if len(programs) > 6:
-                    program_text += f", and {len(programs) - 6} more"
-                label_parts.append(f"Programs: {program_text}")
-            mute_note = info.get("mute_note") or ""
-            if mute_note:
-                label_parts.append(mute_note)
             checkbox.setToolTip(". ".join(label_parts))
             checkbox.blockSignals(False)
+            program_combo = self.channel_program_combos.get(channel)
             slider = self.channel_level_sliders.get(channel)
             value_label = self.channel_level_labels.get(channel)
             channel_used = channel in used_channels
+            if channel_used:
+                row, column = channel_positions[channel]
+                self.channel_grid.addWidget(checkbox, row, column)
+                self.channel_grid.addWidget(program_combo, row, column + 1)
+                self.channel_grid.addWidget(slider, row, column + 2)
+                self.channel_grid.addWidget(value_label, row, column + 3)
+            if program_combo is not None:
+                programs = info.get("programs") or []
+                if len(programs) == 1:
+                    recorded_text = (
+                        f"{_program_name(programs[0])} "
+                        f"{self.t('(file)')}"
+                    )
+                elif programs:
+                    recorded_text = (
+                        f"{self.t('File changes')} — "
+                        f"{len(programs)} {self.t('programs')}"
+                    )
+                elif channel == 10:
+                    recorded_text = (
+                        f"{self.t('Percussion / drum kit')} "
+                        f"{self.t('(file)')}"
+                    )
+                else:
+                    recorded_text = (
+                        f"{_program_name(0)} {self.t('(default)')}"
+                    )
+                program_combo.blockSignals(True)
+                program_combo.set_recorded_text(recorded_text)
+                override = self.channel_program_overrides.get(channel)
+                selected_index = (
+                    program_combo.findData(override)
+                    if override is not None
+                    else 0
+                )
+                program_combo.setCurrentIndex(max(0, selected_index))
+                program_combo.remember_current_selection()
+                program_combo.setVisible(channel_used)
+                program_combo.setEnabled(channel_used)
+                tooltip = self.t(
+                    "Preview instrument. Type to search; file unchanged."
+                )
+                if channel == 10:
+                    tooltip += (
+                        " "
+                        + self.t(
+                            "GM channel 10 is percussion."
+                        )
+                    )
+                program_combo.setToolTip(tooltip)
+                program_combo.blockSignals(False)
             if slider is not None:
                 slider.setVisible(channel_used)
                 slider.setEnabled(channel_used and not tied_levels)
-                slider.setToolTip(f"Preview level for MIDI channel {channel}.")
+                slider.setToolTip(f"Channel {channel} preview level.")
             if value_label is not None:
                 value_label.setVisible(channel_used)
             level_percent = tied_percent if tied_levels else self.channel_levels.get(channel, 100)
@@ -4676,19 +6518,50 @@ class FileInspectionDialog(QDialog):
             if not checkbox.isHidden() and checkbox.isChecked()
         }
 
+    def _available_preview_channels(self):
+        return {
+            channel
+            for channel, checkbox in self.channel_checkboxes.items()
+            if not checkbox.isHidden()
+        }
+
     def _preview_channels(self):
         channels = self._selected_channels()
         if self.show_piano_only_checkbox.isChecked() and self.current_piano_channels:
             channels &= self.current_piano_channels
         return channels
 
-    def _reset_preview_for_filter_change(self):
-        self._clear_preview_audio()
-        self.position_slider.setValue(0)
-        self.elapsed_label.setText("0:00")
-        self.piano_roll.set_playhead(0.0)
-        self.preview_progress_label.setVisible(False)
-        self.preview_progress_bar.setVisible(False)
+    def _live_channel_volume(self, channel):
+        volume = _recorded_controller_value_at_seconds(
+            self.current_midi_bytes,
+            channel,
+            7,
+            self._current_base_seconds(),
+            default=100,
+        )
+        if not self._channel_levels_tied():
+            volume = _scaled_midi_value(
+                volume,
+                self.channel_levels.get(channel, 100),
+            )
+        return volume
+
+    def _apply_live_channel_selection(self, *, force=False):
+        enabled_channels = self._preview_channels()
+        for channel in self._available_preview_channels():
+            enabled = channel in enabled_channels
+            if self.midi_output_worker is not None:
+                self.midi_output_worker.set_channel_enabled(
+                    channel,
+                    enabled,
+                )
+            if self.live_synth_process is not None:
+                self.live_synth_process.set_channel_enabled(
+                    channel,
+                    enabled,
+                    volume=self._live_channel_volume(channel),
+                    force=force,
+                )
 
     def _update_visible_channels(self, *args, reset_preview=True):
         del args
@@ -4705,17 +6578,457 @@ class FileInspectionDialog(QDialog):
         ]
         self.current_notes = list(self.visible_notes)
         self.current_pedals = list(self.visible_pedals)
-        self.piano_roll.set_notes(self.visible_notes, self.current_duration, self.visible_pedals)
+        self._refresh_preview_timing()
         if reset_preview:
-            self._reset_preview_for_filter_change()
-        self.play_button.setEnabled(bool(self.visible_notes) and self.preview_render_worker is None)
-
-    def _filtered_midi_bytes_for_preview(self):
-        return _filter_midi_bytes_to_channels(
-            self.current_midi_bytes,
-            self._preview_channels(),
-            self._effective_channel_levels(),
+            if (
+                self.midi_output_worker is not None
+                or self.live_synth_process is not None
+            ):
+                self._apply_live_channel_selection()
+            elif (
+                self.preview_audio_path
+                or self.preview_render_worker is not None
+            ):
+                self._preview_audio_stale = True
+                if self._smooth_playback_is_active():
+                    self.preview_progress_label.setText(
+                        self.t(
+                            "Channel selection saved for the next "
+                            "rendered preview."
+                        )
+                    )
+                    self.preview_progress_label.setVisible(True)
+        self.play_button.setEnabled(
+            bool(self.visible_notes)
+            and self.preview_render_worker is None
+            and self.midi_output_worker is None
+            and self.live_synth_process is None
         )
+        self._refresh_inspection_render_button()
+
+    def _filtered_midi_bytes_for_preview(
+        self,
+        *,
+        include_program_overrides=True,
+        scale_tempo=True,
+        channels=None,
+        include_channel_levels=True,
+    ):
+        requested_channels = channels
+        channels = (
+            self._preview_channels()
+            if channels is None
+            else set(channels)
+        )
+        filtered = _filter_midi_bytes_to_channels(
+            self.current_midi_bytes,
+            channels,
+            (
+                (
+                    self._effective_channel_levels()
+                    if requested_channels is None
+                    else self._effective_channel_levels(channels)
+                )
+                if include_channel_levels
+                else None
+            ),
+            (
+                (
+                    self._effective_channel_program_overrides()
+                    if requested_channels is None
+                    else self._effective_channel_program_overrides(
+                        channels
+                    )
+                )
+                if include_program_overrides
+                else None
+            ),
+        )
+        if scale_tempo:
+            return _scale_midi_tempo_bytes(
+                filtered,
+                self._preview_tempo_percent(),
+            )
+        return filtered
+
+    def _inspection_render_midi_bytes(self):
+        return self._filtered_midi_bytes_for_preview(
+            include_program_overrides=True,
+            scale_tempo=True,
+        )
+
+    def _refresh_inspection_render_button(self):
+        button = getattr(self, "render_song_button", None)
+        if button is None:
+            return
+        soundfont_path = self.soundfont_combo.currentData() or ""
+        button.setEnabled(
+            bool(self.current_midi_bytes)
+            and bool(self._preview_channels())
+            and bool(soundfont_path)
+            and os.path.isfile(soundfont_path)
+            and bool(_find_fluidsynth_command())
+            and self.preview_render_worker is None
+            and self.inspection_render_worker is None
+        )
+
+    def _suggested_inspection_render_path(self):
+        item = self._current_item()
+        source_path = str(item.get("path") or "")
+        label = str(
+            item.get("label")
+            or os.path.basename(source_path)
+            or "rendered_song"
+        )
+        stem = os.path.splitext(os.path.basename(source_path))[0]
+        if not stem:
+            stem = os.path.splitext(label)[0]
+        stem = re.sub(r'[<>:"/\\|?*]+', "_", stem).strip(" .")
+        stem = stem or "rendered_song"
+        output_dir = (
+            os.path.dirname(os.path.abspath(source_path))
+            if source_path
+            else os.path.expanduser("~")
+        )
+        return os.path.join(output_dir, f"{stem}.wav")
+
+    def _suggested_inspection_render_directory(self):
+        return os.path.dirname(
+            os.path.abspath(
+                self._suggested_inspection_render_path()
+            )
+        )
+
+    def _render_inspected_song(self, _checked=False):
+        if self.inspection_render_worker is not None:
+            return
+        soundfont_path = self.soundfont_combo.currentData() or ""
+        if not _find_fluidsynth_command():
+            QMessageBox.warning(
+                self,
+                self.t("FluidSynth Required"),
+                self.t(
+                    "Install FluidSynth before rendering audio with a SoundFont."
+                ),
+            )
+            return
+        if not soundfont_path or not os.path.isfile(soundfont_path):
+            QMessageBox.warning(
+                self,
+                self.t("SoundFont Required"),
+                self.t(
+                    "Select a SoundFont before rendering this song."
+                ),
+            )
+            return
+
+        output_path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            self.t("Render Selected Song"),
+            self._suggested_inspection_render_path(),
+            (
+                f"{self.t('WAV Audio')} (*.wav);;"
+                f"{self.t('MP3 Audio')} (*.mp3)"
+            ),
+        )
+        if not output_path:
+            return
+        extension = os.path.splitext(output_path)[1].lower()
+        selected_mp3 = "MP3" in selected_filter.upper()
+        if extension == ".mp3" or (
+            extension not in (".wav", ".mp3") and selected_mp3
+        ):
+            output_format = "mp3"
+            if extension != ".mp3":
+                output_path += ".mp3"
+        else:
+            output_format = "wav"
+            if extension != ".wav":
+                output_path += ".wav"
+        if output_format == "mp3" and not _find_lame_command():
+            QMessageBox.warning(
+                self,
+                self.t("LAME Required"),
+                self.t(
+                    "MP3 export requires LAME. Choose WAV or install LAME and try again."
+                ),
+            )
+            return
+
+        try:
+            midi_bytes = self._inspection_render_midi_bytes()
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                self.t("Audio Render Failed"),
+                f"{self.t('The selected song could not be prepared.')}\n\n{exc}",
+            )
+            return
+
+        self._stop_playback()
+        self._inspection_render_scope = "selected"
+        self._inspection_render_output_dir = os.path.dirname(
+            os.path.abspath(output_path)
+        )
+        worker = InspectionAudioRenderWorker(
+            midi_bytes,
+            soundfont_path,
+            output_path,
+            output_format,
+            volume_percent=self._preview_volume_percent(),
+            parent=self,
+        )
+        worker.renderProgress.connect(
+            self._on_inspection_render_progress
+        )
+        worker.renderFinished.connect(
+            self._on_inspection_render_finished
+        )
+        worker.renderFailed.connect(
+            self._on_inspection_render_failed
+        )
+        worker.finished.connect(
+            self._on_inspection_render_worker_finished
+        )
+        self.inspection_render_worker = worker
+        self._set_inspection_rendering(True)
+        self._on_inspection_render_progress(
+            self.t("Preparing selected song...")
+        )
+        worker.start()
+
+    def _render_all_inspected_songs(self, output_format):
+        if self.inspection_render_worker is not None:
+            return
+        output_format = str(output_format or "wav").lower()
+        soundfont_path = self.soundfont_combo.currentData() or ""
+        if not _find_fluidsynth_command():
+            QMessageBox.warning(
+                self,
+                self.t("FluidSynth Required"),
+                self.t(
+                    "Install FluidSynth before rendering audio with a SoundFont."
+                ),
+            )
+            return
+        if not soundfont_path or not os.path.isfile(soundfont_path):
+            QMessageBox.warning(
+                self,
+                self.t("SoundFont Required"),
+                self.t(
+                    "Select a SoundFont before rendering these songs."
+                ),
+            )
+            return
+        if output_format == "mp3" and not _find_lame_command():
+            QMessageBox.warning(
+                self,
+                self.t("LAME Required"),
+                self.t(
+                    "MP3 export requires LAME. Choose WAV or install LAME and try again."
+                ),
+            )
+            return
+
+        output_dir = QFileDialog.getExistingDirectory(
+            self,
+            self.t("Render All Songs"),
+            self._suggested_inspection_render_directory(),
+        )
+        if not output_dir:
+            return
+
+        self._stop_playback()
+        self._inspection_render_scope = "all"
+        self._inspection_render_output_dir = output_dir
+        worker = BatchAudioRenderWorker(
+            self.items,
+            soundfont_path,
+            output_dir,
+            output_format,
+            parent=self,
+            channels=self._preview_channels(),
+            channel_levels=self._effective_channel_levels(),
+            program_overrides=(
+                self._effective_channel_program_overrides()
+            ),
+            tempo_percent=self._preview_tempo_percent(),
+            volume_percent=self._preview_volume_percent(),
+        )
+        worker.renderProgress.connect(
+            self._on_inspection_batch_render_progress
+        )
+        worker.renderFinished.connect(
+            self._on_inspection_batch_render_finished
+        )
+        worker.renderFailed.connect(
+            self._on_inspection_render_failed
+        )
+        worker.finished.connect(
+            self._on_inspection_render_worker_finished
+        )
+        self.inspection_render_worker = worker
+        self._set_inspection_rendering(True)
+        self._on_inspection_batch_render_progress(
+            0,
+            len(self.items),
+            self.t("Preparing all songs..."),
+        )
+        worker.start()
+
+    def _set_inspection_rendering(self, rendering):
+        self.file_tree.setEnabled(not rendering)
+        self.channel_group.setEnabled(not rendering)
+        self.soundfont_combo.setEnabled(
+            (not rendering)
+            and self.soundfont_combo.count() > 0
+            and bool(self.soundfont_combo.currentData())
+        )
+        self.soundfont_button.setEnabled(not rendering)
+        self.output_combo.setEnabled(not rendering)
+        self.refresh_outputs_button.setEnabled(not rendering)
+        self.tempo_spinbox.setEnabled(not rendering)
+        self.volume_slider.setEnabled(not rendering)
+        self.play_button.setEnabled(
+            (not rendering)
+            and bool(self.visible_notes)
+            and self.preview_render_worker is None
+        )
+        self.stop_button.setEnabled(not rendering)
+        self.render_song_button.setText(
+            self.t("Rendering...")
+            if rendering
+            else self.t("Render Song...")
+        )
+        if rendering:
+            self.render_song_button.setEnabled(False)
+        else:
+            self._refresh_inspection_render_button()
+
+    def _on_inspection_render_progress(self, message):
+        self.preview_progress_label.setText(
+            str(message or self.t("Rendering selected song..."))
+        )
+        self.preview_progress_label.setVisible(True)
+        self.preview_progress_bar.setRange(0, 0)
+        self.preview_progress_bar.setVisible(True)
+
+    def _on_inspection_render_finished(self, output_path):
+        self.preview_progress_bar.setVisible(False)
+        self.preview_progress_label.setText(
+            f"{self.t('Rendered song')}: {output_path}"
+        )
+        QMessageBox.information(
+            self,
+            self.t("Song Rendered"),
+            (
+                f"{self.t('The selected song was rendered with the current inspection settings.')}"
+                f"\n\n{output_path}"
+            ),
+        )
+
+    def _on_inspection_batch_render_progress(
+        self,
+        step,
+        total,
+        message,
+    ):
+        total = max(1, int(total or 1))
+        self.preview_progress_label.setText(
+            str(message or self.t("Rendering songs..."))
+        )
+        self.preview_progress_label.setVisible(True)
+        self.preview_progress_bar.setRange(0, total)
+        self.preview_progress_bar.setValue(
+            max(0, min(int(step or 0), total))
+        )
+        self.preview_progress_bar.setVisible(True)
+
+    def _on_inspection_batch_render_finished(
+        self,
+        rendered_count,
+        failures,
+    ):
+        failures = list(failures or [])
+        self.preview_progress_bar.setVisible(False)
+        self.preview_progress_label.setText(
+            self.t("Rendered {count} song(s).").format(
+                count=rendered_count
+            )
+        )
+        if failures:
+            detail = "\n".join(failures[:12])
+            if len(failures) > 12:
+                detail += self.t(
+                    "\n...and {count} more."
+                ).format(count=len(failures) - 12)
+            QMessageBox.warning(
+                self,
+                self.t("Audio Render Complete"),
+                (
+                    self.t(
+                        "Rendered {count} song(s), with {failed} issue(s)."
+                    ).format(
+                        count=rendered_count,
+                        failed=len(failures),
+                    )
+                    + f"\n\n{detail}"
+                ),
+            )
+            return
+        QMessageBox.information(
+            self,
+            self.t("All Songs Rendered"),
+            (
+                self.t(
+                    "All songs were rendered with the current inspection settings."
+                )
+                + f"\n\n{self._inspection_render_output_dir}"
+            ),
+        )
+
+    def _on_inspection_render_failed(self, message):
+        self.preview_progress_bar.setVisible(False)
+        if self._closing or "cancelled" in str(message or "").lower():
+            self.preview_progress_label.setText(
+                self.t("Song render cancelled.")
+            )
+            return
+        self.preview_progress_label.setText(
+            self.t("Song render failed.")
+        )
+        QMessageBox.warning(
+            self,
+            self.t("Audio Render Failed"),
+            (
+                (
+                    self.t("The songs could not be rendered.")
+                    if self._inspection_render_scope == "all"
+                    else self.t(
+                        "The selected song could not be rendered."
+                    )
+                )
+                + f"\n\n{message}"
+            ),
+        )
+
+    def _on_inspection_render_worker_finished(self):
+        worker = self.inspection_render_worker
+        self.inspection_render_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        self._set_inspection_rendering(False)
+
+    def _toggle_playback(self):
+        if (
+            self._smooth_playback_is_active()
+            or self.midi_output_worker is not None
+            or self.live_synth_process is not None
+        ):
+            self._stop_playback()
+            return
+        if self.play_button.isEnabled():
+            self._play_current_file()
 
     def _play_current_file(self):
         if not self.visible_notes or self.preview_render_worker is not None:
@@ -4723,26 +7036,222 @@ class FileInspectionDialog(QDialog):
         if self._using_midi_output():
             self._start_midi_output_playback()
             return
+        if self._can_use_live_fluidsynth():
+            self._start_live_fluidsynth_playback()
+            return
+        if self._preview_audio_stale:
+            self._clear_preview_audio()
         if self.preview_audio_path and os.path.exists(self.preview_audio_path):
             self._start_preview_playback()
             return
 
+        self._start_audio_preview_render(autoplay=True)
+
+    def _can_use_live_fluidsynth(self):
+        soundfont_path = self.soundfont_combo.currentData() or ""
+        return bool(
+            not self._using_midi_output()
+            and soundfont_path
+            and os.path.isfile(soundfont_path)
+            and _find_fluidsynth_command()
+        )
+
+    def _start_live_fluidsynth_playback(self):
+        if self.live_synth_process is not None:
+            return
+        available_channels = self._available_preview_channels()
+        enabled_channels = self._preview_channels()
+        try:
+            midi_bytes = self._filtered_midi_bytes_for_preview(
+                include_program_overrides=True,
+                scale_tempo=False,
+                channels=available_channels,
+            )
+        except Exception as exc:
+            self._on_live_fluidsynth_failed(str(exc))
+            return
+
+        if self.preview_audio_path:
+            self._clear_preview_audio()
+        start_seconds = self._slider_base_seconds()
+        process = FluidSynthPlaybackProcess(
+            midi_bytes,
+            self.soundfont_combo.currentData() or "",
+            start_seconds=start_seconds,
+            tempo_percent=self._preview_tempo_percent(),
+            volume_percent=self._preview_volume_percent(),
+            program_overrides=self._effective_channel_program_overrides(
+                available_channels
+            ),
+            enabled_channels=enabled_channels,
+            available_channels=available_channels,
+            parent=self,
+        )
+        process.playbackStarted.connect(
+            lambda position_ms, started_at, active_process=process: (
+                self._on_live_fluidsynth_started(
+                    active_process,
+                    position_ms,
+                    started_at,
+                )
+            )
+        )
+        process.playbackFailed.connect(
+            lambda message, active_process=process: (
+                self._on_live_fluidsynth_failed(
+                    message,
+                    active_process,
+                )
+            )
+        )
+        process.playbackEnded.connect(
+            lambda active_process=process: (
+                self._on_live_fluidsynth_ended(active_process)
+            )
+        )
+        self.live_synth_process = process
+        self._live_synth_clock_active = False
+        self._live_synth_fallback_pending = False
+        self._last_live_program_sync_seconds = start_seconds
+        self.play_button.setEnabled(False)
+        self.output_combo.setEnabled(False)
+        self.refresh_outputs_button.setEnabled(False)
+        self.soundfont_combo.setEnabled(False)
+        self.soundfont_button.setEnabled(False)
+        self.preview_progress_label.setText(
+            self.t("Starting realtime SoundFont preview...")
+        )
+        self.preview_progress_label.setVisible(True)
+        self.preview_progress_bar.setRange(0, 0)
+        self.preview_progress_bar.setVisible(True)
+        process.start_playback()
+
+    def _on_live_fluidsynth_started(
+        self,
+        process,
+        base_position_ms,
+        started_at,
+    ):
+        if (
+            process is not self.live_synth_process
+            or self._closing
+        ):
+            return
+        self._live_synth_clock_active = True
+        preview_position_ms = int(
+            base_position_ms
+            * 100.0
+            / self._preview_tempo_percent()
+        )
+        self._sync_playback_clock(
+            preview_position_ms,
+            started_at=started_at,
+        )
+        self._set_playback_position_display(preview_position_ms)
+        self.preview_engine_label = (
+            "FluidSynth realtime + "
+            + _soundfont_display_name(
+                self.soundfont_combo.currentData() or ""
+            )
+        )
+        self.preview_progress_bar.setVisible(False)
+        self.preview_progress_label.setText(
+            f"{self.t('Preview renderer')}: "
+            f"{self.preview_engine_label}"
+        )
+        self._apply_live_channel_selection(force=True)
+        if not self.playback_timer.isActive():
+            self.playback_timer.start()
+
+    def _on_live_fluidsynth_failed(self, message, process=None):
+        if (
+            process is not None
+            and process is not self.live_synth_process
+        ):
+            return
+        if self._closing:
+            return
+        self._live_synth_fallback_pending = True
+        self.preview_progress_bar.setVisible(False)
+        self.preview_progress_label.setText(
+            self.t(
+                "Realtime preview unavailable; preparing rendered preview..."
+            )
+        )
+        self.preview_progress_label.setToolTip(str(message or ""))
+        if process is None and self.live_synth_process is None:
+            self._live_synth_fallback_pending = False
+            self._start_audio_preview_render(autoplay=True)
+
+    def _on_live_fluidsynth_ended(self, process):
+        if process is not self.live_synth_process:
+            process.deleteLater()
+            return
+        self._live_synth_clock_active = False
+        self._live_recorded_program_channels.clear()
+        self.live_synth_process = None
+        process.deleteLater()
+        if (
+            self.player.playbackState()
+            != QMediaPlayer.PlaybackState.PlayingState
+            and self.midi_output_worker is None
+        ):
+            self.playback_timer.stop()
+        self.output_combo.setEnabled(True)
+        self.refresh_outputs_button.setEnabled(True)
+        self.soundfont_combo.setEnabled(
+            self.soundfont_combo.count() > 0
+            and bool(self.soundfont_combo.currentData())
+        )
+        self.soundfont_button.setEnabled(True)
+        self.play_button.setEnabled(
+            bool(self.visible_notes)
+            and self.preview_render_worker is None
+        )
+        if (
+            self._live_synth_fallback_pending
+            and not self._closing
+        ):
+            self._live_synth_fallback_pending = False
+            self._start_audio_preview_render(autoplay=True)
+
+    def _start_audio_preview_render(self, *, autoplay):
+        if self.preview_render_worker is not None:
+            return
         handle, path = tempfile.mkstemp(prefix="aps_preview_", suffix=".wav")
         os.close(handle)
-        self.preview_audio_path = path
+        render_tempo_percent = self._preview_tempo_percent()
         worker = MidiPreviewRenderWorker(
             self._filtered_midi_bytes_for_preview(),
             self._notes_for_preview_render(),
-            self.current_duration,
+            self._preview_duration(),
             path,
             soundfont_path=self.soundfont_combo.currentData() or "",
             parent=self,
         )
+        worker.render_tempo_percent = render_tempo_percent
         worker.progressChanged.connect(self._on_preview_render_progress)
-        worker.previewReady.connect(self._on_preview_render_ready)
-        worker.previewFailed.connect(self._on_preview_render_failed)
-        worker.finished.connect(self._on_preview_render_finished)
+        worker.previewReady.connect(
+            lambda ready_path, engine_label, active_worker=worker: (
+                self._on_preview_render_ready(
+                    active_worker,
+                    ready_path,
+                    engine_label,
+                )
+            )
+        )
+        worker.previewFailed.connect(
+            lambda message, active_worker=worker: (
+                self._on_preview_render_failed(active_worker, message)
+            )
+        )
+        worker.finished.connect(
+            lambda active_worker=worker: (
+                self._on_preview_render_finished(active_worker)
+            )
+        )
         self.preview_render_worker = worker
+        self._preview_render_autoplay = bool(autoplay)
         self._set_preview_rendering(True)
         self._on_preview_render_progress(0, 100, "Preparing preview...")
         worker.start()
@@ -4753,15 +7262,29 @@ class FileInspectionDialog(QDialog):
         data = self.output_combo.currentData()
         if not isinstance(data, tuple) or data[0] != "midi":
             return
+        available_channels = self._available_preview_channels()
         try:
-            midi_bytes = self._filtered_midi_bytes_for_preview()
+            midi_bytes = self._filtered_midi_bytes_for_preview(
+                include_program_overrides=False,
+                scale_tempo=False,
+                channels=available_channels,
+                include_channel_levels=False,
+            )
         except Exception as exc:
             self._on_midi_output_failed(str(exc))
             return
         worker = MidiOutputWorker(
             midi_bytes,
             data[1],
-            start_seconds=self._slider_seconds(),
+            start_seconds=self._slider_base_seconds(),
+            tempo_percent=self._preview_tempo_percent(),
+            program_overrides=self._effective_channel_program_overrides(
+                available_channels
+            ),
+            enabled_channels=self._preview_channels(),
+            channel_levels=self._effective_channel_levels(
+                available_channels
+            ),
             parent=self,
         )
         worker.playbackStarted.connect(
@@ -4784,7 +7307,13 @@ class FileInspectionDialog(QDialog):
         if worker is not self.midi_output_worker or self._closing:
             return
         self._midi_playback_clock_active = True
-        self._sync_playback_clock(position_ms, started_at=started_at)
+        preview_position_ms = int(
+            position_ms * 100.0 / self._preview_tempo_percent()
+        )
+        self._sync_playback_clock(
+            preview_position_ms,
+            started_at=started_at,
+        )
         self._set_playback_position_display(self._smoothed_playback_position_ms())
         if not self.playback_timer.isActive():
             self.playback_timer.start()
@@ -4828,13 +7357,250 @@ class FileInspectionDialog(QDialog):
             self.preview_progress_bar.setRange(0, int(total))
             self.preview_progress_bar.setValue(max(0, min(int(step), int(total))))
 
-    def _on_preview_render_ready(self, path, engine_label):
+    def _on_preview_render_ready(self, worker, path, engine_label):
+        if worker is not self.preview_render_worker or self._closing:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            return
+        current_tempo = self._preview_tempo_percent()
+        old_path = self.preview_audio_path
+        old_rendered_tempo = self._rendered_tempo_percent
+        playback_active = self._smooth_playback_is_active()
+        rendered_tempo = _normalized_tempo_percent(
+            getattr(worker, "render_tempo_percent", current_tempo)
+        )
+        autoplay = (
+            self._preview_render_autoplay
+            and (not old_path or playback_active)
+        )
+        if old_path and playback_active and autoplay:
+            self._begin_audio_handoff(
+                path,
+                engine_label,
+                rendered_tempo,
+                old_path,
+                old_rendered_tempo,
+            )
+            return
+        if old_path and self.player.position() >= 0:
+            base_position_ms = (
+                self.player.position()
+                * old_rendered_tempo
+                / 100.0
+            )
+        elif playback_active:
+            base_position_ms = (
+                self._smoothed_playback_position_ms()
+                * current_tempo
+                / 100.0
+            )
+        else:
+            base_position_ms = (
+                self._current_slider_position_ms()
+                * current_tempo
+                / 100.0
+            )
         self.preview_audio_path = path
         self.preview_engine_label = engine_label
-        self._start_preview_playback()
+        self._preview_audio_stale = False
+        self._rendered_tempo_percent = rendered_tempo
+        resume_position_ms = int(
+            base_position_ms * 100.0 / current_tempo
+        )
+        self._start_preview_playback(
+            position_ms=resume_position_ms,
+            autoplay=autoplay,
+            old_path=old_path,
+        )
 
-    def _on_preview_render_failed(self, message):
-        self._clear_preview_audio()
+    def _begin_audio_handoff(
+        self,
+        path,
+        engine_label,
+        rendered_tempo,
+        old_path,
+        old_rendered_tempo,
+    ):
+        self._cancel_audio_handoff(remove_new_path=True)
+        new_player = QMediaPlayer(self)
+        new_output = QAudioOutput(self)
+        new_output.setVolume(0.0)
+        new_player.setAudioOutput(new_output)
+        handoff = {
+            "new_player": new_player,
+            "new_output": new_output,
+            "new_path": path,
+            "engine_label": engine_label,
+            "rendered_tempo": rendered_tempo,
+            "old_path": old_path,
+            "old_rendered_tempo": old_rendered_tempo,
+            "loaded": False,
+            "fade_step": 0,
+            "fade_steps": 8,
+        }
+        self._audio_handoff = handoff
+        status_handler = (
+            lambda status, candidate=new_player:
+            self._on_audio_handoff_media_status(candidate, status)
+        )
+        state_handler = (
+            lambda state, candidate=new_player:
+            self._on_audio_handoff_playback_state(candidate, state)
+        )
+        handoff["status_handler"] = status_handler
+        handoff["state_handler"] = state_handler
+        new_player.mediaStatusChanged.connect(status_handler)
+        new_player.playbackStateChanged.connect(state_handler)
+        new_player.setSource(QUrl.fromLocalFile(path))
+        self._on_audio_handoff_media_status(
+            new_player,
+            new_player.mediaStatus(),
+        )
+
+    def _on_audio_handoff_media_status(self, player, status):
+        handoff = self._audio_handoff
+        if not handoff or player is not handoff["new_player"]:
+            return
+        if status == QMediaPlayer.MediaStatus.InvalidMedia:
+            self._cancel_audio_handoff(remove_new_path=True)
+            return
+        if status not in (
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        ) or handoff["loaded"]:
+            return
+        handoff["loaded"] = True
+        current_tempo = self._preview_tempo_percent()
+        base_position_ms = (
+            max(0, self.player.position())
+            * handoff["old_rendered_tempo"]
+            / 100.0
+        )
+        player.setPlaybackRate(
+            current_tempo
+            / max(5, handoff["rendered_tempo"])
+        )
+        player.setPosition(
+            int(
+                base_position_ms
+                * 100.0
+                / max(5, handoff["rendered_tempo"])
+            )
+        )
+        player.play()
+
+    def _on_audio_handoff_playback_state(self, player, state):
+        handoff = self._audio_handoff
+        if (
+            not handoff
+            or player is not handoff["new_player"]
+            or state != QMediaPlayer.PlaybackState.PlayingState
+            or self.audio_handoff_timer.isActive()
+        ):
+            return
+        handoff["fade_step"] = 0
+        self.audio_handoff_timer.start()
+
+    def _advance_audio_handoff(self):
+        handoff = self._audio_handoff
+        if not handoff:
+            self.audio_handoff_timer.stop()
+            return
+        handoff["fade_step"] += 1
+        fraction = min(
+            1.0,
+            handoff["fade_step"] / handoff["fade_steps"],
+        )
+        target_volume = self._preview_volume_percent() / 100.0
+        self.audio_output.setVolume(
+            target_volume * (1.0 - fraction)
+        )
+        handoff["new_output"].setVolume(
+            target_volume * fraction
+        )
+        if fraction >= 1.0:
+            self._complete_audio_handoff()
+
+    def _complete_audio_handoff(self):
+        handoff = self._audio_handoff
+        if not handoff:
+            return
+        self.audio_handoff_timer.stop()
+        old_player = self.player
+        old_output = self.audio_output
+        new_player = handoff["new_player"]
+        new_output = handoff["new_output"]
+        try:
+            new_player.mediaStatusChanged.disconnect(
+                handoff["status_handler"]
+            )
+            new_player.playbackStateChanged.disconnect(
+                handoff["state_handler"]
+            )
+        except (RuntimeError, TypeError):
+            pass
+        self._disconnect_player_signals(old_player)
+        self.player = new_player
+        self.audio_output = new_output
+        self.preview_audio_path = handoff["new_path"]
+        self.preview_engine_label = handoff["engine_label"]
+        self._preview_audio_stale = False
+        self._rendered_tempo_percent = handoff["rendered_tempo"]
+        self._audio_handoff = None
+        self._connect_player_signals(new_player)
+        new_output.setVolume(self._preview_volume_percent() / 100.0)
+        preview_position_ms = self._audio_source_to_preview_ms(
+            new_player.position()
+        )
+        self._sync_playback_clock(preview_position_ms)
+        self._set_playback_position_display(preview_position_ms)
+        if not self.playback_timer.isActive():
+            self.playback_timer.start()
+        old_player.stop()
+        old_player.deleteLater()
+        old_output.deleteLater()
+        old_path = handoff["old_path"]
+        if (
+            old_path
+            and old_path != self.preview_audio_path
+            and os.path.exists(old_path)
+        ):
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
+
+    def _cancel_audio_handoff(self, *, remove_new_path):
+        handoff = self._audio_handoff
+        if not handoff:
+            return
+        self.audio_handoff_timer.stop()
+        self._audio_handoff = None
+        self.audio_output.setVolume(
+            self._preview_volume_percent() / 100.0
+        )
+        new_player = handoff["new_player"]
+        new_player.stop()
+        new_player.deleteLater()
+        handoff["new_output"].deleteLater()
+        new_path = handoff["new_path"]
+        if (
+            remove_new_path
+            and new_path
+            and new_path != self.preview_audio_path
+            and os.path.exists(new_path)
+        ):
+            try:
+                os.remove(new_path)
+            except OSError:
+                pass
+
+    def _on_preview_render_failed(self, worker, message):
+        if worker is not self.preview_render_worker:
+            return
         self.preview_progress_label.setVisible(False)
         self.preview_progress_bar.setVisible(False)
         if self._closing or "cancelled" in str(message).lower():
@@ -4847,51 +7613,275 @@ class FileInspectionDialog(QDialog):
             f"{catalog_tr('error.details_label', language)}: {message}",
         )
 
-    def _on_preview_render_finished(self):
-        worker = self.preview_render_worker
-        self.preview_render_worker = None
-        if worker is not None:
+    def _on_preview_render_finished(self, worker):
+        if worker is not self.preview_render_worker:
             worker.deleteLater()
+            return
+        self.preview_render_worker = None
+        worker.deleteLater()
         self._set_preview_rendering(False)
+        if self._preview_rebuild_pending and not self._closing:
+            self._preview_rebuild_pending = False
+            autoplay = (
+                self._preview_render_autoplay
+                or self._smooth_playback_is_active()
+            )
+            self._start_audio_preview_render(autoplay=autoplay)
 
-    def _start_preview_playback(self):
+    def _start_preview_playback(
+        self,
+        position_ms=None,
+        *,
+        autoplay=True,
+        old_path="",
+    ):
         if not self.preview_audio_path or not os.path.exists(self.preview_audio_path):
             return
-        self.player.setSource(QUrl.fromLocalFile(self.preview_audio_path))
-        seek_ms = self._current_slider_position_ms()
-        if seek_ms > 0:
-            self.player.setPosition(seek_ms)
-        self._sync_playback_clock(seek_ms)
-        self.player.play()
+        preview_position_ms = (
+            self._current_slider_position_ms()
+            if position_ms is None
+            else max(0, int(position_ms))
+        )
+        base_position_ms = (
+            preview_position_ms
+            * self._preview_tempo_percent()
+            / 100.0
+        )
+        source_path = self.player.source().toLocalFile()
+        same_source = (
+            bool(source_path)
+            and os.path.normcase(os.path.abspath(source_path))
+            == os.path.normcase(
+                os.path.abspath(self.preview_audio_path)
+            )
+        )
+        if not same_source:
+            self._pending_audio_start = {
+                "path": self.preview_audio_path,
+                "base_position_ms": base_position_ms,
+                "autoplay": bool(autoplay),
+                "old_path": old_path,
+                "scheduled": False,
+            }
+            self.player.setSource(
+                QUrl.fromLocalFile(self.preview_audio_path)
+            )
+            self._on_player_media_status_changed(
+                self.player.mediaStatus()
+            )
+            return
+        self._apply_loaded_audio_position(
+            base_position_ms,
+            autoplay=autoplay,
+        )
+
+    def _apply_loaded_audio_position(
+        self,
+        base_position_ms,
+        *,
+        autoplay,
+    ):
+        current_tempo = self._preview_tempo_percent()
+        self.player.setPlaybackRate(
+            current_tempo
+            / max(5, self._rendered_tempo_percent)
+        )
+        source_position_ms = int(
+            max(0.0, float(base_position_ms))
+            * 100.0
+            / max(5, self._rendered_tempo_percent)
+        )
+        preview_position_ms = int(
+            max(0.0, float(base_position_ms))
+            * 100.0
+            / current_tempo
+        )
+        self.player.setPosition(source_position_ms)
+        self._sync_playback_clock(preview_position_ms)
+        self._set_playback_position_display(preview_position_ms)
+        if autoplay:
+            self.player.play()
+
+    def _connect_player_signals(self, player):
+        player.positionChanged.connect(self._on_player_position_changed)
+        player.durationChanged.connect(self._on_player_duration_changed)
+        player.mediaStatusChanged.connect(
+            self._on_player_media_status_changed
+        )
+        player.playbackStateChanged.connect(
+            self._on_player_playback_state_changed
+        )
+
+    def _disconnect_player_signals(self, player):
+        for signal, handler in (
+            (player.positionChanged, self._on_player_position_changed),
+            (player.durationChanged, self._on_player_duration_changed),
+            (
+                player.mediaStatusChanged,
+                self._on_player_media_status_changed,
+            ),
+            (
+                player.playbackStateChanged,
+                self._on_player_playback_state_changed,
+            ),
+        ):
+            try:
+                signal.disconnect(handler)
+            except (RuntimeError, TypeError):
+                pass
+
+    def _on_player_media_status_changed(self, status):
+        pending = self._pending_audio_start
+        if not pending or self._closing:
+            return
+        if status not in (
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        ):
+            return
+        if pending.get("scheduled"):
+            return
+        pending["scheduled"] = True
+        expected_path = pending["path"]
+        QTimer.singleShot(
+            0,
+            lambda: self._complete_pending_audio_start(
+                expected_path
+            ),
+        )
+
+    def _complete_pending_audio_start(self, expected_path):
+        pending = self._pending_audio_start
+        if (
+            not pending
+            or pending.get("path") != expected_path
+            or self._closing
+        ):
+            return
+        source_path = self.player.source().toLocalFile()
+        if (
+            os.path.normcase(os.path.abspath(source_path))
+            != os.path.normcase(os.path.abspath(expected_path))
+        ):
+            return
+        self._pending_audio_start = None
+        self._apply_loaded_audio_position(
+            pending["base_position_ms"],
+            autoplay=pending["autoplay"],
+        )
+        old_path = pending.get("old_path") or ""
+        if (
+            old_path
+            and old_path != expected_path
+            and os.path.exists(old_path)
+        ):
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
 
     def _current_slider_position_ms(self):
         fraction = self.position_slider.value() / max(1, self.position_slider.maximum())
-        duration = self.player.duration()
-        if duration <= 0:
-            duration = int(max(0.0, self.current_duration) * 1000)
+        duration = int(self._preview_duration() * 1000)
         return int(max(0.0, min(1.0, fraction)) * max(0, duration))
 
     def _slider_seconds(self):
         fraction = self.position_slider.value() / max(1, self.position_slider.maximum())
-        return max(0.0, min(1.0, fraction)) * max(0.0, self.current_duration)
+        return (
+            max(0.0, min(1.0, fraction))
+            * self._preview_duration()
+        )
+
+    def _slider_base_seconds(self):
+        return (
+            self._slider_seconds()
+            * self._preview_tempo_percent()
+            / 100.0
+        )
+
+    def _audio_source_to_preview_ms(self, source_position_ms):
+        return int(
+            max(0, int(source_position_ms or 0))
+            * self._rendered_tempo_percent
+            / self._preview_tempo_percent()
+        )
+
+    def _preview_to_audio_source_ms(self, preview_position_ms):
+        return int(
+            max(0, int(preview_position_ms or 0))
+            * self._preview_tempo_percent()
+            / max(5, self._rendered_tempo_percent)
+        )
 
     def _seek_to_seconds(self, seconds):
-        seconds = max(0.0, min(float(seconds or 0.0), max(0.0, self.current_duration)))
+        preview_duration = self._preview_duration()
+        seconds = max(
+            0.0,
+            min(float(seconds or 0.0), preview_duration),
+        )
+        if self.live_synth_process is not None:
+            current_base_seconds = self._current_base_seconds()
+            target_base_seconds = (
+                seconds * self._preview_tempo_percent() / 100.0
+            )
+            current_tick = _midi_tick_for_seconds(
+                self.current_midi_bytes,
+                current_base_seconds,
+            )
+            target_tick = _midi_tick_for_seconds(
+                self.current_midi_bytes,
+                target_base_seconds,
+            )
+            self.live_synth_process.seek_ticks(
+                target_tick - current_tick
+            )
+            for channel, program in (
+                self.channel_program_overrides.items()
+            ):
+                self.live_synth_process.set_program(
+                    channel,
+                    program,
+                )
+            for channel in self._live_recorded_program_channels:
+                bank, recorded_program = (
+                    _recorded_program_state_at_seconds(
+                        self.current_midi_bytes,
+                        channel,
+                        target_base_seconds,
+                    )
+                )
+                self.live_synth_process.set_program(
+                    channel,
+                    recorded_program,
+                    bank=bank,
+                )
+            self._apply_live_channel_selection(force=True)
+            self._last_live_program_sync_seconds = target_base_seconds
+            if self._live_synth_clock_active:
+                self._sync_playback_clock(int(seconds * 1000))
         if self.midi_output_worker is not None:
             self._midi_playback_clock_active = False
             self.playback_timer.stop()
             self.midi_output_worker.stop()
         maximum = max(1, self.position_slider.maximum())
-        value = int((seconds / max(0.1, self.current_duration)) * maximum) if self.current_duration > 0 else 0
+        value = (
+            int((seconds / max(0.1, preview_duration)) * maximum)
+            if preview_duration > 0
+            else 0
+        )
         self.position_slider.blockSignals(True)
         self.position_slider.setValue(max(0, min(maximum, value)))
         self.position_slider.blockSignals(False)
         self.elapsed_label.setText(_format_duration(seconds))
         self.piano_roll.set_playhead(seconds)
         if self.player.duration() > 0:
-            position_ms = int(seconds * 1000)
-            self.player.setPosition(position_ms)
-            self._sync_playback_clock(position_ms)
+            preview_position_ms = int(seconds * 1000)
+            self.player.setPosition(
+                self._preview_to_audio_source_ms(
+                    preview_position_ms
+                )
+            )
+            self._sync_playback_clock(preview_position_ms)
 
     def _on_position_slider_pressed(self):
         self._position_slider_dragging = True
@@ -4905,19 +7895,28 @@ class FileInspectionDialog(QDialog):
         self.elapsed_label.setText(_format_duration(seconds))
         self.piano_roll.set_playhead(seconds)
         if self._position_slider_dragging and self.player.duration() > 0:
-            position_ms = int(seconds * 1000)
-            self.player.setPosition(position_ms)
-            self._sync_playback_clock(position_ms)
+            preview_position_ms = int(seconds * 1000)
+            self.player.setPosition(
+                self._preview_to_audio_source_ms(
+                    preview_position_ms
+                )
+            )
+            self._sync_playback_clock(preview_position_ms)
 
     def _on_player_position_changed(self, position_ms):
-        if self._midi_playback_clock_active:
+        if (
+            self._midi_playback_clock_active
+            or self._updating_playback_rate
+            or self._pending_audio_start is not None
+        ):
             return
+        preview_position_ms = self._audio_source_to_preview_ms(position_ms)
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-            if abs(int(position_ms or 0) - self._smoothed_playback_position_ms()) > 180:
-                self._sync_playback_clock(position_ms)
+            if abs(preview_position_ms - self._smoothed_playback_position_ms()) > 180:
+                self._sync_playback_clock(preview_position_ms)
             return
-        self._sync_playback_clock(position_ms)
-        self._set_playback_position_display(position_ms)
+        self._sync_playback_clock(preview_position_ms)
+        self._set_playback_position_display(preview_position_ms)
 
     def _sync_playback_clock(self, position_ms=None, *, started_at=None):
         if position_ms is None:
@@ -4931,42 +7930,135 @@ class FileInspectionDialog(QDialog):
         return (
             self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
             or self._midi_playback_clock_active
+            or self._live_synth_clock_active
         )
 
     def _smoothed_playback_position_ms(self):
         position_ms = self._playback_clock_position_ms
         if self._smooth_playback_is_active():
             position_ms += int((time.monotonic() - self._playback_clock_started_at) * 1000)
-        duration_ms = self.player.duration()
-        if duration_ms <= 0:
-            duration_ms = int(max(0.0, self.current_duration) * 1000)
+        duration_ms = int(self._preview_duration() * 1000)
         return max(0, min(max(0, duration_ms), position_ms))
 
     def _refresh_playback_position(self):
+        if self._pending_audio_start is not None:
+            return
+        if self._live_synth_clock_active:
+            position_ms = self._smoothed_playback_position_ms()
+            self._sync_live_program_overrides(position_ms)
+            self._set_playback_position_display(position_ms)
+            if position_ms >= int(self._preview_duration() * 1000):
+                self._live_synth_clock_active = False
+                if self.live_synth_process is not None:
+                    self.live_synth_process.stop_playback()
+            return
         if self._midi_playback_clock_active:
             self._set_playback_position_display(self._smoothed_playback_position_ms())
             return
         if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
             self.playback_timer.stop()
-            self._set_playback_position_display(self.player.position())
+            self._set_playback_position_display(
+                self._audio_source_to_preview_ms(
+                    self.player.position()
+                )
+            )
             return
         self._set_playback_position_display(self._smoothed_playback_position_ms())
 
+    def _sync_live_program_overrides(self, preview_position_ms):
+        process = self.live_synth_process
+        recorded_channels = self._live_recorded_program_channels
+        tracked_channels = (
+            set(self.channel_program_overrides)
+            | set(recorded_channels)
+        )
+        if process is None:
+            return
+        muted_channels = (
+            set(process.available_channels)
+            - set(process.enabled_channels)
+        )
+        if not tracked_channels and not muted_channels:
+            return
+        current_seconds = (
+            max(0, int(preview_position_ms or 0))
+            / 1000.0
+            * self._preview_tempo_percent()
+            / 100.0
+        )
+        previous_seconds = self._last_live_program_sync_seconds
+        if current_seconds < previous_seconds:
+            previous_seconds = current_seconds
+        for channel in tracked_channels:
+            change_times = self._program_change_times.get(channel, ())
+            override_program = self.channel_program_overrides.get(
+                channel
+            )
+            lookahead_seconds = (
+                0.1 if override_program is not None else 0.0
+            )
+            if any(
+                previous_seconds
+                < change_time
+                <= current_seconds + lookahead_seconds
+                for change_time in change_times
+            ):
+                if override_program is not None:
+                    process.set_program(channel, override_program)
+                else:
+                    bank, recorded_program = (
+                        _recorded_program_state_at_seconds(
+                            self.current_midi_bytes,
+                            channel,
+                            current_seconds,
+                        )
+                    )
+                    process.set_program(
+                        channel,
+                        recorded_program,
+                        bank=bank,
+                    )
+        for channel in muted_channels:
+            change_times = self._channel_volume_change_times.get(
+                channel,
+                (),
+            )
+            if any(
+                previous_seconds < change_time <= current_seconds
+                for change_time in change_times
+            ):
+                process.set_channel_enabled(
+                    channel,
+                    False,
+                    force=True,
+                )
+        self._last_live_program_sync_seconds = current_seconds
+
     def _on_player_playback_state_changed(self, state):
-        if self._midi_playback_clock_active:
+        if (
+            self._midi_playback_clock_active
+            or self._updating_playback_rate
+            or self._pending_audio_start is not None
+        ):
             return
         if state == QMediaPlayer.PlaybackState.PlayingState:
-            self._sync_playback_clock(self.player.position())
+            self._sync_playback_clock(
+                self._audio_source_to_preview_ms(
+                    self.player.position()
+                )
+            )
             if not self.playback_timer.isActive():
                 self.playback_timer.start()
         else:
             self.playback_timer.stop()
-            self._set_playback_position_display(self.player.position())
+            self._set_playback_position_display(
+                self._audio_source_to_preview_ms(
+                    self.player.position()
+                )
+            )
 
     def _set_playback_position_display(self, position_ms):
-        duration_ms = self.player.duration()
-        if duration_ms <= 0:
-            duration_ms = int(max(0.0, self.current_duration) * 1000)
+        duration_ms = int(self._preview_duration() * 1000)
         seconds = max(0.0, position_ms / 1000.0)
         if not self._position_slider_dragging and duration_ms > 0:
             value = int((position_ms / duration_ms) * self.position_slider.maximum())
@@ -4981,14 +8073,30 @@ class FileInspectionDialog(QDialog):
         self.piano_roll.set_playhead(seconds, smooth_follow=smooth_follow)
 
     def _on_player_duration_changed(self, duration_ms):
-        if duration_ms > 0:
-            self.duration_label.setText(_format_duration(duration_ms / 1000.0))
-        else:
-            self.duration_label.setText(_format_duration(self.current_duration))
+        del duration_ms
+        self.duration_label.setText(
+            _format_duration(self._preview_duration())
+        )
 
     def _on_volume_changed(self, value):
         percent = max(0, min(int(value or 0), 100))
-        self.audio_output.setVolume(percent / 100.0)
+        target_volume = percent / 100.0
+        if self._audio_handoff is not None:
+            handoff = self._audio_handoff
+            fraction = min(
+                1.0,
+                handoff["fade_step"] / handoff["fade_steps"],
+            )
+            self.audio_output.setVolume(
+                target_volume * (1.0 - fraction)
+            )
+            handoff["new_output"].setVolume(
+                target_volume * fraction
+            )
+        else:
+            self.audio_output.setVolume(target_volume)
+        if self.live_synth_process is not None:
+            self.live_synth_process.set_volume_percent(percent)
         self.volume_value_label.setText(f"{percent}%")
         if self._channel_levels_tied():
             self._refresh_channel_level_controls()
@@ -4999,23 +8107,45 @@ class FileInspectionDialog(QDialog):
         self.piano_roll.set_zoom_percent(percent)
 
     def _stop_playback(self):
+        self._preview_render_autoplay = False
+        handoff_active = self._audio_handoff is not None
+        if handoff_active:
+            self._cancel_audio_handoff(remove_new_path=True)
+        if self._pending_audio_start is not None:
+            self._pending_audio_start["autoplay"] = False
+            self._pending_audio_start["base_position_ms"] = 0.0
         self._midi_playback_clock_active = False
+        self._live_synth_clock_active = False
         if self.midi_output_worker is not None:
             self.midi_output_worker.stop()
+        if self.live_synth_process is not None:
+            self.live_synth_process.stop_playback()
         self.playback_timer.stop()
         self.player.stop()
         self._seek_to_seconds(0.0)
+        if handoff_active:
+            self._clear_preview_audio()
 
     def closeEvent(self, event):
         self._closing = True
         self._midi_playback_clock_active = False
+        self._live_synth_clock_active = False
         self.playback_timer.stop()
+        self._cancel_audio_handoff(remove_new_path=True)
+        if self.live_synth_process is not None:
+            self.live_synth_process.stop_playback()
+            if not self.live_synth_process.waitForFinished(2000):
+                self.live_synth_process.kill()
+                self.live_synth_process.waitForFinished(1000)
         if self.midi_output_worker is not None:
             self.midi_output_worker.stop()
             self.midi_output_worker.wait(2000)
         if self.preview_render_worker is not None:
             self.preview_render_worker.cancel()
             self.preview_render_worker.wait(3000)
+        if self.inspection_render_worker is not None:
+            self.inspection_render_worker.cancel()
+            self.inspection_render_worker.wait(3000)
         self._clear_preview_audio()
         super().closeEvent(event)
 
@@ -5252,6 +8382,63 @@ class BugReportSubmitWorker(QThread):
             self.reportFailed.emit(message)
 
 
+def _counted_noun(count, singular, plural=None):
+    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
+
+
+def _psr600_conversion_prompt_copy(summary, source_label=""):
+    summary = summary or {}
+    file_count = int(summary.get("file_count") or 0)
+    melody_count = int(summary.get("melody_bank_count") or 0)
+    layer_count = int(summary.get("apparent_layer_count") or 0)
+    chord_count = int(summary.get("chord_bank_count") or 0)
+    partial_count = int(
+        summary.get("partial_melody_bank_count") or 0
+    )
+
+    headline = (
+        f"Convert {_counted_noun(file_count, 'PSR-600 Page Memory file')} "
+        "to MIDI?"
+    )
+    found = _counted_noun(melody_count, "recorded Melody bank")
+    summary_line = (
+        f"{source_label} contains {found}."
+        if source_label
+        else f"Found {found}."
+    )
+    caveats = [
+        "• Conductor and Chord-bank switching are not decoded; "
+        "banks may overlap."
+    ]
+    if layer_count:
+        caveats.append(
+            f"• {_counted_noun(layer_count, 'possible voice layer')} "
+            "will be exported on a separate track/channel."
+        )
+    if chord_count:
+        caveats.append(
+            f"• {_counted_noun(chord_count, 'Chord bank')} "
+            "cannot be rendered."
+        )
+    if partial_count:
+        ending = (
+            "its last valid event"
+            if partial_count == 1
+            else "their last valid events"
+        )
+        caveats.append(
+            f"• {_counted_noun(partial_count, 'damaged Melody bank')} "
+            f"will stop at {ending}."
+        )
+    detail = (
+        f"{summary_line}\n\n"
+        "Each BLK becomes one multitrack Type 1 MIDI using approximate "
+        "General MIDI instruments. Source files are unchanged.\n\n"
+        + "\n".join(caveats)
+    )
+    return headline, detail
+
+
 class MidiTitleWindow(QMainWindow):
     TITLE_COMPAT_LIMIT = 32
     ESEQ_FILE_LIMIT = PIANODIR_MAX_TRACKS
@@ -5407,6 +8594,7 @@ class MidiTitleWindow(QMainWindow):
         self.pendingFloppyReadConvertToMidi = False
         self.pendingFloppyReadTrimTitles = False
         self.v50NseqPromptedSessionPath = ""
+        self.psr600BlkPromptedSessionPath = ""
         self.electoneMdrPromptedSessionPath = ""
         self.electoneApproximateInstruments = True
         self.mpcSeqPromptedSessionPath = ""
@@ -7552,6 +10740,8 @@ class MidiTitleWindow(QMainWindow):
             return
         if self._offer_v50_nseq_conversion_if_available():
             return
+        if self._offer_psr600_blk_conversion_if_available():
+            return
         self._offer_mpc_seq_conversion_if_available()
 
     def _v50_nseq_sequence_summary_for_image(self, image_path):
@@ -7940,6 +11130,467 @@ class MidiTitleWindow(QMainWindow):
             reset_current_image=reset_current_image,
             confirm_image_exit=confirm_image_exit,
             append=append,
+            extra_regular_paths=extra_regular_paths,
+        )
+
+    def _is_psr600_blk_path(self, file_path):
+        return (
+            bool(file_path)
+            and os.path.isfile(file_path)
+            and psr600_blk_to_midi.looks_like_psr600_blk_file(file_path)
+        )
+
+    def can_accept_psr600_blk_path(self, file_path):
+        return self._is_psr600_blk_path(file_path)
+
+    def _psr600_blk_file_paths_in_folder(self, directory):
+        try:
+            filenames = os.listdir(directory)
+        except OSError:
+            return []
+        return sorted(
+            (
+                os.path.join(directory, filename)
+                for filename in filenames
+                if self._is_psr600_blk_path(
+                    os.path.join(directory, filename)
+                )
+            ),
+            key=lambda path: (os.path.basename(path).upper(), path.upper()),
+        )
+
+    def _psr600_blk_summary_for_paths(self, file_paths):
+        filenames = []
+        melody_bank_count = 0
+        complete_count = 0
+        partial_count = 0
+        note_on_count = 0
+        apparent_layer_count = 0
+        chord_bank_count = 0
+        bad_sector_count = 0
+        for file_path in file_paths or []:
+            if not self._is_psr600_blk_path(file_path):
+                continue
+            try:
+                summary = psr600_blk_to_midi.summarize_file(file_path)
+            except Exception:
+                continue
+            filenames.extend(summary.get("filenames", []))
+            melody_bank_count += int(
+                summary.get("melody_bank_count") or 0
+            )
+            complete_count += int(
+                summary.get("complete_melody_bank_count") or 0
+            )
+            partial_count += int(
+                summary.get("partial_melody_bank_count") or 0
+            )
+            note_on_count += int(summary.get("note_on_count") or 0)
+            apparent_layer_count += int(
+                summary.get("apparent_layer_count") or 0
+            )
+            chord_bank_count += int(
+                summary.get("chord_bank_count") or 0
+            )
+            bad_sector_count += int(
+                summary.get("bad_sector_count") or 0
+            )
+        if not filenames:
+            return None
+        return {
+            "file_count": len(filenames),
+            "melody_bank_count": melody_bank_count,
+            "complete_melody_bank_count": complete_count,
+            "partial_melody_bank_count": partial_count,
+            "note_on_count": note_on_count,
+            "apparent_layer_count": apparent_layer_count,
+            "chord_bank_count": chord_bank_count,
+            "bad_sector_count": bad_sector_count,
+            "filenames": filenames,
+        }
+
+    def _image_entry_is_psr600_blk(self, entry, session=None):
+        session = session or self.image_session
+        if session is None:
+            return False
+        if (
+            os.path.splitext(entry.name or "")[1].lower() != ".blk"
+            or int(getattr(entry, "size", 0) or 0)
+            != psr600_blk_to_midi.PAGE_MEMORY_SIZE
+        ):
+            return False
+        try:
+            extracted_path = session.extract_file(entry.path)
+            return self._is_psr600_blk_path(extracted_path)
+        except Exception:
+            return False
+
+    def _psr600_blk_entries_from_listing(self, listing, session=None):
+        return [
+            entry
+            for entry in getattr(listing, "entries", [])
+            if self._image_entry_is_psr600_blk(entry, session=session)
+        ]
+
+    def _current_image_psr600_blk_entries(self):
+        if self.image_session is None:
+            return []
+        try:
+            listing = self.image_session.list_entries()
+        except Exception:
+            return []
+        return self._psr600_blk_entries_from_listing(
+            listing,
+            session=self.image_session,
+        )
+
+    def _extract_image_psr600_blk_entries(self, entries, session=None):
+        session = session or self.image_session
+        if session is None:
+            return [], ["No disk or image is currently open."]
+        inputs = []
+        failures = []
+        for entry in entries:
+            try:
+                extracted_path = session.extract_file(entry.path)
+                if not self._is_psr600_blk_path(extracted_path):
+                    failures.append(
+                        f"{entry.path}: not a recognized PSR-600 Page Memory file"
+                    )
+                    continue
+                inputs.append(
+                    {
+                        "path": extracted_path,
+                        "output_stem": os.path.splitext(
+                            entry.name or "PSR600_PAGE"
+                        )[0],
+                        "label": entry.path,
+                    }
+                )
+            except Exception as exc:
+                failures.append(f"{entry.path}: {exc}")
+        return inputs, failures
+
+    def _prompt_for_psr600_blk_conversion(self, summary, source_label=""):
+        summary = summary or {}
+        file_count = int(summary.get("file_count") or 0)
+        if file_count <= 0:
+            return False
+
+        headline, detail = _psr600_conversion_prompt_copy(
+            summary,
+            source_label,
+        )
+
+        prompt = QMessageBox(self)
+        apply_window_icon(prompt)
+        prompt.setIcon(QMessageBox.Question)
+        prompt.setWindowTitle("PSR-600 Page Memory Detected")
+        prompt.setText(headline)
+        prompt.setInformativeText(detail)
+        prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        prompt.setDefaultButton(QMessageBox.Yes)
+        prompt.button(QMessageBox.Yes).setText(self._lt("Convert"))
+        prompt.button(QMessageBox.No).setText(self._lt("Cancel"))
+        return self._exec_child_dialog(prompt) == QMessageBox.Yes
+
+    def _psr600_blk_input_specs(self, source_paths):
+        inputs = []
+        for item in source_paths or []:
+            if isinstance(item, dict):
+                path = item.get("path", "")
+                output_stem = item.get("output_stem")
+                label = item.get("label") or path
+            else:
+                path = item
+                output_stem = None
+                label = path
+            if not self._is_psr600_blk_path(path):
+                continue
+            inputs.append(
+                {
+                    "path": os.path.abspath(path),
+                    "output_stem": output_stem,
+                    "label": label,
+                }
+            )
+        return inputs
+
+    def _convert_psr600_blk_paths_to_midi_paths(self, source_paths):
+        source_inputs = self._psr600_blk_input_specs(source_paths)
+        if not source_inputs:
+            return [], [], [], False
+
+        output_root = (
+            Path(self._ensure_midi_scratch_dir())
+            / f"psr600_blk_{uuid.uuid4().hex}"
+        )
+        staged_output_dir = output_root / "midi"
+        staged_output_dir.mkdir(parents=True, exist_ok=True)
+        midi_paths = []
+        reports = []
+        failures = []
+        cancelled = False
+
+        progress_dialog = QProgressDialog(
+            "Converting PSR-600 Page Memory files to MIDI...",
+            "Cancel",
+            0,
+            len(source_inputs),
+            self,
+        )
+        progress_dialog.setWindowTitle("Converting PSR-600 Page Memory")
+        self._prepare_progress_dialog(progress_dialog)
+        progress_dialog.show()
+        QApplication.processEvents()
+
+        try:
+            for index, source_input in enumerate(source_inputs, start=1):
+                source_path = source_input["path"]
+                label = source_input.get("label") or source_path
+                progress_dialog.setValue(index - 1)
+                progress_dialog.setLabelText(
+                    f"Converting {os.path.basename(label)}..."
+                )
+                QApplication.processEvents()
+                if progress_dialog.wasCanceled():
+                    cancelled = True
+                    break
+                try:
+                    per_file_dir = (
+                        output_root / f"{index:03d}_{uuid.uuid4().hex}"
+                    )
+                    source_reports = psr600_blk_to_midi.convert_one(
+                        Path(source_path),
+                        per_file_dir,
+                        output_stem=source_input.get("output_stem"),
+                        use_gm=True,
+                    )
+                    if not source_reports:
+                        raise RuntimeError(
+                            "No recorded Melody banks were found."
+                        )
+                    for report in source_reports:
+                        source_output = Path(report.output)
+                        if not source_output.is_file():
+                            raise RuntimeError(
+                                "The converter did not create a MIDI file."
+                            )
+                        target_output = self._unique_path_in_directory(
+                            staged_output_dir,
+                            source_output.name,
+                        )
+                        shutil.move(str(source_output), str(target_output))
+                        report.input = label
+                        report.output = str(target_output)
+                        reports.append(report)
+                        midi_paths.append(str(target_output))
+                except Exception as exc:
+                    failures.append(f"{os.path.basename(label)}: {exc}")
+        finally:
+            progress_dialog.setValue(len(source_inputs))
+            progress_dialog.close()
+
+        return midi_paths, reports, failures, cancelled
+
+    def _convert_psr600_blk_files_to_midi_mode(
+        self,
+        source_paths,
+        source_name,
+        summary,
+        *,
+        reset_current_image=False,
+        confirm_image_exit=True,
+        append=False,
+        extra_regular_paths=None,
+        pre_conversion_warnings=None,
+    ):
+        source_inputs = self._psr600_blk_input_specs(source_paths)
+        extra_regular_paths = [
+            os.path.abspath(path)
+            for path in (extra_regular_paths or [])
+            if os.path.isfile(path)
+            and self._regular_drop_file_kind(path)
+            in {"midi", "eseq", "pianodir"}
+        ]
+        warnings = list(pre_conversion_warnings or [])
+        if not source_inputs:
+            return False
+        if (
+            reset_current_image
+            and confirm_image_exit
+            and self.image_session is not None
+            and not self._confirm_discard_image_changes()
+        ):
+            return False
+
+        midi_paths, reports, failures, cancelled = (
+            self._convert_psr600_blk_paths_to_midi_paths(source_inputs)
+        )
+        warnings.extend(failures)
+        if not midi_paths:
+            if warnings:
+                self._show_error_list(
+                    "PSR-600 Page Memory Conversion Failed",
+                    "The app could not convert the selected PSR-600 BLK files to MIDI",
+                    warnings,
+                    warning=True,
+                    guidance="The source BLK files were not modified",
+                )
+            elif cancelled:
+                self.status_label.setText(
+                    "PSR-600 Page Memory conversion cancelled. "
+                    "No files were changed."
+                )
+            return False
+
+        if reset_current_image and self.image_session is not None:
+            self._reset_image_state()
+
+        melody_bank_count = int(
+            (summary or {}).get("melody_bank_count") or 0
+        )
+        apparent_layer_count = int(
+            (summary or {}).get("apparent_layer_count") or 0
+        )
+        status_text = (
+            f"Converted {len(midi_paths)} multitrack MIDI file(s) from "
+            f"{len(source_inputs)} PSR-600 Page Memory file(s)"
+            + (f" in {source_name}" if source_name else "")
+            + f", grouping {melody_bank_count} recorded Melody bank(s) as "
+            "separate primary tracks"
+            + (
+                f" plus {apparent_layer_count} questioned voice-layer "
+                "audition track(s)"
+                if apparent_layer_count
+                else ""
+            )
+            + " with approximate General MIDI instruments.\n"
+            "Tracks are aligned at tick zero; undecoded Conductor or "
+            "Chord-bank switching may have originally sequenced some "
+            "sections.\n"
+            "The source BLK files were not modified. Accompaniment and other "
+            "proprietary Page Memory data remain only in those source files. "
+            "Use Save As to choose a permanent folder."
+        )
+        if cancelled:
+            status_text += (
+                "\nConversion was cancelled after the files listed above "
+                "were created."
+            )
+
+        files_to_load = extra_regular_paths + midi_paths
+        if append:
+            self._append_regular_files_from_paths(files_to_load)
+            existing_status = self.status_label.text().strip()
+            self.status_label.setText(
+                status_text
+                if not existing_status
+                else status_text + "\n" + existing_status
+            )
+        else:
+            self._load_regular_files(files_to_load, status_text)
+
+        for report in reports:
+            warnings.extend(
+                f"{os.path.basename(report.input)}: {warning}"
+                for warning in report.warnings
+            )
+        warnings = list(dict.fromkeys(warnings))
+        if warnings:
+            self._show_error_list(
+                "Some PSR-600 Melody Banks Need Review",
+                "Some PSR-600 Melody banks were converted with warnings",
+                warnings,
+                warning=True,
+                guidance=(
+                    "Review the converted MIDI files and retain the original "
+                    "BLK files as the preservation copies"
+                ),
+            )
+        return True
+
+    def _offer_psr600_blk_conversion_if_available(self):
+        if self.image_session is None:
+            return False
+        image_path = getattr(self.image_session, "working_img_path", "")
+        if (
+            not image_path
+            or image_path == self.psr600BlkPromptedSessionPath
+        ):
+            return False
+        self.psr600BlkPromptedSessionPath = image_path
+
+        entries = self._current_image_psr600_blk_entries()
+        if not entries:
+            return False
+        source_inputs, extraction_failures = (
+            self._extract_image_psr600_blk_entries(entries)
+        )
+        summary = self._psr600_blk_summary_for_paths(
+            [item["path"] for item in source_inputs]
+        )
+        if not summary:
+            return False
+
+        source_name = getattr(
+            self.image_session,
+            "source_name",
+            "disk or image",
+        )
+        if not self._prompt_for_psr600_blk_conversion(
+            summary,
+            source_name,
+        ):
+            return True
+
+        self._convert_psr600_blk_files_to_midi_mode(
+            source_inputs,
+            source_name,
+            summary,
+            reset_current_image=True,
+            confirm_image_exit=False,
+            pre_conversion_warnings=extraction_failures,
+        )
+        return True
+
+    def handle_psr600_blk_file_drop(self, file_paths):
+        blk_paths = [
+            path
+            for path in (file_paths or [])
+            if self._is_psr600_blk_path(path)
+        ]
+        if not blk_paths:
+            return False
+        summary = self._psr600_blk_summary_for_paths(blk_paths)
+        if not summary:
+            return False
+
+        extra_regular_paths = []
+        if not self.is_image_mode():
+            blk_path_set = {
+                os.path.abspath(path) for path in blk_paths
+            }
+            extra_regular_paths = [
+                path
+                for path in (file_paths or [])
+                if os.path.abspath(path) not in blk_path_set
+                and self._regular_drop_file_kind(path)
+                in {"midi", "eseq", "pianodir"}
+            ]
+
+        if not self._prompt_for_psr600_blk_conversion(
+            summary,
+            "the dropped files",
+        ):
+            return False
+
+        return self._convert_psr600_blk_files_to_midi_mode(
+            blk_paths,
+            "the dropped files",
+            summary,
+            reset_current_image=self.is_image_mode(),
+            append=not self.is_image_mode(),
             extra_regular_paths=extra_regular_paths,
         )
 
@@ -15706,7 +19357,7 @@ class MidiTitleWindow(QMainWindow):
         all_patterns = " ".join(f"*.{ext}" for ext in all_exts)
         return (
             f"Common floppy images ({common_patterns});;"
-            "Electone/MPC/V50 sequence files (*.evt *.EVT *.seq *.SEQ *.all *.ALL);;"
+            "Additional sequence files (*.evt *.EVT *.seq *.SEQ *.all *.ALL *.blk *.BLK);;"
             f"All supported images ({all_patterns});;"
             "All files (*)"
         )
@@ -15915,6 +19566,34 @@ class MidiTitleWindow(QMainWindow):
                 )
             else:
                 self.status_label.setText("Electone MDR conversion skipped.")
+            return
+
+        psr600_summary = self._psr600_blk_summary_for_paths([image_path])
+        if psr600_summary:
+            if (
+                not prevalidated
+                and not self._prepare_for_disk_load(
+                    "this PSR-600 Page Memory file"
+                )
+            ):
+                return
+            if self._prompt_for_psr600_blk_conversion(
+                psr600_summary,
+                os.path.dirname(image_path),
+            ):
+                self._cleanup_midi_scratch_dir()
+                self._convert_psr600_blk_files_to_midi_mode(
+                    [image_path],
+                    os.path.basename(image_path)
+                    or "PSR-600 Page Memory file",
+                    psr600_summary,
+                    reset_current_image=self.is_image_mode(),
+                    confirm_image_exit=False,
+                )
+            else:
+                self.status_label.setText(
+                    "PSR-600 Page Memory conversion skipped."
+                )
             return
 
         v50_summary = self._v50_nseq_sequence_summary_for_file(image_path)
@@ -16677,6 +20356,20 @@ class MidiTitleWindow(QMainWindow):
                 v50_nseq_summary = None
                 scan_errors.append(f"V50/SY77 summary: {exc}")
             try:
+                psr600_blk_paths = self._psr600_blk_file_paths_in_folder(
+                    directory
+                )
+            except Exception as exc:
+                psr600_blk_paths = []
+                scan_errors.append(f"PSR-600 BLK scan: {exc}")
+            try:
+                psr600_blk_summary = self._psr600_blk_summary_for_paths(
+                    psr600_blk_paths
+                )
+            except Exception as exc:
+                psr600_blk_summary = None
+                scan_errors.append(f"PSR-600 BLK summary: {exc}")
+            try:
                 mpc_seq_paths = self._mpc_seq_file_paths_in_folder(directory)
             except Exception as exc:
                 mpc_seq_paths = []
@@ -16695,6 +20388,19 @@ class MidiTitleWindow(QMainWindow):
                     v50_nseq_paths,
                     os.path.basename(directory) or directory,
                     v50_nseq_summary,
+                    extra_regular_paths=file_paths,
+                )
+            elif (
+                psr600_blk_summary
+                and self._prompt_for_psr600_blk_conversion(
+                    psr600_blk_summary,
+                    os.path.basename(directory) or directory,
+                )
+            ):
+                self._convert_psr600_blk_files_to_midi_mode(
+                    psr600_blk_paths,
+                    os.path.basename(directory) or directory,
+                    psr600_blk_summary,
                     extra_regular_paths=file_paths,
                 )
             elif mpc_seq_paths and self._prompt_for_mpc_seq_conversion(

@@ -7,8 +7,33 @@ with release sections grouped by version and date.
 
 ## [0.6.11] - 2026-07-07
 
+### Added
+
+- Second-tier Yamaha PSR-600 `.BLK` Page Memory recognition for floppy images,
+  physical disks, folders, file-open, and drag-and-drop workflows, with
+  best-effort conversion of each BLK to one Type 1 MIDI whose recorded Melody
+  banks are separate tracks. Melody setups containing a second voice descriptor
+  with the recurring `0x7F` flag also produce clearly questioned layer tracks
+  for auditioning, with both raw descriptors preserved in MIDI metadata because
+  the flag's meaning is not yet confirmed. Accompaniment, Conductor, Multi Pad,
+  style, and other proprietary data remain preserved in the source `.BLK`
+  files.
+- Space-bar playback toggling in File Inspection, covering both rendered audio
+  previews and direct MIDI output.
+- Per-channel General MIDI instrument selectors in File Inspection, with the
+  recorded/default instrument shown inline, grouped searchable choices, and
+  live preview-only overrides for realtime SoundFont or direct MIDI output.
+- A 5%-400% live preview-tempo control in File Inspection that preserves
+  recorded tempo changes while keeping audio, direct MIDI, seeking, duration,
+  and the piano-roll playhead synchronized.
+- A `Render Song...` menu in File Inspection that exports the selected song or
+  all loaded songs to WAV or MP3 with the current channel selection, channel
+  levels, instrument overrides, tempo, SoundFont, and preview volume.
+
 ### Changed
 
+- File Inspection now groups related playback controls, reflows short channel
+  lists to avoid empty columns, and uses shorter contextual tooltips.
 - `File > Save As Image...` now asks for image type and disk size even when
   already editing an image, and can repack the current image contents into the
   newly selected disk size when needed.
@@ -18,6 +43,23 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- File Inspection channel checkboxes now mute and restore channels in place
+  during realtime SoundFont or direct MIDI playback, retaining the current
+  song position instead of stopping, rebuilding, and returning to the start.
+- File Inspection now marks channel controls with the same distinct 16-color
+  palette used by piano-roll notes, so the channel list also serves as a
+  legend.
+- Realtime SoundFont preview now rebases its temporary MIDI tempo so the full
+  5%-400% range stays inside FluidSynth's safe live-multiplier range. A tempo
+  selected before pressing Play is also sent as the first live command,
+  ensuring it takes effect without a restart.
+- File Inspection SoundFont playback now keeps a realtime FluidSynth process
+  active for tempo, instrument, and volume changes instead of replacing a
+  rendered WAV. This prevents delayed jumps to 0:00 and avoids the pops and
+  jitter caused by background rendering and playback-rate source swaps.
+- File Inspection now initializes live program tracking before opening, and
+  configures FluidSynth before its first note instead of stopping and
+  restarting it after launch, preventing the dialog crash and silent previews.
 - `File > Save As Image...` no longer skips the image-format and disk-size
   prompt when used again while already in Image Mode.
 - HFE exports for IBM/Yamaha disk formats now normalize the HFE header metadata

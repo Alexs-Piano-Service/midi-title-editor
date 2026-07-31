@@ -2365,6 +2365,11 @@ def _handle_gw_track_progress_line(progress_callback, state, line, *, action="Re
                 message = f"{action} {track_label} ({completed_tracks}/{total_tracks})..."
                 if status:
                     message = f"{message} {status}"
+            # Greaseweazle can print several retry/detail lines after a track
+            # result. Keep the result visible while handling those lines instead
+            # of briefly replacing it with a shorter generic message, which
+            # makes an auto-sizing progress dialog visibly jump.
+            state["steady_track_message"] = message
             _notify_gw_progress(progress_callback, state, completed_tracks, total_tracks, message)
         else:
             _notify_gw_progress(progress_callback, state, 0, 1, clean_line)
@@ -2381,7 +2386,7 @@ def _handle_gw_track_progress_line(progress_callback, state, line, *, action="Re
                 confirmed=bool(state.get("first_track_protection_confirmed")),
             )
         else:
-            message = _gw_intermediate_progress_message(
+            message = state.get("steady_track_message") or _gw_intermediate_progress_message(
                 action,
                 completed_tracks,
                 total_tracks,

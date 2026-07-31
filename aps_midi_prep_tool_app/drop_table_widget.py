@@ -172,6 +172,8 @@ class DropTableWidget(QTableWidget):
             return True
         if self._safe_main_window_path_check(main_window, "can_accept_v50_nseq_path", file_path):
             return True
+        if self._safe_main_window_path_check(main_window, "can_accept_psr600_blk_path", file_path):
+            return True
         if self._safe_main_window_path_check(main_window, "can_accept_mpc_seq_path", file_path):
             return True
         if self._safe_main_window_call(main_window, "is_image_mode") and self._safe_is_file(file_path):
@@ -376,6 +378,39 @@ class DropTableWidget(QTableWidget):
                         path
                         for path in local_paths
                         if os.path.abspath(path) not in v50_nseq_path_set
+                    ]
+                    if not local_paths:
+                        self._safe_accept_event(event)
+                        return
+
+                psr600_blk_paths = [
+                    path
+                    for path in local_paths
+                    if self._safe_main_window_path_check(
+                        main_window,
+                        "can_accept_psr600_blk_path",
+                        path,
+                    )
+                ]
+                if (
+                    psr600_blk_paths
+                    and hasattr(main_window, "handle_psr600_blk_file_drop")
+                ):
+                    handled = main_window.handle_psr600_blk_file_drop(
+                        local_paths
+                    )
+                    if handled:
+                        self._safe_accept_event(event)
+                        return
+                    psr600_blk_path_set = {
+                        os.path.abspath(path)
+                        for path in psr600_blk_paths
+                    }
+                    local_paths = [
+                        path
+                        for path in local_paths
+                        if os.path.abspath(path)
+                        not in psr600_blk_path_set
                     ]
                     if not local_paths:
                         self._safe_accept_event(event)
