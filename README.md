@@ -4,7 +4,7 @@ APS MIDI Prep Tool is a modern Disklavier preservation and preparation
 workstation for MIDI files, Yamaha E-SEQ files, floppy images, and physical
 floppy disks.
 
-Current version: `0.6.11`
+Current version: `0.6.12`
 
 Author: Alexander Peppe
 
@@ -79,6 +79,12 @@ before you write anything back.
   or stop playback, plus selected-song WAV/MP3 rendering with those settings.
 - Renders all currently listed MIDI or E-SEQ files to WAV or MP3 from
   `Utilities > Render Audio...` using a selected SoundFont.
+- Bulk-extracts every file from every supported floppy image directly inside a
+  selected folder. Output subfolders use image filenames by default, or album
+  titles from `PIANODIR.FIL` when requested and available. E-SEQ songs can also
+  be converted to MIDI during extraction while retaining the original files.
+  The complete utility workflow is localized in every language supported by
+  the app.
 - Provides a `View` menu for title-warning display, Disklavier title formatting,
   status visibility, quick-panel visibility, album-info visibility, and realtime
   console logs.
@@ -118,6 +124,24 @@ To make a preservation copy without opening the disk contents in the app, choose
 `Disk > Image Floppy...` and save an IMG sector image or Greaseweazle SCP flux
 capture.
 
+### Bulk-Extract A Folder Of Images
+
+1. Choose `Utilities > Bulk Extraction...`.
+2. Select the folder containing the images and an output folder.
+3. Choose whether each output subfolder should use the image filename or the
+   album title stored in `PIANODIR.FIL` when one is available.
+4. Optionally enable MIDI-only E-SEQ conversion.
+5. Choose `Extract`.
+
+Every supported image directly inside the selected folder gets a separate
+output subfolder. Internal image paths are preserved. Existing output folders
+are not overwritten. With conversion enabled, detected E-SEQ songs are replaced
+by MIDI files; original E-SEQ, `PIANODIR.FIL`, and `MUSIC.DIR` files are not
+written by default. Enable `Also include original E-SEQ and Yamaha directory
+files` when those source files should accompany the converted MIDI. Other files
+from each image are still extracted. A stable progress window shows overall
+image progress and progress within the current image.
+
 ### Save Safely
 
 `File > Write Protection > Write-Protect Original` keeps `File > Save` from
@@ -132,8 +156,12 @@ Prep Tool to create a backup before overwriting local files or disk images.
 Enable `File > Save Options > Create Album Subfolder` when exporting Yamaha
 E-SEQ files with `File > Save As...` and you want the destination folder
 grouped by the current album title and catalog number. Save As confirms whether
-it used an album subfolder or saved directly in the selected folder. This option
-does not affect `File > Save As Image...` or floppy writes.
+it used an album subfolder or saved directly in the selected folder.
+
+`File > Save Options > Create Album Subfolder for Save As Image` provides the
+same catalog-number-and-album-title grouping for `File > Save As Image...`.
+This niche option is off by default, applies to every image produced when files
+spill across multiple images, and does not affect floppy writes.
 
 ### Prepare A Nalbantov USB Stick Image
 
@@ -191,7 +219,9 @@ because binary values and cleanup can remove half-pedal or archival detail.
 - `PIANODIR.FIL` is generated or refreshed on save when needed.
 - `File > Save Options > Create Album Subfolder` controls whether folder
   exports use the current album title and catalog number for a subfolder.
-  Image saves and floppy writes always use the path or device you choose.
+- The separate `Create Album Subfolder for Save As Image` option puts image
+  exports in the same kind of catalog/album subfolder. It is off by default.
+- Floppy writes always use the device you choose.
 
 ### Inspect A Song
 

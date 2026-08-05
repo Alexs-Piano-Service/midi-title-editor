@@ -112,6 +112,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li>Prepare HFE images for Nalbantov emulators.</li>
                   <li>Convert E-SEQ to MIDI, MIDI to E-SEQ, and SMF1 to SMF0.</li>
                   <li>Use <strong>File</strong> for sources and save behavior, <strong>Disk</strong> for floppy/media operations, and <strong>Utilities</strong> for batch tools.</li>
+                  <li><strong>Utilities &gt; Bulk Extraction...</strong> extracts files from every supported image in a folder. Its optional conversion mode outputs MIDI in place of E-SEQ and omits Yamaha directory files by default, with a separate option to retain those source files.</li>
                   <li>Use <strong>View &gt; View Logs...</strong> for live console output and <strong>Help &gt; Report a Bug...</strong> when you need to send a support report.</li>
                 </ul>
                 <p><a href="{APP_WEBSITE}">{html.escape(APP_COMPANY)}</a></p>
@@ -187,7 +188,8 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li>E-SEQ titles are limited to 32 characters.</li>
                   <li>In any E-SEQ mode, dropped MIDI files are staged as E-SEQ and Type 1 MIDI is converted to Type 0 first.</li>
                   <li>The tool can generate or refresh <strong>PIANODIR.FIL</strong>.</li>
-                  <li><strong>File &gt; Save Options &gt; Create Album Subfolder</strong> controls album folders only for <strong>File &gt; Save As...</strong> folder exports.</li>
+                  <li><strong>File &gt; Save Options &gt; Create Album Subfolder</strong> controls album folders for <strong>File &gt; Save As...</strong> folder exports.</li>
+                  <li>The separate <strong>Create Album Subfolder for Save As Image</strong> option applies the same catalog/album grouping to image exports and is off by default.</li>
                   <li>E-SEQ disks support up to 60 songs, and floppy/image size limits still apply.</li>
                 </ul>
                 """,
@@ -226,7 +228,8 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li><strong>File &gt; Save As Image...</strong> creates a new image file.</li>
                   <li><strong>File &gt; Write Protection &gt; Write-Protect Original</strong> keeps Save from overwriting images or floppies until you turn protection off.</li>
                   <li><strong>File &gt; Save Options &gt; Back up before Saving</strong> creates backups before overwriting.</li>
-                  <li><strong>File &gt; Save Options &gt; Create Album Subfolder</strong> creates album folders for <strong>File &gt; Save As...</strong> exports only. It never changes <strong>Save As Image</strong> or floppy-write destinations.</li>
+                  <li><strong>File &gt; Save Options &gt; Create Album Subfolder</strong> creates album folders for <strong>File &gt; Save As...</strong> exports.</li>
+                  <li><strong>Create Album Subfolder for Save As Image</strong> optionally uses the same catalog/album folder for image exports. It is off by default and never changes floppy-write destinations.</li>
                   <li><strong>File &gt; Save Options &gt; Create Tag Sidecars When Saving</strong> creates optional tag sidecar files only for local folder saves.</li>
                   <li><strong>File &gt; Save Options &gt; Create Metadata Summary When Saving</strong> creates an optional MIDI metadata summary for folder saves.</li>
                   <li><strong>View &gt; View Logs...</strong> shows live console output for troubleshooting.</li>

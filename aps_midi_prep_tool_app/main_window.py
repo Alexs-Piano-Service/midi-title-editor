@@ -115,6 +115,7 @@ from .ui_utils import (
 )
 from .drop_table_widget import DropTableWidget
 from .disk_session_worker import (
+    BulkExtractionWorker,
     DiskImageCaptureWorker,
     DiskSessionCommitWorker,
     DiskSessionFormatWorker,
@@ -8439,6 +8440,13 @@ def _psr600_conversion_prompt_copy(summary, source_label=""):
     return headline, detail
 
 
+class BulkExtractionProgressDialog(QDialog):
+    """Progress window that can only be dismissed through its Cancel button."""
+
+    def reject(self):
+        return
+
+
 class MidiTitleWindow(QMainWindow):
     TITLE_COMPAT_LIMIT = 32
     ESEQ_FILE_LIMIT = PIANODIR_MAX_TRACKS
@@ -8463,6 +8471,8 @@ class MidiTitleWindow(QMainWindow):
     SETTING_AUTO_WRITE_PROTECT_ON_LOAD = "auto_write_protect_on_load"
     SETTING_FORMAT_DISKLAVIER_SCREEN = "format_disklavier_screen"
     SETTING_ESEQ_EXPORT_ALBUM_SUBFOLDER = "eseq_export_album_subfolder"
+    SETTING_IMAGE_EXPORT_ALBUM_SUBFOLDER = "image_export_album_subfolder"
+    DEFAULT_IMAGE_EXPORT_ALBUM_SUBFOLDER = False
     SETTING_ESEQ_TO_MIDI_SWITCH_MODE = "eseq_to_midi_switch_mode"
     SETTING_GREASEWEAZLE_DEVICE_PATH = "greaseweazle_device_path"
     SETTING_GREASEWEAZLE_DRIVE = "greaseweazle_drive"
@@ -8481,6 +8491,12 @@ class MidiTitleWindow(QMainWindow):
     SETTING_RECOVERY_IMAGE_FORMAT = "disk_recovery_image_format"
     SETTING_RECOVERY_FLOPPY_FORMAT = "disk_recovery_floppy_format"
     SETTING_SAVE_AS_LOCATION = "save_as_location"
+    SETTING_BULK_EXTRACTION_SOURCE = "bulk_extraction_source"
+    SETTING_BULK_EXTRACTION_OUTPUT = "bulk_extraction_output"
+    SETTING_BULK_EXTRACTION_CONVERT_ESEQ = "bulk_extraction_convert_eseq"
+    SETTING_BULK_EXTRACTION_INCLUDE_ESEQ_SOURCES = "bulk_extraction_include_eseq_sources"
+    DEFAULT_BULK_EXTRACTION_INCLUDE_ESEQ_SOURCES = False
+    SETTING_BULK_EXTRACTION_USE_ALBUM_NAMES = "bulk_extraction_use_album_names"
     SETTING_CHECK_UPDATES_AT_STARTUP = "check_updates_at_startup"
     SETTING_SKIP_UPDATE_REMINDERS = "skip_update_reminders"
     SETTING_WRITE_TAG_SIDECARS = "write_tag_sidecars"
@@ -8614,6 +8630,9 @@ class MidiTitleWindow(QMainWindow):
         self.diskImageCaptureWorker = None
         self.diskImageCaptureProgressDialog = None
         self.diskImageCaptureContext = {}
+        self.bulkExtractionWorker = None
+        self.bulkExtractionProgressDialog = None
+        self.bulkExtractionContext = {}
         self.updateCheckWorker = None
         self.updateCheckManual = False
         self.updateCheckStartupScheduled = False
@@ -9071,6 +9090,24 @@ class MidiTitleWindow(QMainWindow):
         )
         self.fileCreateAlbumSubfolderAction.toggled.connect(self.toggle_album_subfolder)
 
+        self.fileCreateImageAlbumSubfolderAction = QAction(
+            self._t("save_as_image.album_subfolder.action"), self
+        )
+        self.fileCreateImageAlbumSubfolderAction.setCheckable(True)
+        self.fileCreateImageAlbumSubfolderAction.setChecked(
+            self.settings.value(
+                self.SETTING_IMAGE_EXPORT_ALBUM_SUBFOLDER,
+                self.DEFAULT_IMAGE_EXPORT_ALBUM_SUBFOLDER,
+                type=bool,
+            )
+        )
+        self.fileCreateImageAlbumSubfolderAction.setToolTip(
+            self._t("save_as_image.album_subfolder.tooltip")
+        )
+        self.fileCreateImageAlbumSubfolderAction.toggled.connect(
+            self.toggle_image_album_subfolder
+        )
+
         self.fileCreateTagSidecarsAction = QAction("Create Tag Sidecars When Saving", self)
         self.fileCreateTagSidecarsAction.setCheckable(True)
         self.fileCreateTagSidecarsAction.setChecked(self._tag_sidecars_enabled())
@@ -9138,6 +9175,7 @@ class MidiTitleWindow(QMainWindow):
         self.fileMenu.addSeparator()
         self.fileSaveOptionsMenu = self.fileMenu.addMenu(self._lt("Save Options"))
         self.fileSaveOptionsMenu.addAction(self.fileCreateAlbumSubfolderAction)
+        self.fileSaveOptionsMenu.addAction(self.fileCreateImageAlbumSubfolderAction)
         self.fileSaveOptionsMenu.addAction(self.fileBackUpBeforeSavingAction)
         self.fileSaveOptionsMenu.addSeparator()
         self.fileSaveOptionsMenu.addAction(self.fileCreateTagSidecarsAction)
@@ -9224,6 +9262,13 @@ class MidiTitleWindow(QMainWindow):
         )
         self.utilitiesRenderAudioAction.triggered.connect(self.show_audio_render_tool)
         self.utilitiesMenu.addAction(self.utilitiesRenderAudioAction)
+
+        self.utilitiesBulkExtractionAction = QAction(self._t("bulk.action"), self)
+        self.utilitiesBulkExtractionAction.setToolTip(
+            self._t("bulk.description")
+        )
+        self.utilitiesBulkExtractionAction.triggered.connect(self.show_bulk_extraction_utility)
+        self.utilitiesMenu.addAction(self.utilitiesBulkExtractionAction)
 
         self.utilitiesMenu.addSeparator()
 
@@ -9863,6 +9908,7 @@ class MidiTitleWindow(QMainWindow):
             {"id": "file.auto_write_protect", "category": "File", "label": "Auto Write-Protect", "action": "fileAutoWriteProtectAction", "default": "Ctrl+Shift+P"},
             {"id": "file.write_protect_original", "category": "File", "label": "Write-Protect Original", "action": "fileWriteProtectOriginalAction", "default": "Ctrl+Alt+P"},
             {"id": "file.create_album_subfolder", "category": "File", "label": "Create Album Subfolder", "action": "fileCreateAlbumSubfolderAction", "default": "Ctrl+Shift+A"},
+            {"id": "file.create_image_album_subfolder", "category": "File", "label": "Create Album Subfolder for Save As Image", "action": "fileCreateImageAlbumSubfolderAction", "default": ""},
             {"id": "file.back_up_before_saving", "category": "File", "label": "Back up before Saving", "action": "fileBackUpBeforeSavingAction", "default": "Ctrl+Alt+B"},
             {"id": "file.create_tag_sidecars", "category": "File", "label": "Create Tag Sidecars When Saving", "action": "fileCreateTagSidecarsAction", "default": "Ctrl+Shift+T"},
             {"id": "file.create_metadata_summary", "category": "File", "label": "Create Metadata Summary When Saving", "action": "fileCreateMetadataSummaryAction", "default": "Ctrl+Shift+Y"},
@@ -9875,6 +9921,7 @@ class MidiTitleWindow(QMainWindow):
             {"id": "utilities.song_list", "category": "Utilities", "label": "Song List...", "action": "utilitiesSongListAction", "default": "F3"},
             {"id": "utilities.file_inspection", "category": "Utilities", "label": "File Inspection...", "action": "utilitiesFileInspectionAction", "default": "F4"},
             {"id": "utilities.render_audio", "category": "Utilities", "label": "Render Audio...", "action": "utilitiesRenderAudioAction", "default": "F5"},
+            {"id": "utilities.bulk_extraction", "category": "Utilities", "label": "Bulk Extraction...", "action": "utilitiesBulkExtractionAction", "default": ""},
             {"id": "utilities.rename", "category": "Utilities", "label": "Rename All to DOS 8.3", "action": "utilitiesRenameAction", "default": "Ctrl+Shift+R"},
             {"id": "utilities.trim_title_spaces", "category": "Utilities", "label": "Trim Title Spaces", "action": "utilitiesTrimTitleSpacesAction", "default": "Ctrl+Shift+Space"},
             {"id": "utilities.smf0", "category": "Utilities", "label": "Convert All SMF1 to SMF0", "action": "utilitiesSmfAction", "default": "Ctrl+Shift+0"},
@@ -10065,6 +10112,506 @@ class MidiTitleWindow(QMainWindow):
         dialog.raise_()
         dialog.activateWindow()
 
+    def _bulk_extraction_default_source_directory(self):
+        saved_source = str(
+            self.settings.value(self.SETTING_BULK_EXTRACTION_SOURCE, "") or ""
+        ).strip()
+        if saved_source and os.path.isdir(saved_source):
+            return os.path.abspath(saved_source)
+
+        if self.is_image_mode() and self.image_session is not None:
+            image_source = str(getattr(self.image_session, "source_path", "") or "")
+            image_directory = os.path.dirname(os.path.abspath(image_source)) if image_source else ""
+            if image_directory and os.path.isdir(image_directory):
+                return image_directory
+
+        context_path = str(getattr(self, "regularModeContextPath", "") or "")
+        if context_path and os.path.isdir(context_path):
+            return os.path.abspath(context_path)
+        return self._last_save_as_location()
+
+    def show_bulk_extraction_utility(self):
+        if self._disk_worker_busy():
+            QMessageBox.information(
+                self,
+                self._lt("Busy"),
+                self._t("bulk.busy"),
+            )
+            return
+
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle(self._t("bulk.title"))
+        layout = QVBoxLayout(dialog)
+
+        intro = QLabel(self._t("bulk.description"))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form_layout = QGridLayout()
+        form_layout.setContentsMargins(0, 8, 0, 0)
+        form_layout.setHorizontalSpacing(10)
+        form_layout.setVerticalSpacing(8)
+        form_layout.setColumnStretch(1, 1)
+
+        source_label = QLabel(self._t("bulk.source.label"))
+        source_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        source_edit = QLineEdit()
+        source_edit.setPlaceholderText(self._t("bulk.source.placeholder"))
+        source_browse = QPushButton("Browse...")
+        form_layout.addWidget(source_label, 0, 0)
+        form_layout.addWidget(source_edit, 0, 1)
+        form_layout.addWidget(source_browse, 0, 2)
+
+        output_label = QLabel(self._t("bulk.output.label"))
+        output_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        output_edit = QLineEdit()
+        output_edit.setPlaceholderText(self._t("bulk.output.placeholder"))
+        output_browse = QPushButton("Browse...")
+        form_layout.addWidget(output_label, 1, 0)
+        form_layout.addWidget(output_edit, 1, 1)
+        form_layout.addWidget(output_browse, 1, 2)
+
+        naming_label = QLabel(self._t("bulk.naming.label"))
+        naming_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        naming_combo = QComboBox()
+        naming_combo.addItem(self._t("bulk.naming.image"), "image")
+        naming_combo.addItem(self._t("bulk.naming.album"), "album")
+        naming_combo.setToolTip(
+            self._t("bulk.naming.album.tooltip")
+        )
+        form_layout.addWidget(naming_label, 2, 0)
+        form_layout.addWidget(naming_combo, 2, 1, 1, 2)
+        layout.addLayout(form_layout)
+
+        convert_checkbox = QCheckBox(self._t("bulk.convert"))
+        convert_checkbox.setToolTip(
+            self._t("bulk.convert.tooltip")
+        )
+        form_layout.addWidget(convert_checkbox, 3, 1, 1, 2)
+
+        include_sources_checkbox = QCheckBox(self._t("bulk.include_sources"))
+        include_sources_checkbox.setToolTip(
+            self._t("bulk.include_sources.tooltip")
+        )
+        form_layout.addWidget(include_sources_checkbox, 4, 1, 1, 2)
+
+        retention_hint = QLabel(self._t("bulk.no_overwrite"))
+        retention_hint.setWordWrap(True)
+        form_layout.addWidget(retention_hint, 5, 1, 1, 2)
+
+        source_directory = self._bulk_extraction_default_source_directory()
+        source_edit.setText(source_directory)
+        saved_output = str(
+            self.settings.value(self.SETTING_BULK_EXTRACTION_OUTPUT, "") or ""
+        ).strip()
+        default_output_folder = self._t("bulk.default_output_folder")
+        output_edit.setText(saved_output or os.path.join(source_directory, default_output_folder))
+        convert_checkbox.setChecked(
+            self.settings.value(
+                self.SETTING_BULK_EXTRACTION_CONVERT_ESEQ,
+                False,
+                type=bool,
+            )
+        )
+        include_sources_checkbox.setChecked(
+            self.settings.value(
+                self.SETTING_BULK_EXTRACTION_INCLUDE_ESEQ_SOURCES,
+                self.DEFAULT_BULK_EXTRACTION_INCLUDE_ESEQ_SOURCES,
+                type=bool,
+            )
+        )
+        include_sources_checkbox.setEnabled(convert_checkbox.isChecked())
+        convert_checkbox.toggled.connect(include_sources_checkbox.setEnabled)
+        use_album_names = self.settings.value(
+            self.SETTING_BULK_EXTRACTION_USE_ALBUM_NAMES,
+            False,
+            type=bool,
+        )
+        naming_combo.setCurrentIndex(1 if use_album_names else 0)
+
+        def browse_source():
+            previous_source = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
+            previous_suggestion = os.path.join(previous_source, default_output_folder)
+            selected = QFileDialog.getExistingDirectory(
+                dialog,
+                self._t("bulk.select_source"),
+                previous_source if os.path.isdir(previous_source) else self._last_save_as_location(),
+            )
+            if not selected:
+                return
+            current_output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
+            source_edit.setText(selected)
+            if not output_edit.text().strip() or current_output == previous_suggestion:
+                output_edit.setText(os.path.join(selected, default_output_folder))
+
+        def browse_output():
+            current_output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
+            initial_directory = current_output if os.path.isdir(current_output) else os.path.dirname(current_output)
+            if not initial_directory or not os.path.isdir(initial_directory):
+                initial_directory = self._last_save_as_location()
+            selected = QFileDialog.getExistingDirectory(
+                dialog,
+                self._t("bulk.select_output"),
+                initial_directory,
+            )
+            if selected:
+                output_edit.setText(selected)
+
+        source_browse.clicked.connect(browse_source)
+        output_browse.clicked.connect(browse_output)
+
+        buttons = self._make_dialog_button_box(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            dialog,
+        )
+        extract_button = buttons.button(QDialogButtonBox.Ok)
+        if extract_button is not None:
+            extract_button.setText(self._t("bulk.extract"))
+        buttons.rejected.connect(dialog.reject)
+
+        def accept_options():
+            selected_source = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
+            selected_output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
+            if not source_edit.text().strip() or not os.path.isdir(selected_source):
+                QMessageBox.warning(
+                    dialog,
+                    self._t("bulk.source_missing.title"),
+                    self._t("bulk.source_missing.message"),
+                )
+                return
+            if not output_edit.text().strip():
+                QMessageBox.warning(
+                    dialog,
+                    self._t("bulk.output_required.title"),
+                    self._t("bulk.output_required.message"),
+                )
+                return
+            if os.path.exists(selected_output) and not os.path.isdir(selected_output):
+                QMessageBox.warning(
+                    dialog,
+                    self._t("bulk.invalid_output.title"),
+                    self._t("bulk.invalid_output.message"),
+                )
+                return
+            dialog.accept()
+
+        buttons.accepted.connect(accept_options)
+        layout.addWidget(buttons)
+        dialog.resize(720, dialog.sizeHint().height())
+
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+            return
+
+        source_directory = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
+        output_directory = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
+        convert_eseq = convert_checkbox.isChecked()
+        include_eseq_sources = bool(
+            convert_eseq and include_sources_checkbox.isChecked()
+        )
+        use_album_names = naming_combo.currentData() == "album"
+        self.settings.setValue(self.SETTING_BULK_EXTRACTION_SOURCE, source_directory)
+        self.settings.setValue(self.SETTING_BULK_EXTRACTION_OUTPUT, output_directory)
+        self.settings.setValue(self.SETTING_BULK_EXTRACTION_CONVERT_ESEQ, convert_eseq)
+        self.settings.setValue(
+            self.SETTING_BULK_EXTRACTION_INCLUDE_ESEQ_SOURCES,
+            include_sources_checkbox.isChecked(),
+        )
+        self.settings.setValue(
+            self.SETTING_BULK_EXTRACTION_USE_ALBUM_NAMES,
+            use_album_names,
+        )
+        self._start_bulk_extraction(
+            source_directory,
+            output_directory,
+            convert_eseq=convert_eseq,
+            include_eseq_sources=include_eseq_sources,
+            use_album_names=use_album_names,
+        )
+
+    def _start_bulk_extraction(
+        self,
+        source_directory,
+        output_directory,
+        *,
+        convert_eseq,
+        include_eseq_sources,
+        use_album_names,
+    ):
+        if self._disk_worker_busy():
+            QMessageBox.information(
+                self,
+                self._lt("Busy"),
+                self._t("bulk.busy"),
+            )
+            return
+
+        progress_dialog = self._create_bulk_extraction_progress_dialog()
+
+        worker = BulkExtractionWorker(
+            source_directory,
+            output_directory,
+            convert_eseq=convert_eseq,
+            include_eseq_sources=include_eseq_sources,
+            use_album_names=use_album_names,
+            language_code=self._language_code(),
+            parent=self,
+        )
+        worker.detailedProgressChanged.connect(
+            lambda detail, dialog=progress_dialog: self._apply_bulk_extraction_progress(
+                dialog,
+                detail,
+            )
+        )
+        cancel_button = progress_dialog.bulkCancelButton
+
+        def request_cancel():
+            if not worker.isRunning():
+                return
+            cancel_button.setEnabled(False)
+            progress_dialog.bulkActivityLabel.setText(
+                self._t("bulk.progress.cancelling")
+            )
+            progress_dialog.bulkActivityLabel.setToolTip("")
+            progress_dialog.bulkCurrentProgressBar.setRange(0, 0)
+            worker.cancel()
+
+        cancel_button.clicked.connect(request_cancel)
+        worker.extractionFinished.connect(self._on_bulk_extraction_success)
+        worker.extractionFailed.connect(self._on_bulk_extraction_failure)
+        worker.operationCancelled.connect(self._on_bulk_extraction_cancelled)
+        worker.finished.connect(self._on_bulk_extraction_finished)
+
+        self.bulkExtractionWorker = worker
+        self.bulkExtractionProgressDialog = progress_dialog
+        self.bulkExtractionContext = {
+            "source_directory": source_directory,
+            "output_directory": output_directory,
+            "convert_eseq": bool(convert_eseq),
+            "include_eseq_sources": bool(include_eseq_sources),
+            "use_album_names": bool(use_album_names),
+        }
+        self._set_disk_load_busy(True)
+        self._log_event(
+            "Utilities",
+            "Bulk extraction started",
+            source=source_directory,
+            output=output_directory,
+            convert_eseq=bool(convert_eseq),
+            include_eseq_sources=bool(include_eseq_sources),
+            use_album_names=bool(use_album_names),
+        )
+        self._show_centered_progress_dialog(progress_dialog)
+        worker.start()
+
+    def _create_bulk_extraction_progress_dialog(self):
+        dialog = BulkExtractionProgressDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle(self._t("bulk.title"))
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setWindowFlag(Qt.WindowCloseButtonHint, False)
+        dialog.setMinimumWidth(620)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(10)
+
+        image_label = QLabel(self._t("bulk.progress.scan"), dialog)
+        image_label.setWordWrap(True)
+        image_label.setStyleSheet("font-weight: 600;")
+        image_label.setFixedHeight(image_label.fontMetrics().lineSpacing() * 2 + 6)
+        layout.addWidget(image_label)
+
+        overall_label = QLabel(self._t("bulk.progress.overall"), dialog)
+        layout.addWidget(overall_label)
+        overall_bar = QProgressBar(dialog)
+        overall_bar.setRange(0, 1)
+        overall_bar.setValue(0)
+        overall_bar.setFormat("0 / 0")
+        layout.addWidget(overall_bar)
+
+        current_label = QLabel(self._t("bulk.progress.current_image"), dialog)
+        layout.addWidget(current_label)
+        current_bar = QProgressBar(dialog)
+        current_bar.setRange(0, 0)
+        current_bar.setTextVisible(True)
+        layout.addWidget(current_bar)
+
+        activity_label = QLabel(self._t("bulk.progress.waiting"), dialog)
+        activity_label.setWordWrap(True)
+        activity_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        activity_label.setFixedHeight(activity_label.fontMetrics().lineSpacing() * 3 + 8)
+        activity_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        layout.addWidget(activity_label)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        cancel_button = QPushButton(self._lt("Cancel"), dialog)
+        button_row.addWidget(cancel_button)
+        layout.addLayout(button_row)
+
+        dialog.bulkImageLabel = image_label
+        dialog.bulkOverallProgressBar = overall_bar
+        dialog.bulkCurrentProgressBar = current_bar
+        dialog.bulkActivityLabel = activity_label
+        dialog.bulkCancelButton = cancel_button
+        dialog.resize(640, dialog.sizeHint().height())
+        return dialog
+
+    def _apply_bulk_extraction_progress(self, dialog, detail):
+        if dialog is None:
+            return
+        if not dialog.bulkCancelButton.isEnabled():
+            return
+        detail = dict(detail or {})
+        stage = str(detail.get("stage") or "")
+        overall_total = max(0, int(detail.get("image_total") or 0))
+        overall_completed = max(
+            0,
+            min(int(detail.get("overall_completed") or 0), overall_total),
+        )
+        image_index = max(0, int(detail.get("image_index") or 0))
+        image_name = str(detail.get("image_name") or "")
+        file_total = max(0, int(detail.get("file_total") or 0))
+        file_completed = max(
+            0,
+            min(int(detail.get("file_completed") or 0), file_total),
+        )
+
+        overall_bar = dialog.bulkOverallProgressBar
+        if overall_total:
+            overall_bar.setRange(0, overall_total)
+            overall_bar.setValue(overall_completed)
+            overall_bar.setFormat(f"{overall_completed} / {overall_total}")
+        else:
+            overall_bar.setRange(0, 1)
+            overall_bar.setValue(0)
+            overall_bar.setFormat("0 / 0")
+
+        if image_index and overall_total:
+            image_heading = self._t(
+                "bulk.progress.image_heading",
+                current=image_index,
+                total=overall_total,
+                image=image_name,
+            )
+        else:
+            image_heading = self._t("bulk.progress.scan")
+        dialog.bulkImageLabel.setText(image_heading)
+        dialog.bulkImageLabel.setToolTip(image_heading)
+
+        current_bar = dialog.bulkCurrentProgressBar
+        if file_total:
+            current_bar.setRange(0, file_total)
+            current_bar.setValue(file_total if stage == "finished" else file_completed)
+            current_bar.setFormat(
+                f"{file_total if stage == 'finished' else file_completed} / {file_total}"
+            )
+        elif stage == "finished":
+            current_bar.setRange(0, 1)
+            current_bar.setValue(1)
+            current_bar.setFormat("0 / 0")
+        else:
+            current_bar.setRange(0, 0)
+            current_bar.setFormat("")
+
+        message = str(detail.get("message") or "")
+        dialog.bulkActivityLabel.setText(message)
+        dialog.bulkActivityLabel.setToolTip(message)
+        QApplication.processEvents()
+
+    def _close_bulk_extraction_progress(self):
+        if self.bulkExtractionProgressDialog is not None:
+            dialog = self.bulkExtractionProgressDialog
+            self.bulkExtractionProgressDialog = None
+            dialog.hide()
+            dialog.deleteLater()
+
+    def _on_bulk_extraction_success(self, result):
+        self._close_bulk_extraction_progress()
+        if result.images_found == 0:
+            self.status_label.setText(self._t("bulk.no_images.status"))
+            QMessageBox.information(
+                self,
+                self._t("bulk.no_images.title"),
+                self._t("bulk.no_images.message"),
+            )
+            return
+
+        summary = self._t(
+            "bulk.summary.extracted",
+            files=result.files_extracted,
+            processed=result.images_processed,
+            found=result.images_found,
+        )
+        if result.files_converted:
+            summary += " " + self._t(
+                (
+                    "bulk.summary.converted_with_sources"
+                    if result.included_eseq_sources
+                    else "bulk.summary.converted"
+                ),
+                count=result.files_converted,
+            )
+        output_summary = self._t("bulk.summary.output", path=result.output_directory)
+        display_summary = f"{summary}\n\n{output_summary}"
+        self.status_label.setText(f"{summary} {output_summary}")
+        self._log_event(
+            "Utilities",
+            "Bulk extraction completed",
+            source=result.source_directory,
+            output=result.output_directory,
+            images_found=result.images_found,
+            images_processed=result.images_processed,
+            files_extracted=result.files_extracted,
+            files_converted=result.files_converted,
+            included_eseq_sources=result.included_eseq_sources,
+            errors=len(result.errors),
+        )
+        if result.errors:
+            self._show_error_list(
+                self._t("bulk.complete_issues.title"),
+                display_summary,
+                result.errors,
+                warning=True,
+                guidance=self._t("bulk.complete.guidance"),
+            )
+        else:
+            QMessageBox.information(
+                self,
+                self._t("bulk.complete.title"),
+                display_summary,
+            )
+
+    def _on_bulk_extraction_failure(self, message):
+        self._close_bulk_extraction_progress()
+        output_directory = self.bulkExtractionContext.get("output_directory", "the selected folder")
+        self.status_label.setText(self._t("bulk.failure.status"))
+        self._show_operation_error(
+            self._t("bulk.failure.title"),
+            self._t("bulk.failure.summary", path=output_directory),
+            message,
+            guidance=self._t("bulk.failure.guidance"),
+        )
+
+    def _on_bulk_extraction_cancelled(self, _message):
+        self._close_bulk_extraction_progress()
+        self.status_label.setText(self._t("bulk.cancelled.status"))
+        self._log_warning_event(
+            "Utilities",
+            "Bulk extraction cancelled",
+            source=self.bulkExtractionContext.get("source_directory", ""),
+            output=self.bulkExtractionContext.get("output_directory", ""),
+        )
+
+    def _on_bulk_extraction_finished(self):
+        worker = self.bulkExtractionWorker
+        self.bulkExtractionWorker = None
+        self.bulkExtractionContext = {}
+        if worker is not None:
+            worker.deleteLater()
+        self._set_disk_load_busy(False)
+
     def _with_mnemonic(self, text, mnemonic):
         if not mnemonic or "&" in text:
             return text
@@ -10147,6 +10694,7 @@ class MidiTitleWindow(QMainWindow):
             ("fileClearListAction", "Clear List", "C"),
             ("fileSaveAsZipAction", "Save As ZIP...", "Z"),
             ("fileCreateAlbumSubfolderAction", "Create Album Subfolder", "A"),
+            ("fileCreateImageAlbumSubfolderAction", "Create Album Subfolder for Save As Image", "I"),
             ("fileBackUpBeforeSavingAction", "Back up before Saving", "B"),
             ("fileCreateTagSidecarsAction", "Create Tag Sidecars When Saving", "G"),
             ("fileCreateMetadataSummaryAction", "Create Metadata Summary When Saving", "D"),
@@ -10163,6 +10711,7 @@ class MidiTitleWindow(QMainWindow):
             ("utilitiesSongListAction", "Song List...", "S"),
             ("utilitiesFileInspectionAction", "File Inspection...", "I"),
             ("utilitiesRenderAudioAction", "Render Audio...", "A"),
+            ("utilitiesBulkExtractionAction", "Bulk Extraction...", "B"),
             ("utilitiesRecoverImageAction", "Recover Damaged Image...", "D"),
             ("utilitiesRenameAction", "Rename All to DOS 8.3", "R"),
             ("utilitiesTrimTitleSpacesAction", "Trim Title Spaces", "T"),
@@ -10604,6 +11153,7 @@ class MidiTitleWindow(QMainWindow):
             or self.diskCommitWorker is not None
             or self.diskWriteTargetWorker is not None
             or self.diskImageCaptureWorker is not None
+            or self.bulkExtractionWorker is not None
         )
 
     def _message_indicates_cancelled(self, message):
@@ -13402,11 +13952,20 @@ class MidiTitleWindow(QMainWindow):
             shown = self._show_greaseweazle_sector_report(report) or shown
         return shown
 
-    def _show_save_as_image_complete(self, message_id, **kwargs):
+    def _show_save_as_image_complete(
+        self,
+        message_id,
+        *,
+        album_subfolder_note="",
+        **kwargs,
+    ):
+        message = self._t(message_id, **kwargs)
+        if album_subfolder_note:
+            message += f"\n\n{album_subfolder_note}"
         self._information_with_optional_hide(
             setting_key=self.SETTING_HIDE_SAVE_AS_IMAGE_COMPLETE_DIALOG,
             title=self._t("save_as_image.complete.title"),
-            message=self._t(message_id, **kwargs),
+            message=message,
             checkbox_text="Do not show this dialog again",
         )
 
@@ -13547,6 +14106,8 @@ class MidiTitleWindow(QMainWindow):
             self.bugReportWorker.requestInterruption()
         if self.feedbackWorker is not None:
             self.feedbackWorker.requestInterruption()
+        if self.bulkExtractionWorker is not None:
+            self.bulkExtractionWorker.cancel()
         self._reset_image_state()
         self._cleanup_midi_scratch_dir()
         super().closeEvent(event)
@@ -13965,6 +14526,13 @@ class MidiTitleWindow(QMainWindow):
         if action is not None and action.isChecked() != enabled:
             action.setChecked(enabled)
 
+    def toggle_image_album_subfolder(self, state):
+        self.settings.setValue(
+            self.SETTING_IMAGE_EXPORT_ALBUM_SUBFOLDER,
+            bool(state),
+        )
+        self.settings.sync()
+
     def is_image_mode(self):
         return self.image_session is not None
 
@@ -14348,6 +14916,17 @@ class MidiTitleWindow(QMainWindow):
             if hasattr(self, "album_subfolder_checkbox"):
                 self.album_subfolder_checkbox.setEnabled(enabled)
                 self.album_subfolder_checkbox.setToolTip(album_subfolder_tooltip)
+        if hasattr(self, "fileCreateImageAlbumSubfolderAction"):
+            enabled = self.choose_button.isEnabled()
+            self.fileCreateImageAlbumSubfolderAction.setEnabled(enabled)
+            self.fileCreateImageAlbumSubfolderAction.setToolTip(
+                self._t("save_as_image.album_subfolder.tooltip")
+            )
+            self.fileCreateImageAlbumSubfolderAction.setStatusTip(
+                self._t("save_as_image.album_subfolder.status")
+                if enabled else
+                self._t("save_as_image.album_subfolder.busy")
+            )
         if hasattr(self, "fileBackUpBeforeSavingAction"):
             enabled = self.choose_button.isEnabled()
             self.fileBackUpBeforeSavingAction.setEnabled(enabled)
@@ -14399,6 +14978,16 @@ class MidiTitleWindow(QMainWindow):
             self.utilitiesFileInspectionAction.setEnabled(has_listed_files)
         if hasattr(self, "utilitiesRenderAudioAction"):
             self.utilitiesRenderAudioAction.setEnabled(has_listed_files)
+        if hasattr(self, "utilitiesBulkExtractionAction"):
+            enabled = self.choose_button.isEnabled() and self.bulkExtractionWorker is None
+            tooltip = self._t("bulk.description")
+            self.utilitiesBulkExtractionAction.setEnabled(enabled)
+            self.utilitiesBulkExtractionAction.setToolTip(tooltip)
+            self.utilitiesBulkExtractionAction.setStatusTip(
+                tooltip
+                if enabled
+                else self._t("bulk.busy")
+            )
 
     def _set_loaded_image_pianodir_metadata(self, metadata=None):
         metadata = metadata or PianodirMetadata()
@@ -14760,6 +15349,38 @@ class MidiTitleWindow(QMainWindow):
             return self._lt(
                 "Create Album Subfolder is on, but no album title or catalog number is available, so files were saved directly in the selected folder."
             )
+        return ""
+
+    def _image_album_subfolder_enabled(self):
+        action = getattr(self, "fileCreateImageAlbumSubfolderAction", None)
+        return bool(action is not None and action.isChecked())
+
+    def _image_output_with_album_subfolder(self, output_path):
+        if not (
+            self._image_album_subfolder_enabled()
+            and self._album_subfolder_metadata_available()
+        ):
+            return output_path
+        return os.path.join(
+            os.path.dirname(output_path),
+            self._album_subfolder_name(),
+            os.path.basename(output_path),
+        )
+
+    def _save_as_image_album_subfolder_note(self, selected_output_path, output_path):
+        if not self._image_album_subfolder_enabled():
+            return ""
+        selected_dir = os.path.normcase(
+            os.path.abspath(os.path.dirname(selected_output_path))
+        )
+        output_dir = os.path.normcase(os.path.abspath(os.path.dirname(output_path)))
+        if selected_dir != output_dir:
+            return self._t(
+                "save_as_image.album_subfolder.saved_note",
+                folder=os.path.basename(os.path.normpath(output_dir)),
+            )
+        if not self._album_subfolder_metadata_available():
+            return self._t("save_as_image.album_subfolder.unavailable_note")
         return ""
 
     def _existing_directory_for_dialog_path(self, path):
@@ -19294,6 +19915,12 @@ class MidiTitleWindow(QMainWindow):
         selected_ext = image_extension(output_path) or self._extension_from_filter(selected_filter) or fallback_ext
         if not image_extension(output_path):
             output_path = f"{output_path}.{selected_ext}"
+        selected_output_path = output_path
+        output_path = self._image_output_with_album_subfolder(selected_output_path)
+        album_subfolder_note = self._save_as_image_album_subfolder_note(
+            selected_output_path,
+            output_path,
+        )
 
         progressDialog = QProgressDialog("Exporting floppy image...", None, 0, 5, self)
         self._prepare_progress_dialog(progressDialog)
@@ -19317,13 +19944,14 @@ class MidiTitleWindow(QMainWindow):
             )
             progress_callback(5, 5, "Finalizing floppy export...")
             progressDialog.close()
-            self._remember_save_as_location(output_path)
+            self._remember_save_as_location(selected_output_path)
             catalog_filled = self._fill_blank_image_catalog_from_source(output_path)
             if catalog_filled:
                 self._refresh_pianodir_row()
             self._show_save_as_image_complete(
                 "save_as_image.complete.saved_as",
                 filename=os.path.basename(output_path),
+                album_subfolder_note=album_subfolder_note,
             )
             self.status_label.setText(
                 f"Saved Greaseweazle image as {os.path.basename(output_path)}.\n"
@@ -24336,7 +24964,12 @@ class MidiTitleWindow(QMainWindow):
         if options is None:
             return
 
-        output_path, selected_ext, disk_format = options
+        selected_output_path, selected_ext, disk_format = options
+        output_path = self._image_output_with_album_subfolder(selected_output_path)
+        album_subfolder_note = self._save_as_image_album_subfolder_note(
+            selected_output_path,
+            output_path,
+        )
         self._reset_gw_sector_report_dedupe()
 
         renames, deletes, additions, replacements, title_edits, delete_pianodir = self._collect_image_operations()
@@ -24379,7 +25012,7 @@ class MidiTitleWindow(QMainWindow):
                 export_sector_reports = ()
             if len(output_paths) != 1:
                 progressDialog.close()
-                self._remember_save_as_location(output_paths[0] if output_paths else output_path)
+                self._remember_save_as_location(selected_output_path)
                 preview = "\n".join(os.path.basename(path) for path in output_paths[:10])
                 if len(output_paths) > 10:
                     preview += f"\n...and {len(output_paths) - 10} more."
@@ -24387,6 +25020,7 @@ class MidiTitleWindow(QMainWindow):
                     "save_as_image.complete.created_multiple",
                     count=len(output_paths),
                     preview=preview,
+                    album_subfolder_note=album_subfolder_note,
                 )
                 self._show_greaseweazle_sector_reports(export_sector_reports)
                 self._log_event(
@@ -24407,11 +25041,12 @@ class MidiTitleWindow(QMainWindow):
             progress_callback(9, 9, "Finalizing floppy export...")
             progressDialog.close()
             self._activate_disk_session(session, listing)
-            self._remember_save_as_location(output_paths[0])
+            self._remember_save_as_location(selected_output_path)
             self._show_greaseweazle_sector_reports(export_sector_reports)
             self._show_save_as_image_complete(
                 "save_as_image.complete.saved_as",
                 filename=os.path.basename(output_paths[0]),
+                album_subfolder_note=album_subfolder_note,
             )
             self.status_label.setText(self._image_mode_summary())
             self._log_event(
@@ -24694,7 +25329,12 @@ class MidiTitleWindow(QMainWindow):
         if options is None:
             return
 
-        output_path, output_ext, disk_format = options
+        selected_output_path, output_ext, disk_format = options
+        output_path = self._image_output_with_album_subfolder(selected_output_path)
+        album_subfolder_note = self._save_as_image_album_subfolder_note(
+            selected_output_path,
+            output_path,
+        )
         self._reset_gw_sector_report_dedupe()
         staging_dir = tempfile.mkdtemp(prefix="aps_save_image_")
         progressDialog = QProgressDialog("Preparing files for image export...", None, 0, max(1, self._regular_file_count()), self)
@@ -24735,11 +25375,12 @@ class MidiTitleWindow(QMainWindow):
                 progress_callback(4, 4, "Finalizing floppy export...")
                 progressDialog.close()
                 self._activate_disk_session(session, listing)
-                self._remember_save_as_location(output_paths[0])
+                self._remember_save_as_location(selected_output_path)
                 self._show_greaseweazle_sector_reports(sector_reports)
                 self._show_save_as_image_complete(
                     "save_as_image.complete.created",
                     filename=os.path.basename(output_paths[0]),
+                    album_subfolder_note=album_subfolder_note,
                 )
                 self.status_label.setText(self._image_mode_summary())
                 self._log_event(
@@ -24753,7 +25394,7 @@ class MidiTitleWindow(QMainWindow):
 
             progressDialog.close()
             _, context_paths = self._materialize_export_context_files(file_specs, output_path)
-            self._remember_save_as_location(output_paths[0] if output_paths else output_path)
+            self._remember_save_as_location(selected_output_path)
             self._load_regular_files(
                 context_paths,
                 (
@@ -24768,6 +25409,7 @@ class MidiTitleWindow(QMainWindow):
                 "save_as_image.complete.created_multiple",
                 count=len(output_paths),
                 preview=preview,
+                album_subfolder_note=album_subfolder_note,
             )
             self._show_greaseweazle_sector_reports(sector_reports)
             self._log_event(

@@ -5,6 +5,26 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
+## [0.6.12] - 2026-08-04
+
+### Added
+
+- `Utilities > Bulk Extraction...` for extracting every file from every
+  supported floppy image directly inside a selected folder. Per-image output
+  folders can use image filenames or available `PIANODIR.FIL` album titles,
+  with optional lossless E-SEQ-to-MIDI conversion during extraction. Conversion
+  mode outputs MIDI in place of the original E-SEQ and omits `PIANODIR.FIL` and
+  `MUSIC.DIR` by default; a separate default-off option can retain those source
+  files alongside the MIDI conversions. A stable two-level progress window
+  tracks both the full image set and files within the current image. Its
+  controls, validation, progress, completion, failure, and cancellation text
+  are included in all 12 supported languages.
+- A default-off `File > Save Options > Create Album Subfolder for Save As
+  Image` option that puts Save As Image output into the same catalog-number and
+  album-title subfolder used by Save As folder exports. It covers image repacks,
+  multi-image spill output, and Greaseweazle image preservation, with interface
+  and completion text in all 12 supported languages.
+
 ## [0.6.11] - 2026-07-07
 
 ### Added

@@ -1,5 +1,6 @@
 from PySide6.QtCore import QThread, Signal
 
+from .bulk_extraction import bulk_extract_images
 from .floppy_image import (
     BlankDiskImageError,
     FloppyImageSession,
@@ -170,6 +171,59 @@ class DiskSessionLoadWorker(_CancellableDiskWorker):
                 self.loadFailedWithDetails.emit(details)
                 return
             self.loadFailed.emit(str(exc))
+
+
+class BulkExtractionWorker(_CancellableDiskWorker):
+    extractionFinished = Signal(object)
+    extractionFailed = Signal(str)
+    detailedProgressChanged = Signal(object)
+
+    def __init__(
+        self,
+        source_directory,
+        output_directory,
+        *,
+        convert_eseq=False,
+        include_eseq_sources=False,
+        use_album_names=False,
+        language_code=None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.source_directory = source_directory
+        self.output_directory = output_directory
+        self.convert_eseq = bool(convert_eseq)
+        self.include_eseq_sources = bool(include_eseq_sources)
+        self.use_album_names = bool(use_album_names)
+        self.language_code = language_code
+
+    def _emit_detailed_progress(self, detail):
+        self._raise_if_cancelled()
+        self.detailedProgressChanged.emit(dict(detail or {}))
+        self._raise_if_cancelled()
+
+    def run(self):
+        try:
+            result = bulk_extract_images(
+                self.source_directory,
+                self.output_directory,
+                convert_eseq=self.convert_eseq,
+                include_eseq_sources=self.include_eseq_sources,
+                use_album_names=self.use_album_names,
+                language_code=self.language_code,
+                progress_callback=self._emit_progress,
+                progress_detail_callback=self._emit_detailed_progress,
+                cancel_callback=self._cancel_requested,
+            )
+            self._raise_if_cancelled()
+            self.extractionFinished.emit(result)
+        except FloppyOperationCancelled as exc:
+            self._emit_cancelled(exc)
+        except Exception as exc:
+            if self._should_treat_as_cancelled(exc):
+                self._emit_cancelled(exc)
+                return
+            self.extractionFailed.emit(str(exc))
 
 
 class DiskImageCaptureWorker(_CancellableDiskWorker):
