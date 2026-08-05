@@ -150,6 +150,7 @@ from .floppy_image import (
     list_greaseweazle_devices,
     list_floppy_drives,
     output_filters,
+    usb_floppy_format_capacity_error,
 )
 from .eseq_pianodir import (
     ESEQ_VARIANT_CLAVINOVA,
@@ -19129,6 +19130,16 @@ class MidiTitleWindow(QMainWindow):
         source_kind = options["source_kind"]
         drive_size_bytes = options.get("drive_size_bytes", 0)
         target_name = options.get("target_name", "")
+
+        if source_kind == "floppy_usb":
+            capacity_error = usb_floppy_format_capacity_error(selected_source, disk_format)
+            if capacity_error:
+                QMessageBox.warning(
+                    self,
+                    "Incompatible Floppy Format",
+                    capacity_error,
+                )
+                return
 
         if not self._confirm_format_floppy(
             target_name,

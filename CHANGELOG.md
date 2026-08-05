@@ -25,6 +25,15 @@ with release sections grouped by version and date.
   multi-image spill output, and Greaseweazle image preservation, with interface
   and completion text in all 12 supported languages.
 
+### Fixed
+
+- Direct USB floppy formatting now blocks raw images larger than the capacity
+  reported by the selected drive, preventing attempts such as writing an IBM
+  2.88M ED image to a 1.44M drive.
+- Windows raw floppy short-write errors now report the image bytes completed,
+  the requested and written chunk sizes, and likely disk-format or drive-capacity
+  mismatches even when Windows supplies no error code.
+
 ## [0.6.11] - 2026-07-07
 
 ### Added

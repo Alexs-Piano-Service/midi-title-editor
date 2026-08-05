@@ -555,6 +555,27 @@ def display_bytes(size):
     return f"{size} B"
 
 
+def usb_floppy_format_capacity_error(drive_info, disk_format):
+    if not isinstance(drive_info, FloppyDriveInfo) or not isinstance(
+        disk_format,
+        DiskFormat,
+    ):
+        return ""
+
+    drive_size = int(drive_info.size_bytes or 0)
+    format_size = int(disk_format.size_bytes or 0)
+    if drive_size <= 0 or format_size <= drive_size:
+        return ""
+
+    return (
+        f"The selected {disk_format.label} format requires {format_size:,} bytes, but "
+        f"{drive_info.path} currently reports a capacity of only {drive_size:,} bytes. "
+        "APS MIDI Prep Tool will not attempt an oversized raw write. Choose a format that "
+        "fits the inserted disk and drive, or use compatible hardware such as an ED-capable "
+        "drive and media for a 2.88 MB format."
+    )
+
+
 def allocated_size(size, cluster_size):
     cluster = max(1, int(cluster_size or 1))
     if size <= 0:
@@ -943,6 +964,34 @@ def _windows_last_error_message(prefix):
         separator = " - " if str(prefix or "").endswith(":") else ": "
         return f"{prefix}{separator}{ctypes.FormatError(error_code).strip()}"
     return f"{prefix}."
+
+
+def _windows_write_failure_message(
+    device_path,
+    *,
+    image_size,
+    written_before,
+    requested_size,
+    written_size,
+    windows_error="",
+):
+    image_size = max(0, int(image_size or 0))
+    written_before = max(0, int(written_before or 0))
+    requested_size = max(0, int(requested_size or 0))
+    written_size = max(0, int(written_size or 0))
+    written_total = min(image_size, written_before + written_size)
+    message = (
+        f"Could not fully write floppy device {device_path}. Windows wrote "
+        f"{written_total:,} of {image_size:,} image bytes; the unsuccessful write "
+        f"requested {requested_size:,} bytes and wrote {written_size:,} bytes."
+    )
+    if windows_error:
+        message += f"\n\nWindows error: {windows_error}"
+    message += (
+        "\n\nThe selected image may be larger than the floppy or drive capacity. "
+        "Check that the selected disk format matches both the inserted media and the drive."
+    )
+    return message
 
 
 def _windows_raw_volume_path(drive_path):
@@ -2717,7 +2766,22 @@ class _WindowsVolumeHandle:
                     None,
                 )
                 if not ok or bytes_written.value != len(chunk):
-                    raise FloppyImageError(_windows_last_error_message(f"Could not write floppy device {self.path}"))
+                    error_code = self._ctypes.get_last_error() if not ok else 0
+                    windows_error = (
+                        self._ctypes.FormatError(error_code).strip()
+                        if error_code
+                        else ""
+                    )
+                    raise FloppyImageError(
+                        _windows_write_failure_message(
+                            self.path,
+                            image_size=total_size,
+                            written_before=written_total,
+                            requested_size=len(chunk),
+                            written_size=bytes_written.value,
+                            windows_error=windows_error,
+                        )
+                    )
                 written_total += bytes_written.value
                 if progress_callback is not None and total_size > 0:
                     progress = min(98, int((written_total / total_size) * 98))
@@ -6108,6 +6172,10 @@ class FloppyImageSession:
             raise FloppyImageError("Invalid floppy drive selection.")
         if not isinstance(disk_format, DiskFormat):
             raise FloppyImageError("Invalid disk format.")
+
+        capacity_error = usb_floppy_format_capacity_error(drive_info, disk_format)
+        if capacity_error:
+            raise FloppyImageError(capacity_error)
 
         existing_session = cls._try_prepare_existing_usb_floppy(
             drive_info,
