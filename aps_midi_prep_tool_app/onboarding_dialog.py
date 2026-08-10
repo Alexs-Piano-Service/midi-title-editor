@@ -112,7 +112,6 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li>Prepare HFE images for Nalbantov emulators.</li>
                   <li>Convert E-SEQ to MIDI, MIDI to E-SEQ, and SMF1 to SMF0.</li>
                   <li>Use <strong>File</strong> for sources and save behavior, <strong>Disk</strong> for floppy/media operations, and <strong>Utilities</strong> for batch tools.</li>
-                  <li><strong>Utilities &gt; Bulk Extraction...</strong> extracts files from every supported image in a folder. Its optional conversion mode outputs MIDI in place of E-SEQ and omits Yamaha directory files by default, with a separate option to retain those source files.</li>
                   <li>Use <strong>View &gt; View Logs...</strong> for live console output and <strong>Help &gt; Report a Bug...</strong> when you need to send a support report.</li>
                 </ul>
                 <p><a href="{APP_WEBSITE}">{html.escape(APP_COMPANY)}</a></p>
@@ -133,6 +132,20 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 </ul>
                 <p>Related articles: <a href="https://www.alexanderpeppe.com/disklavier-floppy-backups/">Backing up Disklavier floppy disks</a>
                 and <a href="https://www.alexanderpeppe.com/making-archival-copies-of-disks-using-a-greaseweazle-v4/">Backing Up Yamaha Disklavier Floppy Disks with a Greaseweazle</a>.</p>
+                """,
+            ),
+            (
+                "Bulk Extraction",
+                """
+                <p>Use <strong>Utilities &gt; Bulk Extraction...</strong> to extract files from every
+                supported floppy image in a folder in one operation.</p>
+                <ul>
+                  <li>Choose the folder containing the floppy images and a separate output folder.</li>
+                  <li>Each image gets its own output folder, named from the image filename or an available <strong>PIANODIR.FIL</strong> album title.</li>
+                  <li>Optional E-SEQ conversion writes MIDI songs in place of the E-SEQ source files.</li>
+                  <li>When conversion is enabled, Yamaha directory files are omitted by default; enable the source-file option when you also want to retain them.</li>
+                  <li>The progress window tracks the complete batch and the files in the current image.</li>
+                </ul>
                 """,
             ),
             (

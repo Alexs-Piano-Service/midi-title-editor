@@ -22,6 +22,8 @@ DISKLAVIER_ACOUSTIC_GRAND_PROGRAM = 0
 DISKLAVIER_PEDAL_CONTROLLERS = {64, 66, 67}
 VIRTUAL_PIANO_ROLL_SUSTAIN_NOTE = 18
 VIRTUAL_PIANO_ROLL_SUSTAIN_VELOCITY = 1
+MIDI_BANK_SELECT_CONTROLLERS = {0, 32}
+MIDI_CHANNEL_MODE_CONTROLLERS = set(range(120, 128))
 
 
 @dataclass(frozen=True)
@@ -690,15 +692,63 @@ def _normalize_disklavier_merged_events(merged_events):
     return deduped, changed
 
 
+def _remap_merged_events_to_piano_channel0(merged_events):
+    remapped = []
+    changed = False
+    first_note_track = 0
+    has_notes = False
+
+    for abs_tick, track_index, order, raw in merged_events:
+        if not raw or not (0x80 <= raw[0] <= 0xEF):
+            remapped.append((abs_tick, track_index, order, raw))
+            continue
+
+        message_type = raw[0] & 0xF0
+        channel = raw[0] & 0x0F
+        if message_type in (0x80, 0x90):
+            if not has_notes:
+                first_note_track = track_index
+            has_notes = True
+
+        # Once channels are combined, bank changes and channel-mode commands
+        # from one former part can change the instrument or silence every part.
+        if message_type == 0xB0 and len(raw) >= 3:
+            if raw[1] in MIDI_BANK_SELECT_CONTROLLERS | MIDI_CHANNEL_MODE_CONTROLLERS:
+                changed = True
+                continue
+
+        # Replace all source program changes with one deterministic piano
+        # selection at tick zero after the complete event stream is remapped.
+        if message_type == 0xC0:
+            changed = True
+            continue
+
+        remapped_raw = bytes([message_type | DISKLAVIER_PIANO_CHANNEL]) + raw[1:]
+        changed = changed or channel != DISKLAVIER_PIANO_CHANNEL
+        remapped.append((abs_tick, track_index, order, remapped_raw))
+
+    if has_notes:
+        remapped.append((0, first_note_track, -2, _channel1_acoustic_grand_event()))
+        changed = True
+
+    remapped.sort(key=lambda item: (item[0], item[1], item[2]))
+    return remapped, changed
+
+
 def _convert_midi_bytes_to_type0(
     midi_bytes,
     *,
     normalize_disklavier=False,
+    remap_all_instruments_to_channel0=False,
 ):
     header_end, format_type, _, chunks = _parse_midi_chunks(midi_bytes)
     track_chunks = [chunk for chunk in chunks if chunk["id"] == b"MTrk"]
 
-    if format_type == 0 and not normalize_disklavier:
+    if (
+        format_type == 0
+        and not normalize_disklavier
+        and not remap_all_instruments_to_channel0
+    ):
         return midi_bytes, False
     if format_type == 2:
         raise ValueError("MIDI format 2 files are not supported for Type 0 conversion.")
@@ -720,6 +770,9 @@ def _convert_midi_bytes_to_type0(
     if normalize_disklavier:
         merged_events, normalization_changed = _normalize_disklavier_merged_events(merged_events)
         changed = changed or normalization_changed
+    if remap_all_instruments_to_channel0:
+        merged_events, remap_changed = _remap_merged_events_to_piano_channel0(merged_events)
+        changed = changed or remap_changed
 
     if not changed:
         return midi_bytes, False
@@ -776,6 +829,7 @@ def convert_midi_file_to_type0_path(
     dest_path,
     *,
     normalize_disklavier=False,
+    remap_all_instruments_to_channel0=False,
 ):
     if not os.path.isfile(source_path):
         raise ValueError("File does not exist.")
@@ -786,6 +840,7 @@ def convert_midi_file_to_type0_path(
     converted_bytes, changed = _convert_midi_bytes_to_type0(
         midi_bytes,
         normalize_disklavier=normalize_disklavier,
+        remap_all_instruments_to_channel0=remap_all_instruments_to_channel0,
     )
     if not changed:
         return False
@@ -808,6 +863,7 @@ def convert_midi_files_to_type0(
     backup_path_builder=None,
     *,
     normalize_disklavier=False,
+    remap_all_instruments_to_channel0=False,
 ):
     unique_paths = _unique_abs_paths(file_paths)
     backup_path_builder = backup_path_builder or _default_backup_path
@@ -829,6 +885,7 @@ def convert_midi_files_to_type0(
             converted_bytes, changed = _convert_midi_bytes_to_type0(
                 midi_bytes,
                 normalize_disklavier=normalize_disklavier,
+                remap_all_instruments_to_channel0=remap_all_instruments_to_channel0,
             )
             if not changed:
                 unchanged.append(file_path)

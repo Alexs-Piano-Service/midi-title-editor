@@ -5,6 +5,37 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
+## [Unreleased]
+
+### Added
+
+- Read-only PianoDisc System 3 floppy-image support for raw IMG/BIN-style
+  sector images and HFE images. The proprietary catalog and compact performance
+  stream are decoded directly to piano SMF0 files with 480 PPQ timing, sustain
+  and soft-pedal events, track-number/title filenames, and per-song damage
+  reporting. Opening one of these images loads the decoded MIDI songs without
+  modifying the source; Bulk Extraction can process the format as well.
+- An SMF1-to-SMF0 conversion option that combines channel voice events on MIDI
+  channel 1 (zero-based channel 0), removes bank and channel-mode events that
+  can conflict after channels are merged, and selects Acoustic Grand Piano.
+- Optional descriptive MIDI filenames for E-SEQ conversion, using track order
+  and song title (for example, `01 - Moon River.mid`). The option is available
+  during regular conversion and Read Floppy, and `Utilities > Name MIDI Files
+  from Song Titles` provides the same naming as a standalone tool. In
+  floppy/image mode, the Filename column shows the folder-export name while its
+  tooltip retains the DOS-compatible internal name.
+
+### Changed
+
+- Bulk Extraction guidance in the Welcome dialog is now a dedicated workflow
+  instead of an item in the Overview page.
+- Filename, title, and type columns are compactly fitted to their current
+  contents after file loads, conversions, batch renaming, title cleanup, and
+  multi-file drops, without continuously resizing while the user edits.
+- E-SEQ-to-MIDI conversion now offers a remembered option to remove leading,
+  trailing, and repeated spaces from song titles before embedding them in MIDI
+  files or using them in descriptive filenames.
+
 ## [0.6.12] - 2026-08-04
 
 ### Added

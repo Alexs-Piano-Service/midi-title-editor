@@ -46,7 +46,7 @@ from .midi_metadata import (
     update_eseq_title_to_path,
     update_midi_title_to_path,
 )
-from .additional_formats import electone_mdr_to_midi
+from .additional_formats import electone_mdr_to_midi, pianodisc_system3
 from .subprocess_utils import windows_subprocess_kwargs
 
 
@@ -5603,6 +5603,9 @@ class FloppyImageSession:
         capture_path=None,
         capture_ext=None,
         gw_sector_reports=None,
+        virtual_files=None,
+        conversion_warnings=None,
+        read_only_format="",
     ):
         self.source_path = source_path
         self.source_ext = source_ext
@@ -5617,6 +5620,12 @@ class FloppyImageSession:
         self.capture_ext = capture_ext
         self.gw_sector_reports = tuple(gw_sector_reports or ())
         self.latest_gw_sector_reports = self.gw_sector_reports
+        self.virtual_files = {
+            _normalize_image_path(path): bytes(data)
+            for path, data in dict(virtual_files or {}).items()
+        }
+        self.conversion_warnings = tuple(conversion_warnings or ())
+        self.read_only_format = str(read_only_format or "")
         self.repair_note = repair_result.note
         self.repair_changed = repair_result.changed
         self.extracted_dir = os.path.join(temp_dir, "extracted")
@@ -6790,12 +6799,67 @@ class FloppyImageSession:
         return "Floppy Disk" if self.source_kind.startswith("floppy") else "Image Mode"
 
     @classmethod
+    def _from_pianodisc_system3_image(
+        cls,
+        source_path,
+        source_ext,
+        temp_dir,
+        working_img_path,
+        *,
+        source_kind="image",
+        source_name=None,
+        gw_sector_reports=None,
+    ):
+        try:
+            with open(working_img_path, "rb") as handle:
+                conversion = pianodisc_system3.convert_pianodisc_system3_image(handle.read())
+        except (OSError, pianodisc_system3.PianoDiscSystem3Error) as exc:
+            raise FloppyImageError(f"Could not read PianoDisc System 3 image: {exc}") from exc
+
+        virtual_files = {item.filename: item.data for item in conversion.files}
+        return cls(
+            source_path,
+            source_ext,
+            temp_dir,
+            working_img_path,
+            DiskFormat(
+                "pianodisc.system3",
+                "PianoDisc System 3 (read-only)",
+                os.path.getsize(working_img_path),
+            ),
+            YamahaRepairResult(
+                "PianoDisc System 3 songs were decoded to Standard MIDI files. "
+                "The source image is read-only and was not modified.",
+                False,
+            ),
+            source_kind=source_kind,
+            source_name=source_name or os.path.basename(source_path),
+            gw_sector_reports=gw_sector_reports,
+            virtual_files=virtual_files,
+            conversion_warnings=conversion.errors,
+            read_only_format="pianodisc_system3",
+        )
+
+    @classmethod
     def _load_raw(cls, source_path, source_ext, temp_dir, progress_callback=None, cancel_callback=None):
         source_copy = os.path.join(temp_dir, "source.img")
         working_img = os.path.join(temp_dir, "working.img")
         _raise_if_cancelled(cancel_callback)
         _notify_progress(progress_callback, 1, 4, "Copying raw floppy image...")
         shutil.copy2(source_path, source_copy)
+        try:
+            with open(source_copy, "rb") as handle:
+                is_pianodisc = pianodisc_system3.looks_like_pianodisc_system3_bytes(handle.read())
+        except OSError:
+            is_pianodisc = False
+        if is_pianodisc:
+            _notify_progress(progress_callback, 3, 4, "Decoding PianoDisc System 3 songs...")
+            return cls._from_pianodisc_system3_image(
+                source_path,
+                source_ext,
+                temp_dir,
+                source_copy,
+            )
         volume_name = _hfs_volume_name(source_copy)
         if volume_name:
             raise FloppyImageError(
@@ -6850,6 +6914,38 @@ class FloppyImageSession:
                     allow_sector_failures=True,
                 )
                 conversion_sector_map = _parse_gw_sector_map(conversion_output, disk_format)
+                try:
+                    with open(candidate, "rb") as handle:
+                        is_pianodisc = pianodisc_system3.looks_like_pianodisc_system3_bytes(
+                            handle.read()
+                        )
+                except OSError:
+                    is_pianodisc = False
+                if is_pianodisc:
+                    _notify_progress(
+                        progress_callback,
+                        3,
+                        4,
+                        "Decoding PianoDisc System 3 songs...",
+                    )
+                    return cls._from_pianodisc_system3_image(
+                        source_path,
+                        source_ext,
+                        temp_dir,
+                        candidate,
+                        gw_sector_reports=_gw_sector_reports(
+                            _gw_sector_report(
+                                "convert",
+                                conversion_sector_map,
+                                title="Greaseweazle Conversion Sector Map",
+                                summary=(
+                                    f"Converted {os.path.basename(source_path)} as "
+                                    "a PianoDisc System 3 disk."
+                                ),
+                                disk_format=disk_format,
+                            )
+                        ),
+                    )
                 try:
                     _validate_converted_image_matches_boot_hint(candidate, disk_format)
                 except ConvertedImageFormatMismatchError as exc:
@@ -7000,6 +7096,20 @@ class FloppyImageSession:
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def list_entries(self):
+        if self.virtual_files:
+            entries = [
+                ImageEntry(
+                    path=path,
+                    size=len(data),
+                    packed_size=len(data),
+                )
+                for path, data in self.virtual_files.items()
+            ]
+            return ImageListing(
+                entries=entries,
+                free_space=0,
+                cluster_size=pianodisc_system3.SECTOR_SIZE,
+            )
         return read_image_listing(self.working_img_path)
 
     def _run_mtools(self, args, message, cancel_callback=None):
@@ -7038,6 +7148,17 @@ class FloppyImageSession:
         cached = self._extracted_files.get(normalized)
         if cached and os.path.isfile(cached):
             return cached
+
+        if self.virtual_files:
+            data = self.virtual_files.get(normalized)
+            if data is None:
+                raise FloppyImageError(f"The decoded file was not found: {image_path}")
+            filename = os.path.basename(normalized) or "decoded-file"
+            dest_path = os.path.join(self.extracted_dir, f"{uuid.uuid4().hex}_{filename}")
+            with open(dest_path, "wb") as handle:
+                handle.write(data)
+            self._extracted_files[normalized] = dest_path
+            return dest_path
 
         filename = os.path.basename(normalized) or "image-file"
         dest_path = os.path.join(self.extracted_dir, f"{uuid.uuid4().hex}_{filename}")

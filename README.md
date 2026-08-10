@@ -24,6 +24,10 @@ before you write anything back.
 - Opens MIDI folders, Yamaha E-SEQ folders, floppy images, and physical floppies.
 - Reads common floppy-image formats supported through Greaseweazle conversion,
   including IMG/BIN-style raw images and HFE workflows.
+- Recognizes PianoDisc System 3 IMG/BIN-style and HFE floppy images and decodes
+  their non-FAT song catalog and performance streams to piano SMF0 files. The
+  outputs use track-number/title filenames, and the source image stays
+  unchanged.
 - Reads and writes physical floppies using a normal floppy drive or Greaseweazle.
 - Shows Greaseweazle sector-map previews after reads, writes, and image conversions
   so good and bad sector positions can be reviewed visually.
@@ -37,8 +41,10 @@ before you write anything back.
 - Edits MIDI titles, E-SEQ titles, image filenames, and Disklavier album metadata.
 - Trims Disklavier-spaced title text into regular MIDI titles during floppy reads
   or as a batch utility.
-- Converts MIDI Type 1 / SMF1 files to MIDI Type 0 / SMF0.
-- Converts Yamaha E-SEQ `.FIL` files to standard MIDI.
+- Converts MIDI Type 1 / SMF1 files to MIDI Type 0 / SMF0, with an optional
+  one-piano mode that combines instruments on MIDI channel 1.
+- Converts Yamaha E-SEQ `.FIL` files to standard MIDI, optionally naming folder
+  outputs from track order and song title.
 - Extracts Akai MPC `.SEQ` files and embedded sequences in MPC `.ALL` files,
   converting them to standard MIDI.
 - Extracts Yamaha V50/SY77 NSEQ sequences when the V50/SY77 signature is
@@ -111,8 +117,11 @@ before you write anything back.
 3. Select `Floppy Drive` or `Greaseweazle`.
 4. Optionally enable `Trim title spaces after reading` to clean centered
    Disklavier-screen titles into regular MIDI titles.
-5. Review the files, titles, types, and free space.
-6. Use `File > Save As Image...` to create an archival image, or
+5. To convert E-SEQ songs for PC or mobile playback, enable `Convert E-SEQ
+   files to MIDI after reading`; optionally enable `Name MIDI files by track
+   number and song title` beneath it.
+6. Review the files, titles, types, and free space.
+7. Use `File > Save As Image...` to create an archival image, or
    `File > Save As...` to extract files.
 
 For difficult disks, choose `Disk > Read Floppy...` and enable
@@ -141,6 +150,9 @@ written by default. Enable `Also include original E-SEQ and Yamaha directory
 files` when those source files should accompany the converted MIDI. Other files
 from each image are still extracted. A stable progress window shows overall
 image progress and progress within the current image.
+
+PianoDisc System 3 images are read-only sources and are always extracted as
+decoded MIDI songs; they do not need the optional E-SEQ conversion setting.
 
 ### Save Safely
 
@@ -186,8 +198,11 @@ IBM PC header metadata for better emulator compatibility.
 1. Open a MIDI folder or drag MIDI files into the window.
 2. Check the `Type` column.
 3. Choose `Utilities > Convert > Convert All SMF1 to SMF0`.
-4. Review the staged changes.
-5. Use `Save` to overwrite originals, or `Save As` to write copies.
+4. Optionally enable `Combine all instruments on MIDI channel 1 and use
+   Acoustic Grand Piano` for ordinary multitrack arrangements that should play
+   as one piano part.
+5. Review the staged changes.
+6. Use `Save` to overwrite originals, or `Save As` to write copies.
 
 The conversion is staged first. Original files are not modified until you save.
 Pedal channels are preserved by default.
@@ -216,6 +231,13 @@ because binary values and cleanup can remove half-pedal or archival detail.
 - E-SEQ to MIDI exports preserve pedal channels and controller values by
   default. Optional pedal compatibility transforms are a separate MIDI utility
   under `Utilities > Apply Pedal Compatibility...`.
+- Enable `Name MIDI files by track number and song title` during E-SEQ to MIDI
+  conversion or Read Floppy to create names such as
+  `01 - Moon River.mid` for folder exports. Floppy and image filenames remain
+  DOS-compatible. `Utilities > Name MIDI Files from Song Titles` can stage the
+  same naming independently for already-converted MIDI files. In floppy/image
+  mode, the Filename column shows the descriptive folder-export names while
+  each tooltip retains the internal DOS-compatible name.
 - `PIANODIR.FIL` is generated or refreshed on save when needed.
 - `File > Save Options > Create Album Subfolder` controls whether folder
   exports use the current album title and catalog number for a subfolder.

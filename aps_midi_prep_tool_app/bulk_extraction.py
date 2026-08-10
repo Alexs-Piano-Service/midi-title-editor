@@ -255,6 +255,8 @@ def bulk_extract_images(
             _raise_if_cancelled(cancel_callback)
             entries = list(session.list_entries().entries)
             entry_total = len(entries)
+            for warning in getattr(session, "conversion_warnings", ()) or ():
+                errors.append(f"{image_name}: {warning}")
             preferred_name = os.path.splitext(image_name)[0] or image_name
             if use_album_names:
                 preferred_name = _album_name_from_image(session, entries) or preferred_name

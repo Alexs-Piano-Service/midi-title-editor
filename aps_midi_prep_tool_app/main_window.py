@@ -99,6 +99,7 @@ from .eseq_converter import (
     is_eseq_file,
 )
 from .dos83_renamer import apply_midi_dos83_plan, build_midi_dos83_plan, validate_midi_dos83_plan
+from .long_midi_filename import build_long_midi_filename
 from .midi_type0_converter import (
     _encode_vlq,
     _parse_midi_chunks,
@@ -8467,6 +8468,8 @@ class MidiTitleWindow(QMainWindow):
     SETTING_HIDE_RECOVERY_COMPLETE_DIALOG = "hide_recovery_complete_dialog"
     SETTING_HIDE_SAVE_AS_IMAGE_COMPLETE_DIALOG = "hide_save_as_image_complete_dialog"
     SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT = "skip_eseq_to_midi_conversion_prompt"
+    SETTING_ESEQ_TO_MIDI_LONG_FILENAMES = "eseq_to_midi_long_filenames"
+    SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES = "eseq_to_midi_trim_title_spaces"
     SETTING_ALLOW_FLOPPY_SAVE = "allow_floppy_save"
     SETTING_CONFIRM_IMAGE_SAVE = "confirm_image_save"
     SETTING_AUTO_WRITE_PROTECT_ON_LOAD = "auto_write_protect_on_load"
@@ -8486,6 +8489,7 @@ class MidiTitleWindow(QMainWindow):
     SETTING_READ_FLOPPY_GW_RETRIES = "read_floppy_gw_retries"
     SETTING_READ_FLOPPY_CONVERT_TO_MIDI = "read_floppy_convert_to_midi"
     DEFAULT_READ_FLOPPY_CONVERT_TO_MIDI = False
+    SETTING_READ_FLOPPY_LONG_FILENAMES = "read_floppy_long_filenames"
     SETTING_READ_FLOPPY_START_RECOVERY = "read_floppy_start_recovery"
     SETTING_READ_FLOPPY_TRIM_TITLES = "read_floppy_trim_titles"
     SETTING_RECOVERY_IMAGE_PATH = "disk_recovery_image_path"
@@ -8523,8 +8527,10 @@ class MidiTitleWindow(QMainWindow):
     TYPE_COLUMN_ESEQ_DETAIL_MIN_WIDTH = 240
     FILENAME_COLUMN_CHARS = 9
     FILENAME_COLUMN_PADDING = 22
+    FILENAME_COLUMN_CONTENT_MAX_WIDTH = 420
     TITLE_COLUMN_MIN_CHARS = 32
     TITLE_COLUMN_PADDING = 30
+    TITLE_COLUMN_CONTENT_MAX_WIDTH = 560
     USER_RESIZABLE_EDGE_COLUMNS = {3, 4, 5, 6}
     CONTROL_PANEL_CONTENT_ROWS = 3
     CONTROL_PANEL_ROW_HEIGHT = 40
@@ -8575,6 +8581,7 @@ class MidiTitleWindow(QMainWindow):
         self.pendingImageDeletes = set()
         self.pendingImageAdditions = {}  # keys: target image paths, values: host file paths
         self.pendingImageReplacements = {}  # keys: image paths, values: replacement host file paths
+        self.pendingImageExportFilenames = {}  # host-folder names; disk/image names stay DOS-compatible
         self.imageEntriesByPath = {}
         self.imageFileInfo = {}
         self.imageEseqMode = False
@@ -8609,6 +8616,7 @@ class MidiTitleWindow(QMainWindow):
         self.diskLoadShouldOfferCapture = False
         self.diskLoadContext = {}
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadLongFilenames = False
         self.pendingFloppyReadTrimTitles = False
         self.v50NseqPromptedSessionPath = ""
         self.psr600BlkPromptedSessionPath = ""
@@ -8663,6 +8671,7 @@ class MidiTitleWindow(QMainWindow):
         self._shownGwSectorReportFingerprints = set()
         self._did_apply_initial_column_sizing = False
         self._is_adjusting_columns = False
+        self._columns_content_fitted = False
         self._manual_column_widths = {}
         self._controlPanelLayoutPairs = []
         self._set_title_monospace_font()
@@ -9283,6 +9292,13 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesRenameAction = QAction("Rename All to DOS 8.3", self)
         self.utilitiesRenameAction.triggered.connect(self.rename_all_for_disk)
         self.utilitiesMenu.addAction(self.utilitiesRenameAction)
+
+        self.utilitiesLongFilenamesAction = QAction("Name MIDI Files from Song Titles", self)
+        self.utilitiesLongFilenamesAction.setToolTip(
+            "Create filenames such as 01 - Moon River.mid from track order and song titles."
+        )
+        self.utilitiesLongFilenamesAction.triggered.connect(self.create_long_midi_filenames)
+        self.utilitiesMenu.addAction(self.utilitiesLongFilenamesAction)
 
         self.utilitiesTrimTitleSpacesAction = QAction("Trim Title Spaces", self)
         self.utilitiesTrimTitleSpacesAction.setToolTip(
@@ -9924,6 +9940,7 @@ class MidiTitleWindow(QMainWindow):
             {"id": "utilities.render_audio", "category": "Utilities", "label": "Render Audio...", "action": "utilitiesRenderAudioAction", "default": "F5"},
             {"id": "utilities.bulk_extraction", "category": "Utilities", "label": "Bulk Extraction...", "action": "utilitiesBulkExtractionAction", "default": ""},
             {"id": "utilities.rename", "category": "Utilities", "label": "Rename All to DOS 8.3", "action": "utilitiesRenameAction", "default": "Ctrl+Shift+R"},
+            {"id": "utilities.long_filenames", "category": "Utilities", "label": "Name MIDI Files from Song Titles", "action": "utilitiesLongFilenamesAction", "default": ""},
             {"id": "utilities.trim_title_spaces", "category": "Utilities", "label": "Trim Title Spaces", "action": "utilitiesTrimTitleSpacesAction", "default": "Ctrl+Shift+Space"},
             {"id": "utilities.smf0", "category": "Utilities", "label": "Convert All SMF1 to SMF0", "action": "utilitiesSmfAction", "default": "Ctrl+Shift+0"},
             {"id": "utilities.eseq_to_midi", "category": "Utilities", "label": "Convert All E-SEQ to MIDI", "action": "utilitiesEseqToMidiAction", "default": "Ctrl+Shift+M"},
@@ -10715,6 +10732,7 @@ class MidiTitleWindow(QMainWindow):
             ("utilitiesBulkExtractionAction", "Bulk Extraction...", "B"),
             ("utilitiesRecoverImageAction", "Recover Damaged Image...", "D"),
             ("utilitiesRenameAction", "Rename All to DOS 8.3", "R"),
+            ("utilitiesLongFilenamesAction", "Name MIDI Files from Song Titles", "L"),
             ("utilitiesTrimTitleSpacesAction", "Trim Title Spaces", "T"),
             ("utilitiesSmfAction", "Convert All SMF1 to SMF0", "0"),
             ("utilitiesEseqToMidiAction", "Convert All E-SEQ to MIDI", "E"),
@@ -11245,6 +11263,21 @@ class MidiTitleWindow(QMainWindow):
             self.diskLoadProgressDialog = None
 
         self._show_greaseweazle_sector_reports(getattr(session, "gw_sector_reports", ()))
+        if getattr(session, "read_only_format", "") == "pianodisc_system3":
+            try:
+                self._open_pianodisc_system3_session_as_midi(session, listing)
+            except Exception as exc:
+                try:
+                    session.cleanup()
+                except Exception:
+                    pass
+                self._show_operation_error(
+                    "PianoDisc Conversion Failed",
+                    "The PianoDisc System 3 image was recognized, but its songs could not be opened",
+                    exc,
+                )
+            return
+
         should_offer_capture = bool(self.diskLoadShouldOfferCapture)
         if not should_offer_capture and getattr(session, "source_kind", "") == "floppy_gw":
             gw_source = getattr(session, "gw_source", None)
@@ -11285,6 +11318,66 @@ class MidiTitleWindow(QMainWindow):
             QTimer.singleShot(0, self._convert_loaded_floppy_to_midi_after_read)
         else:
             QTimer.singleShot(0, self._offer_post_load_sequence_conversions)
+
+    def _open_pianodisc_system3_session_as_midi(self, session, listing):
+        source_name = getattr(session, "source_name", "") or os.path.basename(
+            getattr(session, "source_path", "")
+        )
+        warnings = list(getattr(session, "conversion_warnings", ()) or ())
+
+        self._cleanup_midi_scratch_dir()
+        output_directory = (
+            Path(self._ensure_midi_scratch_dir())
+            / f"pianodisc_system3_{uuid.uuid4().hex}"
+        )
+        output_directory.mkdir(parents=True, exist_ok=True)
+        midi_paths = []
+        try:
+            for entry in getattr(listing, "entries", ()):
+                extracted_path = session.extract_file(entry.path)
+                output_path = self._unique_path_in_directory(
+                    output_directory,
+                    os.path.basename(entry.path),
+                )
+                shutil.copy2(extracted_path, output_path)
+                midi_paths.append(str(output_path))
+        finally:
+            session.cleanup()
+
+        if not midi_paths:
+            raise FloppyImageError("No playable PianoDisc songs were found in the image.")
+
+        if self.image_session is not None:
+            self._reset_image_state()
+
+        status = (
+            f"Decoded {len(midi_paths)} PianoDisc System 3 song(s) from {source_name}.\n"
+            "The source image was not modified. Use Save As to choose a permanent folder."
+        )
+        if warnings:
+            status += f"\nSkipped {len(warnings)} damaged or incomplete catalog song(s)."
+        self._load_regular_files(midi_paths, status)
+        self._log_event(
+            "Disk",
+            "PianoDisc conversion completed",
+            source=source_name,
+            source_kind=getattr(session, "source_kind", ""),
+            format="PianoDisc System 3",
+            songs=len(midi_paths),
+            skipped=len(warnings),
+        )
+
+        if warnings:
+            self._show_error_list(
+                "Some PianoDisc Songs Need Review",
+                "The readable PianoDisc songs were converted, but some catalog entries were incomplete",
+                warnings,
+                warning=True,
+                guidance=(
+                    "The source image was not modified. Review the converted MIDI files before "
+                    "using them for preservation or playback"
+                ),
+            )
 
     def _offer_post_load_sequence_conversions(self):
         if self._offer_electone_evt_conversion_if_available():
@@ -13670,6 +13763,16 @@ class MidiTitleWindow(QMainWindow):
             self.diskRecoveryWorker = None
 
     def _reset_user_hide_choices_if_needed(self):
+        if not self.settings.contains(self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES):
+            # Existing users may have hidden the older confirmation before it
+            # contained filename choices. Show it once for the new option.
+            self.settings.setValue(self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES, False)
+            self.settings.setValue(self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT, False)
+        if not self.settings.contains(self.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES):
+            # Show the confirmation once after adding title-spacing cleanup so
+            # users who hid the older dialog can make the new choice.
+            self.settings.setValue(self.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES, False)
+            self.settings.setValue(self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT, False)
         version = self.settings.value(self.SETTING_HIDE_CHOICES_RESET_VERSION, 0, type=int)
         if version == self.HIDE_CHOICES_RESET_VERSION:
             return
@@ -14014,6 +14117,96 @@ class MidiTitleWindow(QMainWindow):
             self.settings.sync()
         return confirmed
 
+    def _confirm_eseq_to_midi_conversion(self, *, title, message):
+        use_long_filenames = self.settings.value(
+            self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES,
+            False,
+            type=bool,
+        )
+        trim_title_spaces = self.settings.value(
+            self.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES,
+            False,
+            type=bool,
+        )
+        if self.settings.value(
+            self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT,
+            False,
+            type=bool,
+        ):
+            return True, use_long_filenames, trim_title_spaces
+
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle(self._lt(title))
+        dialog.setModal(True)
+        dialog.setMinimumWidth(540)
+        layout = QVBoxLayout(dialog)
+
+        summary = QLabel(self._lt(message))
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        long_name_checkbox = QCheckBox(
+            self._lt("Name MIDI files by track number and song title")
+        )
+        long_name_checkbox.setChecked(use_long_filenames)
+        long_name_checkbox.setToolTip(
+            self._lt(
+                "Example: 01 - Moon River.mid. In floppy/image mode, the Filename column previews "
+                "the folder-export name while the internal name remains DOS-compatible."
+            )
+        )
+        layout.addWidget(long_name_checkbox)
+
+        trim_title_spaces_checkbox = QCheckBox(
+            self._lt("Remove extra spaces from song titles")
+        )
+        trim_title_spaces_checkbox.setChecked(trim_title_spaces)
+        trim_title_spaces_checkbox.setToolTip(
+            self._lt(
+                "Remove leading and trailing spaces and collapse repeated spaces before conversion. "
+                "Descriptive MIDI filenames use the cleaned titles too."
+            )
+        )
+        layout.addWidget(trim_title_spaces_checkbox)
+
+        hide_checkbox = QCheckBox(
+            self._lt("Do not show this E-SEQ to MIDI conversion dialog again")
+        )
+        layout.addWidget(hide_checkbox)
+
+        buttons = self._make_dialog_button_box(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            dialog,
+        )
+        convert_button = buttons.button(QDialogButtonBox.Ok)
+        if convert_button is not None:
+            convert_button.setText(self._lt("Convert"))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+            return False, use_long_filenames, trim_title_spaces
+
+        use_long_filenames = long_name_checkbox.isChecked()
+        trim_title_spaces = trim_title_spaces_checkbox.isChecked()
+        self.settings.setValue(
+            self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES,
+            use_long_filenames,
+        )
+        self.settings.setValue(
+            self.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES,
+            trim_title_spaces,
+        )
+        if hide_checkbox.isChecked():
+            self.settings.setValue(
+                self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT,
+                True,
+            )
+        self.settings.sync()
+        return True, use_long_filenames, trim_title_spaces
+
     def _confirm_with_optional_skip(self, *, setting_key, title, message, icon=QMessageBox.Warning):
         if self.settings.value(setting_key, False, type=bool):
             return True
@@ -14116,6 +14309,7 @@ class MidiTitleWindow(QMainWindow):
     def _handle_section_resized(self, logical_index, old_size, new_size):
         if self._is_adjusting_columns:
             return
+        self._columns_content_fitted = False
         if logical_index in self.USER_RESIZABLE_EDGE_COLUMNS:
             if old_size <= 0 or new_size <= 0 or self.table.isColumnHidden(logical_index):
                 return
@@ -14225,8 +14419,101 @@ class MidiTitleWindow(QMainWindow):
             min(preferred, self._scaled_int(self.TYPE_COLUMN_MAX_WIDTH, minimum=320)),
         )
 
+    def _preferred_content_column_width(self, column, minimum, maximum, padding):
+        header_item = self.table.horizontalHeaderItem(column)
+        header_text = header_item.text() if header_item is not None else ""
+        header_metrics = QFontMetrics(self.table.horizontalHeader().font())
+        preferred = header_metrics.horizontalAdvance(header_text)
+
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, column)
+            if item is None or not item.text():
+                continue
+            metrics = QFontMetrics(item.font() if item.font() is not None else self.table.font())
+            preferred = max(preferred, metrics.horizontalAdvance(item.text()))
+
+        return max(minimum, min(preferred + padding, maximum))
+
+    def _auto_fit_table_columns_after_batch_change(self):
+        """Fit content columns once after a load/conversion without enabling live resizing."""
+        if self._is_adjusting_columns or self.table.rowCount() <= 0:
+            return
+
+        available_width = self.table.viewport().width()
+        if available_width <= 0:
+            return
+
+        min_section = self.table.horizontalHeader().minimumSectionSize()
+        filename_min = max(min_section, self._default_filename_column_width())
+        title_min = max(min_section, self._minimum_title_column_width())
+        type_min = self._minimum_user_resizable_column_width(6)
+
+        filename_width = self._manual_column_widths.get(3)
+        if filename_width is None:
+            filename_width = self._preferred_content_column_width(
+                3,
+                filename_min,
+                self._scaled_int(self.FILENAME_COLUMN_CONTENT_MAX_WIDTH, minimum=280),
+                self._scaled_int(24, minimum=16),
+            )
+        else:
+            filename_width = max(filename_min, filename_width)
+
+        title_width = self._manual_column_widths.get(4)
+        if title_width is None:
+            title_width = self._preferred_content_column_width(
+                4,
+                title_min,
+                self._scaled_int(self.TITLE_COLUMN_CONTENT_MAX_WIDTH, minimum=360),
+                self._scaled_int(self.TITLE_COLUMN_PADDING, minimum=20),
+            )
+        else:
+            title_width = max(title_min, title_width)
+
+        type_width = None
+        if not self.table.isColumnHidden(6):
+            type_width = self._manual_column_widths.get(6)
+            if type_width is None:
+                type_width = self._preferred_type_column_width()
+            type_width = max(type_min, type_width)
+
+        fixed_columns = [0, 2]
+        if not self.table.isColumnHidden(5):
+            fixed_columns.append(5)
+        fixed_total = sum(self.table.columnWidth(column) for column in fixed_columns)
+        dynamic_available = max(0, available_width - fixed_total)
+        dynamic_total = filename_width + title_width + (type_width or 0)
+
+        # Prefer compact content widths. If those do not fit, trim the flexible
+        # columns down to their readable minimums before allowing a scrollbar.
+        overflow = max(0, dynamic_total - dynamic_available)
+        if overflow:
+            title_reduction = min(overflow, max(0, title_width - title_min))
+            title_width -= title_reduction
+            overflow -= title_reduction
+        if overflow:
+            filename_reduction = min(overflow, max(0, filename_width - filename_min))
+            filename_width -= filename_reduction
+            overflow -= filename_reduction
+        if overflow and type_width is not None:
+            type_reduction = min(overflow, max(0, type_width - type_min))
+            type_width -= type_reduction
+
+        self._is_adjusting_columns = True
+        try:
+            self.table.setColumnWidth(3, int(filename_width))
+            self.table.setColumnWidth(4, int(title_width))
+            if type_width is not None:
+                self.table.setColumnWidth(6, int(type_width))
+        finally:
+            self._is_adjusting_columns = False
+        self._columns_content_fitted = True
+
     def _resize_table_columns_to_fill(self, preferred_column=None):
         if self._is_adjusting_columns:
+            return
+        if self._columns_content_fitted and preferred_column is None:
+            self._auto_fit_table_columns_after_batch_change()
             return
 
         available_width = self.table.viewport().width()
@@ -14707,6 +14994,7 @@ class MidiTitleWindow(QMainWindow):
         self.pendingImageDeletes.clear()
         self.pendingImageAdditions.clear()
         self.pendingImageReplacements.clear()
+        self.pendingImageExportFilenames.clear()
         self.imageEntriesByPath.clear()
         self.imageFileInfo.clear()
         self.imageEseqMode = False
@@ -14844,6 +15132,38 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesRenameAction.setEnabled(self.renameAllButton.isEnabled())
         self.utilitiesRenameAction.setToolTip(self.renameAllButton.toolTip())
         self.utilitiesRenameAction.setStatusTip(self.renameAllButton.toolTip())
+
+        if hasattr(self, "utilitiesLongFilenamesAction"):
+            if self.is_image_mode():
+                long_name_rows = [
+                    row
+                    for row in range(self.table.rowCount())
+                    if not self._is_special_pianodir_row(row)
+                    and self.table.item(row, 1) is not None
+                    and self._image_path_is_midi(self.table.item(row, 1).text())
+                ]
+                long_name_tooltip = (
+                    "Show and use track-number and song-title filenames for Save As folder exports; "
+                    "the names inside the floppy/image stay DOS-compatible."
+                )
+            else:
+                long_name_rows = [
+                    row
+                    for row in self._regular_file_rows()
+                    if self.table.item(row, 1) is not None
+                    and self._listed_file_title_mode(self.table.item(row, 1).text()) == "midi"
+                ]
+                long_name_tooltip = (
+                    "Stage track-number and song-title filenames for the listed MIDI files."
+                )
+            long_name_enabled = open_enabled and bool(long_name_rows)
+            self.utilitiesLongFilenamesAction.setEnabled(long_name_enabled)
+            self.utilitiesLongFilenamesAction.setToolTip(
+                long_name_tooltip if long_name_enabled else "Add or convert MIDI files before naming them from song titles."
+            )
+            self.utilitiesLongFilenamesAction.setStatusTip(
+                self.utilitiesLongFilenamesAction.toolTip()
+            )
 
         self.utilitiesSmfAction.setEnabled(self.convertType0Button.isEnabled())
         self.utilitiesSmfAction.setToolTip(self.convertType0Button.toolTip())
@@ -15614,6 +15934,61 @@ class MidiTitleWindow(QMainWindow):
         if not title or title.lower().startswith("error") or title == "No title found.":
             return "Untitled"
         return title
+
+    def _long_midi_filename_for_row(self, row, track_number, track_count):
+        path_item = self.table.item(row, 1)
+        filename_item = self.table.item(row, 3)
+        source_path = path_item.text() if path_item is not None else ""
+        if self.is_image_mode():
+            source_filename = os.path.basename(self._final_image_path(source_path))
+            title = self.pendingImageTitleEdits.get(
+                source_path,
+                self._image_info_for_path(source_path).get("title", ""),
+            )
+        else:
+            source_filename = (
+                filename_item.text().strip()
+                if filename_item is not None and filename_item.text().strip()
+                else os.path.basename(source_path)
+            )
+            title = self.pendingEdits.get(
+                source_path,
+                self._listed_file_info(source_path).get("title", ""),
+            )
+        return build_long_midi_filename(
+            track_number,
+            title,
+            source_filename=source_filename,
+            track_count=track_count,
+        )
+
+    def _refresh_image_filename_display(self, row):
+        """Show the folder-export name without changing the disk/image filename."""
+        path_item = self.table.item(row, 1)
+        if path_item is None:
+            return
+
+        source_path = path_item.text()
+        disk_filename = os.path.basename(self._final_image_path(source_path))
+        export_filename = self.pendingImageExportFilenames.get(source_path, "")
+        display_filename = export_filename or disk_filename
+
+        filename_item = self.table.item(row, 3)
+        if filename_item is None:
+            filename_item = QTableWidgetItem(display_filename)
+            filename_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self.table.setItem(row, 3, filename_item)
+        else:
+            filename_item.setText(display_filename)
+
+        if export_filename:
+            filename_item.setToolTip(
+                f"Save As folder filename: {export_filename}\n"
+                f"Disk/image filename: {disk_filename}\n\n"
+                "Double-click to rename the file inside the disk/image."
+            )
+        else:
+            filename_item.setToolTip("Double-click to rename this file inside the disk/image.")
 
     @staticmethod
     def _song_list_display_text(value, fallback=""):
@@ -16668,6 +17043,8 @@ class MidiTitleWindow(QMainWindow):
             if pianodir_count:
                 status_parts.append(f"Loaded {self._eseq_directory_filename(self.regularEseqVariant)}.")
             self.status_label.setText("\n".join(status_parts))
+        if accepted_paths:
+            self._auto_fit_table_columns_after_batch_change()
 
         if errors:
             details = [
@@ -16803,6 +17180,7 @@ class MidiTitleWindow(QMainWindow):
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
         self.status_label.setText(status_text)
+        self._auto_fit_table_columns_after_batch_change()
         self._log_event(
             "Folder",
             "Loaded files",
@@ -17026,10 +17404,10 @@ class MidiTitleWindow(QMainWindow):
         self._update_compat_indicator(row, new_title)
         return True
 
-    def _stage_trim_title_spaces_for_all(self, *, show_summary=True):
+    def _stage_trim_title_spaces_for_rows(self, rows):
         changed_count = 0
         errors = []
-        for row in range(self.table.rowCount()):
+        for row in rows:
             if not self._row_title_spacing_needs_trim(row):
                 continue
             title_mode = self._row_title_mode(row)
@@ -17043,6 +17421,12 @@ class MidiTitleWindow(QMainWindow):
                 continue
             if self._stage_trimmed_title_for_row(row, new_title, title_mode):
                 changed_count += 1
+        return changed_count, errors
+
+    def _stage_trim_title_spaces_for_all(self, *, show_summary=True):
+        changed_count, errors = self._stage_trim_title_spaces_for_rows(
+            range(self.table.rowCount())
+        )
 
         if changed_count:
             if self.is_image_mode():
@@ -17076,6 +17460,8 @@ class MidiTitleWindow(QMainWindow):
         else:
             self._refresh_regular_mode_action_state()
         self._update_menu_actions()
+        if changed_count:
+            self._auto_fit_table_columns_after_batch_change()
         return changed_count
 
     def trim_title_spaces_for_all(self, _checked=False, *, show_summary=True):
@@ -17175,6 +17561,13 @@ class MidiTitleWindow(QMainWindow):
         finally:
             if temp_path and os.path.exists(temp_path):
                 os.remove(temp_path)
+
+    def _image_folder_export_path(self, source_path, image_path):
+        export_filename = self.pendingImageExportFilenames.get(source_path, "")
+        if not export_filename:
+            return image_path
+        directory = os.path.dirname(image_path).replace("\\", "/")
+        return self._join_image_path(directory, export_filename)
 
     def _image_export_relative_parts(self, image_path):
         parts = [part for part in image_path.replace("\\", "/").split("/") if part]
@@ -17280,11 +17673,12 @@ class MidiTitleWindow(QMainWindow):
 
         for index, (row, source_path) in enumerate(export_rows, start=1):
             final_image_path = self._final_image_path(source_path)
+            folder_export_path = self._image_folder_export_path(source_path, final_image_path)
             display_name = os.path.basename(final_image_path) or final_image_path
             if progress_callback is not None:
                 progress_callback(index - 1, total_steps, f"Saving {display_name}...")
 
-            dest_path = os.path.join(dest_dir, *self._image_export_relative_parts(final_image_path))
+            dest_path = os.path.join(dest_dir, *self._image_export_relative_parts(folder_export_path))
             self._write_image_row_to_destination(
                 source_path,
                 dest_path,
@@ -17459,6 +17853,7 @@ class MidiTitleWindow(QMainWindow):
     def _apply_midi_mode_ui(self):
         self._apply_compact_button_labels()
         self._set_table_headers(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
+        self.table.horizontalHeaderItem(3).setToolTip("Filename on disk.")
         self.choose_button.setText(self._lt("Open MIDI Folder"))
         self.choose_button.setToolTip(self._lt("Select a folder to scan for .mid and .midi files."))
         self.open_image_button.setEnabled(True)
@@ -17498,6 +17893,7 @@ class MidiTitleWindow(QMainWindow):
         mode_label = self._eseq_mode_label(self.regularEseqVariant)
         directory_name = self._eseq_directory_filename(self.regularEseqVariant)
         self._set_table_headers(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
+        self.table.horizontalHeaderItem(3).setToolTip("Filename on disk.")
         self.choose_button.setText(self._lt("Open MIDI Folder"))
         self.choose_button.setToolTip(f"Leave {mode_label} Mode and select a folder to scan for .mid and .midi files.")
         self.open_image_button.setEnabled(True)
@@ -17557,12 +17953,16 @@ class MidiTitleWindow(QMainWindow):
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
         self.status_label.setText(status_text)
+        self._auto_fit_table_columns_after_batch_change()
 
     def _apply_image_mode_ui(self):
         self._apply_compact_button_labels()
         mode_name = self.image_session.mode_name if self.image_session is not None else "Image Mode"
         mode_banner = self._disk_mode_banner_headline()
         self._set_table_headers(["X", "ImagePath", "📋", "Filename", "Title", "Long", "Type"])
+        self.table.horizontalHeaderItem(3).setToolTip(
+            "Folder-export filename. When it differs, point to a cell to see the DOS-compatible disk/image filename."
+        )
         self.choose_button.setText(self._lt("Open MIDI Folder"))
         self.choose_button.setToolTip(f"Leave {mode_name} and select a folder to scan for .mid and .midi files.")
         self.open_image_button.setEnabled(True)
@@ -18903,6 +19303,26 @@ class MidiTitleWindow(QMainWindow):
         convert_label_spacer = QLabel("")
         convert_layout.addWidget(convert_label_spacer, 0, 0)
         convert_layout.addWidget(convert_to_midi_checkbox, 0, 1)
+
+        long_name_checkbox = QCheckBox(
+            self._lt("Name MIDI files by track number and song title")
+        )
+        long_name_checkbox.setChecked(
+            self.settings.value(
+                self.SETTING_READ_FLOPPY_LONG_FILENAMES,
+                False,
+                type=bool,
+            )
+        )
+        long_name_checkbox.setToolTip(
+            self._lt(
+                "Use names such as 01 - Moon River.mid when the converted songs are saved to a folder. "
+                "The Filename column previews those names; filenames inside floppy disks and images remain DOS-compatible."
+            )
+        )
+        long_name_checkbox.setEnabled(convert_to_midi_checkbox.isChecked())
+        convert_to_midi_checkbox.toggled.connect(long_name_checkbox.setEnabled)
+        convert_layout.addWidget(long_name_checkbox, 1, 1)
         layout.addLayout(convert_layout)
 
         trim_titles_checkbox = QCheckBox(self._lt("Trim title spaces after reading"))
@@ -18987,8 +19407,10 @@ class MidiTitleWindow(QMainWindow):
         source_kind = source_combo.currentData()
         recover = recovery_checkbox.isChecked()
         convert_to_midi = convert_to_midi_checkbox.isChecked()
+        long_filenames = long_name_checkbox.isChecked()
         trim_titles = trim_titles_checkbox.isChecked()
         self.settings.setValue(self.SETTING_READ_FLOPPY_CONVERT_TO_MIDI, convert_to_midi)
+        self.settings.setValue(self.SETTING_READ_FLOPPY_LONG_FILENAMES, long_filenames)
         self.settings.setValue(self.SETTING_READ_FLOPPY_START_RECOVERY, recover)
         self.settings.setValue(self.SETTING_READ_FLOPPY_TRIM_TITLES, trim_titles)
         if source_kind == "floppy_usb":
@@ -19017,6 +19439,7 @@ class MidiTitleWindow(QMainWindow):
                     "progress_total": 100,
                     "offer_greaseweazle_capture": False,
                     "convert_to_midi": convert_to_midi,
+                    "long_filenames": long_filenames,
                     "trim_titles": trim_titles,
                 }
             return {
@@ -19028,6 +19451,7 @@ class MidiTitleWindow(QMainWindow):
                 "progress_total": 100,
                 "offer_greaseweazle_capture": False,
                 "convert_to_midi": convert_to_midi,
+                "long_filenames": long_filenames,
                 "trim_titles": trim_titles,
             }
 
@@ -19074,6 +19498,7 @@ class MidiTitleWindow(QMainWindow):
                 "progress_total": 100,
                 "offer_greaseweazle_capture": False,
                 "convert_to_midi": convert_to_midi,
+                "long_filenames": long_filenames,
                 "trim_titles": trim_titles,
             }
         progress_title = (
@@ -19091,6 +19516,7 @@ class MidiTitleWindow(QMainWindow):
             "progress_total": progress_total,
             "offer_greaseweazle_capture": bool(save_image_ext),
             "convert_to_midi": convert_to_midi,
+            "long_filenames": long_filenames,
             "trim_titles": trim_titles,
         }
 
@@ -20295,6 +20721,7 @@ class MidiTitleWindow(QMainWindow):
             return
 
         self.pendingFloppyReadConvertToMidi = bool(options.get("convert_to_midi"))
+        self.pendingFloppyReadLongFilenames = bool(options.get("long_filenames"))
         self.pendingFloppyReadTrimTitles = bool(options.get("trim_titles"))
         self._log_event(
             "Floppy",
@@ -20303,6 +20730,7 @@ class MidiTitleWindow(QMainWindow):
             source=options.get("source_label") or self._log_source_label(options.get("source")),
             recover=options.get("recover"),
             convert_to_midi=self.pendingFloppyReadConvertToMidi,
+            long_filenames=self.pendingFloppyReadLongFilenames,
             trim_titles=self.pendingFloppyReadTrimTitles,
         )
         if options.get("recover"):
@@ -20625,7 +21053,7 @@ class MidiTitleWindow(QMainWindow):
         loaded_pianodir_metadata = self._image_pianodir_metadata_with_source_catalog(loaded_pianodir_metadata)
         self._set_loaded_image_pianodir_metadata(loaded_pianodir_metadata)
         self._refresh_pianodir_row()
-        self._resize_table_columns_to_fill()
+        self._auto_fit_table_columns_after_batch_change()
 
     def _is_midi_image_path(self, image_path):
         return self._image_path_is_midi(image_path)
@@ -21170,8 +21598,129 @@ class MidiTitleWindow(QMainWindow):
         else:
             filename_item.setText(target_filename)
         filename_item.setToolTip(
-            "Pending DOS 8.3 filename. Use Save to rename the original file, or Save As to write a renamed copy."
+            "Pending filename. Use Save to rename the original file, or Save As to write a renamed copy."
         )
+
+    def create_long_midi_filenames(self):
+        if not self.choose_button.isEnabled():
+            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+            return
+
+        if self.is_image_mode():
+            midi_rows = []
+            for row in range(self.table.rowCount()):
+                if self._is_special_pianodir_row(row):
+                    continue
+                path_item = self.table.item(row, 1)
+                if path_item is not None and self._image_path_is_midi(path_item.text()):
+                    midi_rows.append(row)
+            if not midi_rows:
+                QMessageBox.information(self, "No MIDI Files", "No MIDI files are currently listed.")
+                return
+
+            for track_number, row in enumerate(midi_rows, start=1):
+                path_item = self.table.item(row, 1)
+                if path_item is None:
+                    continue
+                source_path = path_item.text()
+                long_filename = self._long_midi_filename_for_row(
+                    row,
+                    track_number,
+                    len(midi_rows),
+                )
+                self.pendingImageExportFilenames[source_path] = long_filename
+                self._refresh_image_filename_display(row)
+
+            self.status_label.setText(
+                f"Named {len(midi_rows)} MIDI file(s) from their track numbers and song titles.\n"
+                "The Filename column shows the Save As names; floppy and image-internal names remain DOS-compatible."
+            )
+            self._update_menu_actions()
+            auto_fit = getattr(self, "_auto_fit_table_columns_after_batch_change", None)
+            if callable(auto_fit):
+                auto_fit()
+            return
+
+        midi_rows = []
+        for row in self._regular_file_rows():
+            path_item = self.table.item(row, 1)
+            if path_item is None:
+                continue
+            source_path = path_item.text()
+            if self._listed_file_title_mode(source_path) == "midi":
+                midi_rows.append((row, source_path))
+        if not midi_rows:
+            QMessageBox.information(self, "No MIDI Files", "No MIDI files are currently listed.")
+            return
+
+        plan = []
+        target_names = {}
+        for track_number, (row, source_path) in enumerate(midi_rows, start=1):
+            target_filename = self._long_midi_filename_for_row(
+                row,
+                track_number,
+                len(midi_rows),
+            )
+            target_names[source_path] = target_filename
+            plan.append(
+                (
+                    source_path,
+                    os.path.join(os.path.dirname(source_path), target_filename),
+                )
+            )
+
+        try:
+            validate_midi_dos83_plan(plan)
+        except Exception as exc:
+            self._show_operation_error(
+                "Descriptive Filenames Could Not Be Staged",
+                "The descriptive MIDI filenames conflict with existing files",
+                exc,
+                guidance="Move or rename the conflicting files, then try again",
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Name MIDI Files from Song Titles",
+            (
+                f"Name {len(midi_rows)} MIDI file(s) from their track numbers and song titles?\n\n"
+                "Example: 01 - Moon River.mid\n\n"
+                "Nothing will be renamed until you use Save. Save As writes named copies instead."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        sorting_enabled = self.table.isSortingEnabled()
+        header = self.table.horizontalHeader()
+        sort_section = header.sortIndicatorSection()
+        sort_order = header.sortIndicatorOrder()
+        if sorting_enabled:
+            self.table.setSortingEnabled(False)
+        try:
+            for row, source_path in midi_rows:
+                self._stage_regular_row_pending_rename(
+                    row,
+                    source_path,
+                    target_names[source_path],
+                )
+        finally:
+            if sorting_enabled:
+                self.table.setSortingEnabled(True)
+                if 0 <= sort_section < self.table.columnCount():
+                    self.table.sortItems(sort_section, sort_order)
+
+        self.status_label.setText(
+            f"Named {len(midi_rows)} MIDI file(s) from their track numbers and song titles.\n"
+            "Use Save to rename originals, or Save As to write named copies."
+        )
+        self._refresh_regular_mode_action_state()
+        auto_fit = getattr(self, "_auto_fit_table_columns_after_batch_change", None)
+        if callable(auto_fit):
+            auto_fit()
 
     def rename_all_for_disk(self):
         if not self.choose_button.isEnabled():
@@ -21266,41 +21815,75 @@ class MidiTitleWindow(QMainWindow):
             status_parts.append("Backup is enabled; Save will keep copies with the old filenames.")
         self.status_label.setText("\n".join(status_parts))
         self._refresh_regular_mode_action_state()
+        if staged_count:
+            self._auto_fit_table_columns_after_batch_change()
 
     def _confirm_type0_conversion(self, file_count):
         skip_warning = self.settings.value(self.SETTING_SKIP_TYPE0_WARNING, False, type=bool)
-        if skip_warning:
-            return True
 
-        warning_box = QMessageBox(self)
-        apply_window_icon(warning_box)
-        warning_box.setIcon(QMessageBox.Warning)
-        warning_box.setWindowTitle("Convert All to MIDI Type 0")
-        warning_box.setText(
-            f"This will stage {file_count} listed file(s) for MIDI Type 0 (single track) conversion.\n\n"
-            "Nothing will be written to disk until you use Save or Save As.\n\n"
-            "This conversion is not compatible with Yamaha XG files."
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle("MIDI Type 0 Conversion")
+        dialog.setModal(True)
+        dialog.setMinimumWidth(540)
+
+        layout = QVBoxLayout(dialog)
+        summary = QLabel(
+            f"Stage {file_count} listed file(s) for MIDI Type 0 (single-track) conversion.\n"
+            "Nothing will be written until you use Save or Save As."
         )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
 
-        backup_hint = (
-            "Backup recommendation: backups are currently enabled and will be created when you save."
-            if self.backup_checkbox.isChecked()
-            else (
-                "Backup recommendation: enable \"Back up before saving\" before saving the staged conversion."
+        piano_checkbox = QCheckBox(
+            "Combine all instruments on MIDI channel 1 and use Acoustic Grand Piano"
+        )
+        piano_checkbox.setToolTip(
+            "Routes channel voice events to zero-based channel 0 (shown as MIDI channel 1), "
+            "removes conflicting bank/channel-mode events, and selects piano program 0."
+        )
+        layout.addWidget(piano_checkbox)
+
+        piano_note = QLabel(
+            "Use this for multitrack arrangements that should play as one piano part. "
+            "Leave it unchecked to preserve the original MIDI channels and instruments."
+        )
+        piano_note.setWordWrap(True)
+        layout.addWidget(piano_note)
+
+        dont_show_checkbox = None
+        if not skip_warning:
+            warning = QLabel(
+                "Compatibility note: SMF1 to SMF0 conversion is not compatible with Yamaha XG files."
             )
+            warning.setWordWrap(True)
+            layout.addWidget(warning)
+            backup_hint = QLabel(
+                "Backups are enabled and will be created when you save."
+                if self.backup_checkbox.isChecked()
+                else "Consider enabling “Back up before saving” before saving the staged conversion."
+            )
+            backup_hint.setWordWrap(True)
+            layout.addWidget(backup_hint)
+            dont_show_checkbox = QCheckBox("Do not show the compatibility warning again")
+            layout.addWidget(dont_show_checkbox)
+
+        buttons = self._make_dialog_button_box(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            dialog,
         )
-        warning_box.setInformativeText(
-            f"{backup_hint}\n\nDo you want to continue?"
-        )
-        dont_show_checkbox = QCheckBox("Do not show this warning again")
-        warning_box.setCheckBox(dont_show_checkbox)
-        warning_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        warning_box.setDefaultButton(QMessageBox.No)
-        result = self._exec_child_dialog(warning_box)
-        confirmed = result == QMessageBox.Yes
-        if confirmed and dont_show_checkbox.isChecked():
+        convert_button = buttons.button(QDialogButtonBox.Ok)
+        if convert_button is not None:
+            convert_button.setText(self._lt("Stage Conversion"))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+            return None
+        if dont_show_checkbox is not None and dont_show_checkbox.isChecked():
             self.settings.setValue(self.SETTING_SKIP_TYPE0_WARNING, True)
-        return confirmed
+        return piano_checkbox.isChecked()
 
     def convert_all_to_type0(self):
         if not self.choose_button.isEnabled():
@@ -21337,7 +21920,8 @@ class MidiTitleWindow(QMainWindow):
             self._refresh_regular_mode_action_state()
             return
 
-        if not self._confirm_type0_conversion(len(rows_to_convert)):
+        remap_all_instruments = self._confirm_type0_conversion(len(rows_to_convert))
+        if remap_all_instruments is None:
             return
 
         progressDialog = QProgressDialog(
@@ -21373,6 +21957,7 @@ class MidiTitleWindow(QMainWindow):
                 changed = convert_midi_file_to_type0_path(
                     source_material_path,
                     output_temp_path,
+                    remap_all_instruments_to_channel0=remap_all_instruments,
                 )
                 if not changed:
                     unchanged_count += 1
@@ -21394,6 +21979,8 @@ class MidiTitleWindow(QMainWindow):
         progressDialog.close()
 
         status_parts = [f"Staged {converted_count} file(s) for MIDI Type 0 conversion."]
+        if remap_all_instruments and converted_count:
+            status_parts.append("Combined instruments on MIDI channel 1 using Acoustic Grand Piano.")
         if unchanged_count:
             status_parts.append(f"{unchanged_count} already Type 0 and were left unchanged.")
         if converted_count:
@@ -21403,6 +21990,8 @@ class MidiTitleWindow(QMainWindow):
         self.status_label.setText("\n".join(status_parts))
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
+        if converted_count:
+            self._auto_fit_table_columns_after_batch_change()
 
         if errors:
             self._show_error_list(
@@ -21718,7 +22307,7 @@ class MidiTitleWindow(QMainWindow):
         )
         self._update_compat_indicator(row, raw_title)
 
-    def _queue_image_format_conversion(self, row, target_kind):
+    def _queue_image_format_conversion(self, row, target_kind, *, export_filename=""):
         if self.image_session is None:
             raise EseqConversionError("No image or floppy is currently loaded.")
         if self._is_special_pianodir_row(row):
@@ -21778,6 +22367,13 @@ class MidiTitleWindow(QMainWindow):
             size=size,
             order_key=order_key,
         )
+        current_source_path = path_item.text()
+        self.pendingImageExportFilenames.pop(source_path, None)
+        if target_kind == "midi" and export_filename:
+            self.pendingImageExportFilenames[current_source_path] = export_filename
+        else:
+            self.pendingImageExportFilenames.pop(current_source_path, None)
+        self._refresh_image_filename_display(row)
         return os.path.basename(current_path), os.path.basename(target_path)
 
     def _prompt_for_eseq_to_midi_mode_switch(self, converted_count):
@@ -21854,6 +22450,7 @@ class MidiTitleWindow(QMainWindow):
                 export_image_path = self._converted_image_path_for_kind(final_image_path, "midi")
             else:
                 export_image_path = final_image_path
+            export_image_path = self._image_folder_export_path(source_path, export_image_path)
 
             relative_parts = self._image_export_relative_parts(export_image_path)
             dest_path = os.path.join(dest_dir, *relative_parts)
@@ -21909,7 +22506,9 @@ class MidiTitleWindow(QMainWindow):
     def _convert_loaded_floppy_to_midi_after_read(self):
         if not self.pendingFloppyReadConvertToMidi:
             return
+        use_long_filenames = self.pendingFloppyReadLongFilenames
         self.pendingFloppyReadConvertToMidi = False
+        self.pendingFloppyReadLongFilenames = False
         if self.image_session is None:
             return
 
@@ -21940,7 +22539,22 @@ class MidiTitleWindow(QMainWindow):
             if progressDialog.wasCanceled():
                 break
             try:
-                converted.append(self._queue_image_format_conversion(row, "midi"))
+                export_filename = (
+                    self._long_midi_filename_for_row(
+                        row,
+                        index + 1,
+                        len(conversion_rows),
+                    )
+                    if use_long_filenames
+                    else ""
+                )
+                converted.append(
+                    self._queue_image_format_conversion(
+                        row,
+                        "midi",
+                        export_filename=export_filename,
+                    )
+                )
             except Exception as exc:
                 filename_item = self.table.item(row, 3)
                 label = filename_item.text() if filename_item is not None else "Unknown file"
@@ -21966,6 +22580,8 @@ class MidiTitleWindow(QMainWindow):
         self._refresh_pianodir_row()
 
         status_parts = [f"Read the floppy and queued {len(converted)} file(s) for E-SEQ -> MIDI conversion."]
+        if use_long_filenames and converted:
+            status_parts.append("The Filename column and Save As exports use track numbers and song titles; floppy/image names stay DOS-compatible.")
         remaining = self._pending_image_space_remaining()
         status_parts.append(f"Estimated free space after pending changes: {display_bytes(max(0, remaining))}.")
         if converted:
@@ -21973,6 +22589,8 @@ class MidiTitleWindow(QMainWindow):
         if errors:
             status_parts.append(f"{len(errors)} file(s) could not be converted.")
         self.status_label.setText("\n".join(status_parts))
+        if converted:
+            self._auto_fit_table_columns_after_batch_change()
 
         if errors:
             self._show_error_list(
@@ -22139,12 +22757,12 @@ class MidiTitleWindow(QMainWindow):
             "The converted files will be staged in the list only. Nothing will be written to disk until you use "
             "Save, Save As, or Save As Image."
         )
+        use_long_filenames = False
+        trim_title_spaces = False
         if source_kind == "eseq" and target_kind == "midi":
-            confirmed = self._question_with_optional_confirm_skip(
-                setting_key=self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT,
+            confirmed, use_long_filenames, trim_title_spaces = self._confirm_eseq_to_midi_conversion(
                 title=prompt_title,
                 message=prompt_message,
-                checkbox_text="Do not show this E-SEQ to MIDI conversion dialog again",
             )
         else:
             confirmed = (
@@ -22175,7 +22793,9 @@ class MidiTitleWindow(QMainWindow):
         self._prepare_progress_dialog(progressDialog)
 
         converted_count = 0
+        trimmed_title_count = 0
         errors = []
+        title_trim_errors = []
         scratch_dir = self._ensure_midi_scratch_dir()
         for index, full_path in enumerate(applicable_paths):
             if progressDialog.wasCanceled():
@@ -22190,17 +22810,29 @@ class MidiTitleWindow(QMainWindow):
             if row is None:
                 continue
 
-            target_filename = self._converted_regular_filename_for_kind(
-                full_path,
-                target_kind,
-                used_filenames=self._regular_used_output_filenames_for_directory(
-                    os.path.dirname(full_path),
-                    exclude_row=row,
-                ),
-            )
+            if trim_title_spaces:
+                trimmed_count, trim_errors = self._stage_trim_title_spaces_for_rows((row,))
+                trimmed_title_count += trimmed_count
+                title_trim_errors.extend(trim_errors)
+
+            current_title = self._row_raw_title(row)
+            if target_kind == "midi" and use_long_filenames:
+                target_filename = self._long_midi_filename_for_row(
+                    row,
+                    index + 1,
+                    len(applicable_paths),
+                )
+            else:
+                target_filename = self._converted_regular_filename_for_kind(
+                    full_path,
+                    target_kind,
+                    used_filenames=self._regular_used_output_filenames_for_directory(
+                        os.path.dirname(full_path),
+                        exclude_row=row,
+                    ),
+                )
             output_temp_path = os.path.join(scratch_dir, f"{uuid.uuid4().hex}_{target_filename}")
             source_material_path = self._regular_source_material_path(full_path)
-            current_title = self._row_raw_title(row)
             title_override = current_title or None
             try:
                 if target_kind == "midi":
@@ -22254,12 +22886,19 @@ class MidiTitleWindow(QMainWindow):
         self.refresh_compat_indicators()
         self.refresh_midi_type_indicators()
         self._refresh_regular_mode_action_state()
+        if converted_count:
+            self._auto_fit_table_columns_after_batch_change()
 
         if converted_count:
-            self.status_label.setText(
+            status_text = (
                 f"Staged {converted_count} file(s) for {source_kind.upper()} -> {target_kind.upper()} conversion.\n"
                 "Use Save, Save As, or Save As Image to write the converted files."
             )
+            if use_long_filenames:
+                status_text += "\nMIDI filenames use track numbers and song titles."
+            if trimmed_title_count:
+                status_text += f"\nRemoved extra spacing from {trimmed_title_count} song title(s)."
+            self.status_label.setText(status_text)
 
         if errors:
             self._show_error_list(
@@ -22268,6 +22907,14 @@ class MidiTitleWindow(QMainWindow):
                 errors,
                 warning=True,
                 guidance="Nothing has been written yet; remove or replace the listed files and try again",
+            )
+        if title_trim_errors:
+            self._show_error_list(
+                "Title Cleanup Issues",
+                "Some song titles could not be cleaned before conversion",
+                title_trim_errors,
+                warning=True,
+                guidance="The affected files were converted with their original titles",
             )
         return True
 
@@ -22321,12 +22968,12 @@ class MidiTitleWindow(QMainWindow):
         else:
             summary += f"\n\n{self._eseq_directory_filename(self.imageEseqVariant)} will be generated or refreshed when needed on save."
         prompt_title = f"Convert All {source_kind.upper()} to {target_kind.upper()}"
+        use_long_filenames = False
+        trim_title_spaces = False
         if source_kind == "eseq" and target_kind == "midi":
-            confirmed = self._question_with_optional_confirm_skip(
-                setting_key=self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT,
+            confirmed, use_long_filenames, trim_title_spaces = self._confirm_eseq_to_midi_conversion(
                 title=prompt_title,
                 message=summary,
-                checkbox_text="Do not show this E-SEQ to MIDI conversion dialog again",
             )
         else:
             confirmed = (
@@ -22357,12 +23004,33 @@ class MidiTitleWindow(QMainWindow):
         self._prepare_progress_dialog(progressDialog)
 
         converted = []
+        trimmed_title_count = 0
         errors = []
+        title_trim_errors = []
         for index, row in enumerate(applicable_rows):
             if progressDialog.wasCanceled():
                 break
             try:
-                converted.append(self._queue_image_format_conversion(row, target_kind))
+                if trim_title_spaces:
+                    trimmed_count, trim_errors = self._stage_trim_title_spaces_for_rows((row,))
+                    trimmed_title_count += trimmed_count
+                    title_trim_errors.extend(trim_errors)
+                export_filename = (
+                    self._long_midi_filename_for_row(
+                        row,
+                        index + 1,
+                        len(applicable_rows),
+                    )
+                    if target_kind == "midi" and use_long_filenames
+                    else ""
+                )
+                converted.append(
+                    self._queue_image_format_conversion(
+                        row,
+                        target_kind,
+                        export_filename=export_filename,
+                    )
+                )
             except Exception as exc:
                 filename_item = self.table.item(row, 3)
                 label = filename_item.text() if filename_item is not None else "Unknown file"
@@ -22389,11 +23057,17 @@ class MidiTitleWindow(QMainWindow):
         self._refresh_pianodir_row()
 
         status_parts = [f"Queued {len(converted)} file(s) for {source_kind.upper()} -> {target_kind.upper()} conversion."]
+        if use_long_filenames and converted:
+            status_parts.append("The Filename column and Save As exports use track numbers and song titles; disk/image names stay DOS-compatible.")
+        if trimmed_title_count:
+            status_parts.append(f"Removed extra spacing from {trimmed_title_count} song title(s).")
         remaining = self._pending_image_space_remaining()
         status_parts.append(f"Estimated free space after pending changes: {display_bytes(max(0, remaining))}.")
         if errors:
             status_parts.append(f"{len(errors)} file(s) could not be converted.")
         self.status_label.setText("\n".join(status_parts))
+        if converted:
+            self._auto_fit_table_columns_after_batch_change()
 
         if errors:
             self._show_error_list(
@@ -22402,6 +23076,14 @@ class MidiTitleWindow(QMainWindow):
                 errors,
                 warning=True,
                 guidance="Nothing has been written yet; remove or replace the listed files and try again",
+            )
+        if title_trim_errors:
+            self._show_error_list(
+                "Title Cleanup Issues",
+                "Some song titles could not be cleaned before conversion",
+                title_trim_errors,
+                warning=True,
+                guidance="The affected files were converted with their original titles",
             )
 
     def convert_all_eseq_to_midi(self):
@@ -22948,7 +23630,7 @@ class MidiTitleWindow(QMainWindow):
             return
 
         source_path = path_item.text()
-        current_name = current_item.text()
+        current_name = os.path.basename(self._final_image_path(source_path))
         new_name, ok = self._prompt_for_image_filename(current_name)
         if not ok:
             return
@@ -22971,6 +23653,8 @@ class MidiTitleWindow(QMainWindow):
         if source_path in self.pendingImageAdditions:
             host_path = self.pendingImageAdditions.pop(source_path)
             self.pendingImageAdditions[target_path] = host_path
+            if source_path in self.pendingImageExportFilenames:
+                self.pendingImageExportFilenames[target_path] = self.pendingImageExportFilenames.pop(source_path)
             if source_path in self.pendingImageTitleEdits:
                 self.pendingImageTitleEdits[target_path] = self.pendingImageTitleEdits.pop(source_path)
             if source_path in self.imageFileInfo:
@@ -22989,10 +23673,7 @@ class MidiTitleWindow(QMainWindow):
                 f"Pending image rename:\n'{os.path.basename(source_path)}' will become '{new_name}' on save."
             )
 
-        new_name_item = QTableWidgetItem(new_name)
-        new_name_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-        new_name_item.setToolTip("Double-click to rename this file inside the image.")
-        self.table.setItem(row, 3, new_name_item)
+        self._refresh_image_filename_display(row)
         kind_item = self.table.item(row, 6)
         if kind_item:
             info = self._image_info_for_path(path_item.text())
@@ -23022,6 +23703,7 @@ class MidiTitleWindow(QMainWindow):
 
         if image_path in self.pendingImageAdditions:
             self.pendingImageAdditions.pop(image_path, None)
+            self.pendingImageExportFilenames.pop(image_path, None)
             self.pendingImageTitleEdits.pop(image_path, None)
             self.imageFileInfo.pop(image_path, None)
             self.table.removeRow(row)
@@ -23047,6 +23729,7 @@ class MidiTitleWindow(QMainWindow):
         self.pendingImageRenames.pop(image_path, None)
         self.pendingImageTitleEdits.pop(image_path, None)
         self.pendingImageReplacements.pop(image_path, None)
+        self.pendingImageExportFilenames.pop(image_path, None)
         self.table.removeRow(row)
         self.status_label.setText(
             f"Pending removal: '{filename}' will be deleted from the {container_label} on Save, "
@@ -23601,7 +24284,7 @@ class MidiTitleWindow(QMainWindow):
 
         self._refresh_pianodir_row()
         self._reapply_image_centered_title_assumption()
-        self._resize_table_columns_to_fill()
+        self._auto_fit_table_columns_after_batch_change()
         self._refresh_image_mode_action_state()
 
         status_parts = []
@@ -25635,7 +26318,7 @@ class MidiTitleWindow(QMainWindow):
 
         status_text = f"Saved {len(output_path_map)} converted file(s)."
         if renamed_output_map:
-            status_text += f"\nRenamed {len(renamed_output_map)} file(s) to DOS 8.3."
+            status_text += f"\nApplied {len(renamed_output_map)} pending filename change(s)."
         if self._tag_sidecars_enabled() and combined_path_map:
             status_text += "\nWrote .tags.txt sidecar file(s)."
         if summary_path:
@@ -25792,7 +26475,7 @@ class MidiTitleWindow(QMainWindow):
         else:
             message = "All pending changes have been saved."
             if renamed_count:
-                message += f"\n\nRenamed {renamed_count} file(s) to DOS 8.3."
+                message += f"\n\nApplied {renamed_count} pending filename change(s)."
                 if self.backup_checkbox.isChecked():
                     message += " Copies with the old filenames were kept in the backup folder."
             if should_write_tag_sidecars:
