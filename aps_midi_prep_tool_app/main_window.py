@@ -98,7 +98,7 @@ from .eseq_converter import (
     convert_midi_file_to_eseq_path,
     is_eseq_file,
 )
-from .dos83_renamer import apply_midi_dos83_plan, build_midi_dos83_plan, validate_midi_dos83_plan
+from .dos83_renamer import apply_midi_dos83_plan, build_dos83_filename, validate_midi_dos83_plan
 from .long_midi_filename import build_long_midi_filename
 from .midi_type0_converter import (
     _encode_vlq,
@@ -8458,6 +8458,7 @@ class MidiTitleWindow(QMainWindow):
     SETTINGS_APP = APP_SETTINGS_APP
     SETTING_SHOW_COMPAT_WARNING = "show_compat_warning"
     SETTING_STORE_BACKUPS = "store_backups"
+    SETTING_USE_DOS83_FILENAMES = "use_dos83_filenames"
     SETTING_HIDE_STATUS = "hide_status"
     SETTING_HIDE_QUICK_PANEL = "hide_quick_panel"
     SETTING_HIDE_ALBUM_METADATA = "hide_album_metadata"
@@ -8468,8 +8469,10 @@ class MidiTitleWindow(QMainWindow):
     SETTING_HIDE_RECOVERY_COMPLETE_DIALOG = "hide_recovery_complete_dialog"
     SETTING_HIDE_SAVE_AS_IMAGE_COMPLETE_DIALOG = "hide_save_as_image_complete_dialog"
     SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT = "skip_eseq_to_midi_conversion_prompt"
+    SETTING_LONG_MIDI_FILENAMES = "long_midi_filenames"
     SETTING_ESEQ_TO_MIDI_LONG_FILENAMES = "eseq_to_midi_long_filenames"
     SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES = "eseq_to_midi_trim_title_spaces"
+    DEFAULT_LONG_MIDI_FILENAMES = False
     SETTING_ALLOW_FLOPPY_SAVE = "allow_floppy_save"
     SETTING_CONFIRM_IMAGE_SAVE = "confirm_image_save"
     SETTING_AUTO_WRITE_PROTECT_ON_LOAD = "auto_write_protect_on_load"
@@ -8581,7 +8584,7 @@ class MidiTitleWindow(QMainWindow):
         self.pendingImageDeletes = set()
         self.pendingImageAdditions = {}  # keys: target image paths, values: host file paths
         self.pendingImageReplacements = {}  # keys: image paths, values: replacement host file paths
-        self.pendingImageExportFilenames = {}  # host-folder names; disk/image names stay DOS-compatible
+        self.pendingImageExportFilenames = {}  # optional host-folder names that differ from image names
         self.imageEntriesByPath = {}
         self.imageFileInfo = {}
         self.imageEseqMode = False
@@ -8753,7 +8756,7 @@ class MidiTitleWindow(QMainWindow):
             0: "Remove this row from the list (does not delete the file on disk).",
             1: "Internal full file path (hidden).",
             2: "Copy filename to clipboard.",
-            3: "Filename on disk.",
+            3: "Filename on disk. Double-click to rename.",
             4: "MIDI title metadata. Click to edit.",
             5: f"Shows if title exceeds {self.TITLE_COMPAT_LIMIT} characters.",
             6: "Detected MIDI type from the file header. Double-click to inspect this song.",
@@ -8902,7 +8905,7 @@ class MidiTitleWindow(QMainWindow):
         self.renameAllButton.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.renameAllButton.setMinimumHeight(self._scaled_int(36, minimum=28))
         self.renameAllButton.setToolTip(
-            "Utility: rename every listed file to DOS 8.3 format (00.MID, 01.MID, ...)."
+            "Utility: queue DOS 8.3 names for every listed file (00..., 01..., preserving extensions)."
         )
         self.renameAllButton.clicked.connect(self.rename_all_for_disk)
 
@@ -9384,6 +9387,23 @@ class MidiTitleWindow(QMainWindow):
             self.languageActionGroup.addAction(action)
             self.languageMenu.addAction(action)
             self.languageActions[language.code] = action
+        self.settingsMenu.addSeparator()
+        self.settingsUseDos83FilenamesAction = QAction(
+            self._lt("Use 8.3 filenames"),
+            self,
+        )
+        self.settingsUseDos83FilenamesAction.setCheckable(True)
+        self.settingsUseDos83FilenamesAction.setChecked(
+            self.settings.value(self.SETTING_USE_DOS83_FILENAMES, False, type=bool)
+        )
+        self.settingsUseDos83FilenamesAction.setToolTip(
+            self._lt(
+                "Restrict newly entered and generated disk/image filenames to an eight-character name "
+                "and three-character extension. Leave this off to preserve normal long filenames."
+            )
+        )
+        self.settingsUseDos83FilenamesAction.toggled.connect(self.toggle_dos83_filenames)
+        self.settingsMenu.addAction(self.settingsUseDos83FilenamesAction)
         self.settingsMenu.addSeparator()
         self.settingsKeyboardShortcutsAction = QAction("Keyboard Shortcuts...", self)
         self.settingsKeyboardShortcutsAction.triggered.connect(self.show_keyboard_shortcuts_dialog)
@@ -9874,6 +9894,13 @@ class MidiTitleWindow(QMainWindow):
                 action.setChecked(mode == self._font_scale())
         if hasattr(self, "languageMenu"):
             self.languageMenu.setTitle(self._t("menu.language"))
+        if hasattr(self, "settingsUseDos83FilenamesAction"):
+            self.settingsUseDos83FilenamesAction.setText(
+                self._with_mnemonic(self._lt("Use 8.3 filenames"), "8")
+            )
+            self.settingsUseDos83FilenamesAction.setChecked(
+                self._dos83_filenames_enabled()
+            )
         if hasattr(self, "settingsKeyboardShortcutsAction"):
             self.settingsKeyboardShortcutsAction.setText(self._menu_action_text("Keyboard Shortcuts...", "K"))
         if hasattr(self, "settingsResetHiddenDialogsAction"):
@@ -11324,6 +11351,7 @@ class MidiTitleWindow(QMainWindow):
             getattr(session, "source_path", "")
         )
         warnings = list(getattr(session, "conversion_warnings", ()) or ())
+        use_long_filenames = self._long_midi_filenames_enabled()
 
         self._cleanup_midi_scratch_dir()
         output_directory = (
@@ -11333,11 +11361,23 @@ class MidiTitleWindow(QMainWindow):
         output_directory.mkdir(parents=True, exist_ok=True)
         midi_paths = []
         try:
-            for entry in getattr(listing, "entries", ()):
+            entries = tuple(getattr(listing, "entries", ()))
+            for index, entry in enumerate(entries, start=1):
                 extracted_path = session.extract_file(entry.path)
+                output_name = os.path.basename(entry.path)
+                if use_long_filenames:
+                    title = extract_first_title_from_midi(extracted_path)
+                    if title.startswith("Error"):
+                        title = ""
+                    output_name = build_long_midi_filename(
+                        index,
+                        title,
+                        source_filename=output_name,
+                        track_count=len(entries),
+                    )
                 output_path = self._unique_path_in_directory(
                     output_directory,
-                    os.path.basename(entry.path),
+                    output_name,
                 )
                 shutil.copy2(extracted_path, output_path)
                 midi_paths.append(str(output_path))
@@ -11354,6 +11394,8 @@ class MidiTitleWindow(QMainWindow):
             f"Decoded {len(midi_paths)} PianoDisc System 3 song(s) from {source_name}.\n"
             "The source image was not modified. Use Save As to choose a permanent folder."
         )
+        if use_long_filenames:
+            status += "\nMIDI filenames use track numbers and song titles."
         if warnings:
             status += f"\nSkipped {len(warnings)} damaged or incomplete catalog song(s)."
         self._load_regular_files(midi_paths, status)
@@ -13763,10 +13805,28 @@ class MidiTitleWindow(QMainWindow):
             self.diskRecoveryWorker = None
 
     def _reset_user_hide_choices_if_needed(self):
-        if not self.settings.contains(self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES):
+        had_eseq_filename_choice = self.settings.contains(
+            self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES
+        )
+        if not self.settings.contains(self.SETTING_LONG_MIDI_FILENAMES):
+            legacy_choices = [
+                self.settings.value(key, False, type=bool)
+                for key in (
+                    self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES,
+                    self.SETTING_READ_FLOPPY_LONG_FILENAMES,
+                )
+                if self.settings.contains(key)
+            ]
+            self._set_long_midi_filenames_enabled(
+                any(legacy_choices) if legacy_choices else self.DEFAULT_LONG_MIDI_FILENAMES
+            )
+        if not had_eseq_filename_choice:
             # Existing users may have hidden the older confirmation before it
             # contained filename choices. Show it once for the new option.
-            self.settings.setValue(self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES, False)
+            self.settings.setValue(
+                self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES,
+                self._long_midi_filenames_enabled(),
+            )
             self.settings.setValue(self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT, False)
         if not self.settings.contains(self.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES):
             # Show the confirmation once after adding title-spacing cleanup so
@@ -13789,6 +13849,31 @@ class MidiTitleWindow(QMainWindow):
             self.settings.setValue(setting_key, False)
         self.settings.setValue(self.SETTING_ESEQ_TO_MIDI_SWITCH_MODE, "ask")
         self.settings.setValue(self.SETTING_HIDE_CHOICES_RESET_VERSION, self.HIDE_CHOICES_RESET_VERSION)
+
+    def _long_midi_filenames_enabled(self):
+        if self.settings.contains(self.SETTING_LONG_MIDI_FILENAMES):
+            return self.settings.value(
+                self.SETTING_LONG_MIDI_FILENAMES,
+                self.DEFAULT_LONG_MIDI_FILENAMES,
+                type=bool,
+            )
+        legacy_choices = [
+            self.settings.value(key, False, type=bool)
+            for key in (
+                self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES,
+                self.SETTING_READ_FLOPPY_LONG_FILENAMES,
+            )
+            if self.settings.contains(key)
+        ]
+        return any(legacy_choices) if legacy_choices else self.DEFAULT_LONG_MIDI_FILENAMES
+
+    def _set_long_midi_filenames_enabled(self, enabled):
+        enabled = bool(enabled)
+        self.settings.setValue(self.SETTING_LONG_MIDI_FILENAMES, enabled)
+        # Keep the original per-dialog keys synchronized for existing installs
+        # and for users who move between app versions.
+        self.settings.setValue(self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES, enabled)
+        self.settings.setValue(self.SETTING_READ_FLOPPY_LONG_FILENAMES, enabled)
 
     def _reset_gw_sector_report_hide_choices_if_needed(self):
         version = self.settings.value(self.SETTING_GW_SECTOR_REPORT_HIDE_VERSION, 0, type=int)
@@ -14118,11 +14203,7 @@ class MidiTitleWindow(QMainWindow):
         return confirmed
 
     def _confirm_eseq_to_midi_conversion(self, *, title, message):
-        use_long_filenames = self.settings.value(
-            self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES,
-            False,
-            type=bool,
-        )
+        use_long_filenames = self._long_midi_filenames_enabled()
         trim_title_spaces = self.settings.value(
             self.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES,
             False,
@@ -14153,7 +14234,7 @@ class MidiTitleWindow(QMainWindow):
         long_name_checkbox.setToolTip(
             self._lt(
                 "Example: 01 - Moon River.mid. In floppy/image mode, the Filename column previews "
-                "the folder-export name while the internal name remains DOS-compatible."
+                "the descriptive name. If DOS 8.3 filenames are enabled, it applies only to the folder export."
             )
         )
         layout.addWidget(long_name_checkbox)
@@ -14191,10 +14272,7 @@ class MidiTitleWindow(QMainWindow):
 
         use_long_filenames = long_name_checkbox.isChecked()
         trim_title_spaces = trim_title_spaces_checkbox.isChecked()
-        self.settings.setValue(
-            self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES,
-            use_long_filenames,
-        )
+        self._set_long_midi_filenames_enabled(use_long_filenames)
         self.settings.setValue(
             self.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES,
             trim_title_spaces,
@@ -14600,6 +14678,24 @@ class MidiTitleWindow(QMainWindow):
         action = getattr(self, "fileBackUpBeforeSavingAction", None)
         if action is not None and action.isChecked() != enabled:
             action.setChecked(enabled)
+
+    def _dos83_filenames_enabled(self):
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            return False
+        return settings.value(self.SETTING_USE_DOS83_FILENAMES, False, type=bool)
+
+    def toggle_dos83_filenames(self, state):
+        enabled = bool(state)
+        self.settings.setValue(self.SETTING_USE_DOS83_FILENAMES, enabled)
+        action = getattr(self, "settingsUseDos83FilenamesAction", None)
+        if action is not None and action.isChecked() != enabled:
+            action.setChecked(enabled)
+        self.status_label.setText(
+            "DOS 8.3 filename rules are enabled for new filename changes."
+            if enabled else
+            "Long filenames are enabled. Existing pending names were left unchanged."
+        )
 
     def toggle_hide_status(self, state):
         hidden = bool(state)
@@ -15143,8 +15239,8 @@ class MidiTitleWindow(QMainWindow):
                     and self._image_path_is_midi(self.table.item(row, 1).text())
                 ]
                 long_name_tooltip = (
-                    "Show and use track-number and song-title filenames for Save As folder exports; "
-                    "the names inside the floppy/image stay DOS-compatible."
+                    "Use track-number and song-title filenames. With DOS 8.3 enabled, "
+                    "only Save As folder exports use the descriptive names."
                 )
             else:
                 long_name_rows = [
@@ -17219,13 +17315,11 @@ class MidiTitleWindow(QMainWindow):
         has_midi = midi_count > 0
         has_eseq = eseq_count > 0
         has_only_midi = row_count > 0 and midi_count == row_count
-        rename_needed = has_only_midi and self._regular_filenames_need_dos83_rename()
         type0_needed = has_only_midi and self._regular_midi_files_need_type0_conversion()
+        self._set_rename_all_enabled(row_count > 0)
         if self.is_local_eseq_mode():
-            self._set_rename_all_enabled(False, "Rename 8.3 is available for MIDI folders only.")
             self._set_type0_enabled(False, "SMF1 -> SMF0 is available for MIDI folders only.")
         else:
-            self._set_rename_all_enabled(rename_needed)
             self._set_type0_enabled(type0_needed)
         self.convertMidiToEseqButton.setEnabled(has_midi)
         self.convertEseqToMidiButton.setEnabled(has_eseq)
@@ -17236,12 +17330,9 @@ class MidiTitleWindow(QMainWindow):
             self.convertMidiToEseqButton.setEnabled(False)
             self.convertEseqToMidiButton.setEnabled(False)
         elif unknown_count:
-            self._set_rename_all_enabled(False, "Rename 8.3 is available only when all listed files are MIDI files.")
             self._set_type0_enabled(False, "SMF1 -> SMF0 is available only when all listed files are MIDI files.")
-        elif has_only_midi and not rename_needed:
-            self._set_rename_all_enabled(False, "All listed filenames are already 8.3 length or shorter.")
-            if not type0_needed:
-                self._set_type0_enabled(False, "All listed MIDI files are already SMF0 / Type 0.")
+        elif has_only_midi and not type0_needed:
+            self._set_type0_enabled(False, "All listed MIDI files are already SMF0 / Type 0.")
         self._refresh_eseq_reorder_buttons()
         self._update_menu_actions()
 
@@ -17293,7 +17384,7 @@ class MidiTitleWindow(QMainWindow):
     def _set_rename_all_enabled(self, enabled, disabled_tooltip=""):
         self.renameAllButton.setEnabled(bool(enabled))
         if enabled:
-            tooltip = "Rename every listed MIDI file to DOS 8.3 format (00.MID, 01.MID, ...)."
+            tooltip = "Queue DOS 8.3 names for every listed file (00..., 01..., preserving extensions)."
         else:
             tooltip = disabled_tooltip or "Rename 8.3 is not needed for the current list."
         self.renameAllButton.setToolTip(self._lt(tooltip))
@@ -17504,6 +17595,7 @@ class MidiTitleWindow(QMainWindow):
         row_count = midi_count + eseq_count + unknown_count
         has_only_midi = row_count > 0 and midi_count == row_count
         has_only_eseq = row_count > 0 and eseq_count == row_count
+        self._set_rename_all_enabled(row_count > 0)
         self.convertMidiToEseqButton.setEnabled(has_only_midi)
         self.convertEseqToMidiButton.setEnabled(has_only_eseq)
         self._update_menu_actions()
@@ -17853,7 +17945,7 @@ class MidiTitleWindow(QMainWindow):
     def _apply_midi_mode_ui(self):
         self._apply_compact_button_labels()
         self._set_table_headers(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
-        self.table.horizontalHeaderItem(3).setToolTip("Filename on disk.")
+        self.table.horizontalHeaderItem(3).setToolTip("Filename on disk. Double-click to rename.")
         self.choose_button.setText(self._lt("Open MIDI Folder"))
         self.choose_button.setToolTip(self._lt("Select a folder to scan for .mid and .midi files."))
         self.open_image_button.setEnabled(True)
@@ -17893,7 +17985,7 @@ class MidiTitleWindow(QMainWindow):
         mode_label = self._eseq_mode_label(self.regularEseqVariant)
         directory_name = self._eseq_directory_filename(self.regularEseqVariant)
         self._set_table_headers(["X", "FullPath", "📋", "Filename", "Title", "Long", "Type"])
-        self.table.horizontalHeaderItem(3).setToolTip("Filename on disk.")
+        self.table.horizontalHeaderItem(3).setToolTip("Filename on disk. Double-click to rename.")
         self.choose_button.setText(self._lt("Open MIDI Folder"))
         self.choose_button.setToolTip(f"Leave {mode_label} Mode and select a folder to scan for .mid and .midi files.")
         self.open_image_button.setEnabled(True)
@@ -17907,7 +17999,7 @@ class MidiTitleWindow(QMainWindow):
         self.table.setToolTip(
             f"{mode_label} Mode: edit local MIDI and E-SEQ titles, and manage the local {directory_name} row."
         )
-        self._set_rename_all_enabled(False, "Rename 8.3 is available for MIDI folders only.")
+        self._set_rename_all_enabled(self._regular_file_count() > 0)
         self._set_type0_enabled(False, "SMF1 -> SMF0 is available for MIDI folders only.")
         self.convertEseqToMidiButton.setEnabled(True)
         self.convertMidiToEseqButton.setEnabled(True)
@@ -17961,7 +18053,7 @@ class MidiTitleWindow(QMainWindow):
         mode_banner = self._disk_mode_banner_headline()
         self._set_table_headers(["X", "ImagePath", "📋", "Filename", "Title", "Long", "Type"])
         self.table.horizontalHeaderItem(3).setToolTip(
-            "Folder-export filename. When it differs, point to a cell to see the DOS-compatible disk/image filename."
+            "Filename inside the disk/image. A different Save As export name is shown when one is staged."
         )
         self.choose_button.setText(self._lt("Open MIDI Folder"))
         self.choose_button.setToolTip(f"Leave {mode_name} and select a folder to scan for .mid and .midi files.")
@@ -17976,7 +18068,7 @@ class MidiTitleWindow(QMainWindow):
         self.table.setToolTip(
             f"{mode_banner}: edit titles, rename files, remove rows to delete files on Save, or drop files to add them."
         )
-        self._set_rename_all_enabled(False, "Rename 8.3 is available for MIDI folders only.")
+        self._set_rename_all_enabled(False, "Add files before using Rename 8.3.")
         self._set_type0_enabled(False, "SMF1 -> SMF0 is available for MIDI folders only.")
         self.convertEseqToMidiButton.setEnabled(True)
         self.convertMidiToEseqButton.setEnabled(True)
@@ -19307,17 +19399,11 @@ class MidiTitleWindow(QMainWindow):
         long_name_checkbox = QCheckBox(
             self._lt("Name MIDI files by track number and song title")
         )
-        long_name_checkbox.setChecked(
-            self.settings.value(
-                self.SETTING_READ_FLOPPY_LONG_FILENAMES,
-                False,
-                type=bool,
-            )
-        )
+        long_name_checkbox.setChecked(self._long_midi_filenames_enabled())
         long_name_checkbox.setToolTip(
             self._lt(
                 "Use names such as 01 - Moon River.mid when the converted songs are saved to a folder. "
-                "The Filename column previews those names; filenames inside floppy disks and images remain DOS-compatible."
+                "The Filename column previews those names. DOS 8.3 restrictions apply only when that option is enabled."
             )
         )
         long_name_checkbox.setEnabled(convert_to_midi_checkbox.isChecked())
@@ -19410,7 +19496,7 @@ class MidiTitleWindow(QMainWindow):
         long_filenames = long_name_checkbox.isChecked()
         trim_titles = trim_titles_checkbox.isChecked()
         self.settings.setValue(self.SETTING_READ_FLOPPY_CONVERT_TO_MIDI, convert_to_midi)
-        self.settings.setValue(self.SETTING_READ_FLOPPY_LONG_FILENAMES, long_filenames)
+        self._set_long_midi_filenames_enabled(long_filenames)
         self.settings.setValue(self.SETTING_READ_FLOPPY_START_RECOVERY, recover)
         self.settings.setValue(self.SETTING_READ_FLOPPY_TRIM_TITLES, trim_titles)
         if source_kind == "floppy_usb":
@@ -21618,6 +21704,8 @@ class MidiTitleWindow(QMainWindow):
                 QMessageBox.information(self, "No MIDI Files", "No MIDI files are currently listed.")
                 return
 
+            use_dos83 = self._dos83_filenames_enabled()
+            staged_internal_count = 0
             for track_number, row in enumerate(midi_rows, start=1):
                 path_item = self.table.item(row, 1)
                 if path_item is None:
@@ -21628,12 +21716,29 @@ class MidiTitleWindow(QMainWindow):
                     track_number,
                     len(midi_rows),
                 )
-                self.pendingImageExportFilenames[source_path] = long_filename
-                self._refresh_image_filename_display(row)
+                if use_dos83:
+                    self.pendingImageExportFilenames[source_path] = long_filename
+                    self._refresh_image_filename_display(row)
+                elif self._stage_image_filename_change(row, long_filename):
+                    self.pendingImageExportFilenames.pop(source_path, None)
+                    current_path_item = self.table.item(row, 1)
+                    if current_path_item is not None:
+                        self.pendingImageExportFilenames.pop(current_path_item.text(), None)
+                    self._refresh_image_filename_display(row)
+                    staged_internal_count += 1
 
+            if use_dos83:
+                status_detail = (
+                    "The Filename column shows the Save As names; internal names remain DOS 8.3."
+                )
+            else:
+                status_detail = (
+                    f"Queued {staged_internal_count} internal filename change(s). "
+                    "Use Save or Save As Image to write them."
+                )
             self.status_label.setText(
                 f"Named {len(midi_rows)} MIDI file(s) from their track numbers and song titles.\n"
-                "The Filename column shows the Save As names; floppy and image-internal names remain DOS-compatible."
+                + status_detail
             )
             self._update_menu_actions()
             auto_fit = getattr(self, "_auto_fit_table_columns_after_batch_change", None)
@@ -21727,47 +21832,18 @@ class MidiTitleWindow(QMainWindow):
             QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
             return
 
-        if self.is_image_mode() or self.is_local_eseq_mode():
-            QMessageBox.information(self, "MIDI Mode Required", "Rename 8.3 is available for MIDI folders only.")
+        if self.is_image_mode():
+            self._rename_all_image_files_dos83()
             return
 
-        row_count = self._regular_file_count()
-        if row_count == 0:
+        rows = self._regular_file_rows()
+        if not rows:
             QMessageBox.information(self, "No Files", "Add one or more files first.")
             return
 
-        all_paths = []
-        rows_by_path = {}
-        for row in self._regular_file_rows():
-            full_path_item = self.table.item(row, 1)
-            if not full_path_item:
-                continue
-            full_path = full_path_item.text()
-            if self._listed_file_title_mode(full_path) != "midi":
-                QMessageBox.information(
-                    self,
-                    "MIDI Files Required",
-                    "Rename 8.3 is available only when all listed files are MIDI files.",
-                )
-                return
-            all_paths.append(full_path)
-            rows_by_path[full_path] = row
-
-        if not all_paths:
-            QMessageBox.information(self, "No Valid Files", "No valid files are currently listed.")
-            return
-        if not self._regular_filenames_need_dos83_rename():
-            QMessageBox.information(
-                self,
-                "Rename Not Needed",
-                "All listed filenames are already 8.3 length or shorter.",
-            )
-            self._refresh_regular_mode_action_state()
-            return
-
         message = (
-            f"Stage DOS 8.3 filenames for {len(all_paths)} listed file(s)?\n"
-            "This applies 00/01/... prefixes and a .MID extension.\n\n"
+            f"Stage DOS 8.3 filenames for {len(rows)} listed file(s)?\n"
+            "This applies 00/01/... prefixes and preserves each file's extension.\n\n"
             "Nothing will be renamed until you use Save. Save As writes renamed copies and leaves the originals alone."
         )
         if self.backup_checkbox.isChecked():
@@ -21783,8 +21859,26 @@ class MidiTitleWindow(QMainWindow):
             return
 
         try:
-            plan = build_midi_dos83_plan(all_paths)
-            validate_midi_dos83_plan(plan)
+            planned_rows = []
+            grouped_rows = {}
+            for row in rows:
+                path_item = self.table.item(row, 1)
+                if path_item is None:
+                    continue
+                source_path = path_item.text()
+                grouped_rows.setdefault(os.path.dirname(source_path), []).append(
+                    (row, source_path, self._regular_row_output_filename(row))
+                )
+            for directory in sorted(grouped_rows, key=str.lower):
+                entries = sorted(grouped_rows[directory], key=lambda entry: entry[2].lower())
+                for counter, (row, source_path, current_name) in enumerate(entries):
+                    target_name = build_dos83_filename(current_name, counter)
+                    planned_rows.append(
+                        (row, source_path, os.path.join(directory, target_name))
+                    )
+            validate_midi_dos83_plan(
+                [(source, target) for _row, source, target in planned_rows]
+            )
         except Exception as e:
             self._show_operation_error(
                 "Rename Could Not Be Staged",
@@ -21796,10 +21890,7 @@ class MidiTitleWindow(QMainWindow):
 
         staged_count = 0
         unchanged_count = 0
-        for source, target in plan:
-            row = rows_by_path.get(source)
-            if row is None:
-                continue
+        for row, source, target in planned_rows:
             if os.path.normcase(os.path.abspath(source)) == os.path.normcase(os.path.abspath(target)):
                 self.pendingRegularRenames.pop(source, None)
                 unchanged_count += 1
@@ -21817,6 +21908,110 @@ class MidiTitleWindow(QMainWindow):
         self._refresh_regular_mode_action_state()
         if staged_count:
             self._auto_fit_table_columns_after_batch_change()
+
+    def _rename_all_image_files_dos83(self):
+        rows = [
+            row
+            for row in range(self.table.rowCount())
+            if not self._is_special_pianodir_row(row)
+            and self.table.item(row, 1) is not None
+        ]
+        if not rows:
+            QMessageBox.information(self, "No Files", "Add one or more files first.")
+            return
+
+        mode_name = self.image_session.mode_name if self.image_session is not None else "image"
+        reply = QMessageBox.question(
+            self,
+            "Stage DOS 8.3 Filenames",
+            (
+                f"Stage DOS 8.3 filenames for {len(rows)} listed file(s) in this {mode_name.lower()}?\n"
+                "This applies 00/01/... prefixes and preserves each file's extension.\n\n"
+                "Nothing will be written until you use Save or Save As Image."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        grouped_rows = {}
+        for row in rows:
+            path_item = self.table.item(row, 1)
+            source_path = path_item.text()
+            current_path = self._final_image_path(source_path).replace("\\", "/")
+            directory = os.path.dirname(current_path)
+            grouped_rows.setdefault(directory, []).append((row, source_path, current_path))
+
+        planned_rows = []
+        try:
+            for directory in sorted(grouped_rows, key=str.lower):
+                entries = sorted(grouped_rows[directory], key=lambda entry: entry[2].lower())
+                for counter, (row, source_path, current_path) in enumerate(entries):
+                    target_name = build_dos83_filename(os.path.basename(current_path), counter)
+                    validation_error = self._validate_image_filename(
+                        target_name,
+                        enforce_dos83=True,
+                    )
+                    if validation_error:
+                        raise ValueError(validation_error)
+                    target_path = self._join_image_path(directory, target_name)
+                    planned_rows.append((row, source_path, target_path))
+            target_keys = [target.upper() for _row, _source, target in planned_rows]
+            if len(target_keys) != len(set(target_keys)):
+                raise ValueError("The generated DOS 8.3 filenames are not unique.")
+        except Exception as exc:
+            self._show_operation_error(
+                "Rename Could Not Be Staged",
+                "The listed files could not be staged for DOS 8.3 filenames",
+                exc,
+                guidance="Rename conflicting files and try again",
+            )
+            return
+
+        original_additions = dict(self.pendingImageAdditions)
+        addition_moves = [
+            (source, target)
+            for _row, source, target in planned_rows
+            if source in original_additions
+        ]
+        for source, _target in addition_moves:
+            self.pendingImageAdditions.pop(source, None)
+        for source, target in addition_moves:
+            self.pendingImageAdditions[target] = original_additions[source]
+            for mapping in (
+                self.pendingImageTitleEdits,
+                self.imageFileInfo,
+            ):
+                if source in mapping:
+                    mapping[target] = mapping.pop(source)
+
+        staged_count = 0
+        unchanged_count = 0
+        addition_sources = {source for source, _target in addition_moves}
+        for row, source_path, target_path in planned_rows:
+            self.pendingImageExportFilenames.pop(source_path, None)
+            if source_path in addition_sources:
+                path_item = self.table.item(row, 1)
+                if path_item is not None:
+                    path_item.setText(target_path)
+                staged_count += 1
+            elif target_path.upper() == source_path.upper():
+                self.pendingImageRenames.pop(source_path, None)
+                unchanged_count += 1
+            else:
+                self.pendingImageRenames[source_path] = target_path
+                staged_count += 1
+            self._refresh_image_filename_display(row)
+
+        status_parts = [f"Staged {staged_count} DOS 8.3 filename change(s)."]
+        if unchanged_count:
+            status_parts.append(f"{unchanged_count} already matched and were left unchanged.")
+        status_parts.append("Use Save or Save As Image to write the queued names.")
+        self.status_label.setText("\n".join(status_parts))
+        self._refresh_pianodir_row()
+        self._refresh_image_mode_action_state()
+        self._auto_fit_table_columns_after_batch_change()
 
     def _confirm_type0_conversion(self, file_count):
         skip_warning = self.settings.value(self.SETTING_SKIP_TYPE0_WARNING, False, type=bool)
@@ -22227,14 +22422,10 @@ class MidiTitleWindow(QMainWindow):
         directory = os.path.dirname(image_path).replace("\\", "/")
         stem = os.path.splitext(os.path.basename(image_path))[0] or os.path.basename(image_path) or "FILE"
         extension = ".MID" if target_kind == "midi" else f".{self._eseq_song_extension(self.imageEseqVariant)}"
-        if target_kind == "eseq":
-            filename = self._dos_eseq_filename(
-                f"{stem}{extension}",
-                variant=self.imageEseqVariant,
-                used_filenames=self._image_used_filenames_for_directory(directory, exclude_row=exclude_row),
-            )
-        else:
-            filename = f"{stem.upper()}{extension}"
+        filename = self._build_image_filename(
+            f"{stem}{extension}",
+            self._image_used_filenames_for_directory(directory, exclude_row=exclude_row),
+        )
         return self._join_image_path(directory, filename)
 
     def _image_row_current_title(self, row):
@@ -22321,6 +22512,10 @@ class MidiTitleWindow(QMainWindow):
         current_path = self._row_final_image_path(row)
         current_title = self._image_row_current_title(row)
         target_path = self._converted_image_path_for_kind(current_path, target_kind, exclude_row=row)
+        if target_kind == "midi" and export_filename and not self._dos83_filenames_enabled():
+            directory = os.path.dirname(current_path).replace("\\", "/")
+            target_path = self._join_image_path(directory, export_filename)
+            export_filename = ""
         if target_path.upper() in self._active_image_paths(exclude_row=row):
             raise EseqConversionError(f"'{os.path.basename(target_path)}' already exists in this image folder.")
 
@@ -22581,7 +22776,11 @@ class MidiTitleWindow(QMainWindow):
 
         status_parts = [f"Read the floppy and queued {len(converted)} file(s) for E-SEQ -> MIDI conversion."]
         if use_long_filenames and converted:
-            status_parts.append("The Filename column and Save As exports use track numbers and song titles; floppy/image names stay DOS-compatible.")
+            status_parts.append(
+                "Save As exports use track numbers and song titles; internal names remain DOS 8.3."
+                if self._dos83_filenames_enabled() else
+                "Track-number and song-title filenames are queued inside the floppy/image too."
+            )
         remaining = self._pending_image_space_remaining()
         status_parts.append(f"Estimated free space after pending changes: {display_bytes(max(0, remaining))}.")
         if converted:
@@ -23058,7 +23257,11 @@ class MidiTitleWindow(QMainWindow):
 
         status_parts = [f"Queued {len(converted)} file(s) for {source_kind.upper()} -> {target_kind.upper()} conversion."]
         if use_long_filenames and converted:
-            status_parts.append("The Filename column and Save As exports use track numbers and song titles; disk/image names stay DOS-compatible.")
+            status_parts.append(
+                "Save As exports use track numbers and song titles; internal names remain DOS 8.3."
+                if self._dos83_filenames_enabled() else
+                "Track-number and song-title filenames are queued inside the disk/image too."
+            )
         if trimmed_title_count:
             status_parts.append(f"Removed extra spacing from {trimmed_title_count} song title(s).")
         remaining = self._pending_image_space_remaining()
@@ -23138,7 +23341,7 @@ class MidiTitleWindow(QMainWindow):
             # Column 3: Filename
             filename_item = QTableWidgetItem(filename)
             filename_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            filename_item.setToolTip("Double-click to copy filename.")
+            filename_item.setToolTip("Double-click to rename this file.")
             self.table.setItem(row, 3, filename_item)
 
             # Column 4: Title (fallback to filename only when no title is present)
@@ -23202,13 +23405,9 @@ class MidiTitleWindow(QMainWindow):
             self._handle_pianodir_row_clicked()
             return
 
-        # Double-clicking Filename (col 3) copies it.
+        # Double-clicking Filename (col 3) stages a filename change.
         if column == 3:
-            filename_item = self.table.item(row, 3)
-            if filename_item:
-                filename = filename_item.text()
-                QApplication.clipboard().setText(filename)
-                self.status_label.setText(f"'{filename}' copied to clipboard.")
+            self.edit_regular_filename(row)
         # For Title (col 4): edit via dialog.
         elif column == 4:
             self.edit_via_dialog(row)
@@ -23246,8 +23445,11 @@ class MidiTitleWindow(QMainWindow):
         if column == 6:
             self.show_file_inspection_tool(selected_row=row)
 
-    def _normalize_image_filename(self, filename):
-        return filename.strip().upper()
+    def _normalize_image_filename(self, filename, *, enforce_dos83=None):
+        normalized = str(filename or "").strip()
+        if enforce_dos83 is None:
+            enforce_dos83 = self._dos83_filenames_enabled()
+        return normalized.upper() if enforce_dos83 else normalized
 
     def _center_title_segment(self, text, *, enforce_limit=True):
         trimmed = text.strip()
@@ -23327,7 +23529,7 @@ class MidiTitleWindow(QMainWindow):
         candidate = title.rstrip(" ")
         return len(candidate) < self.TITLE_COMPAT_LIMIT and candidate.startswith(" ")
 
-    def _validate_image_filename(self, filename):
+    def _validate_image_filename(self, filename, *, enforce_dos83=None):
         if not filename:
             return "Filename cannot be empty."
         if filename.upper() in {PIANODIR_FILENAME, MUSICDIR_FILENAME}:
@@ -23336,25 +23538,34 @@ class MidiTitleWindow(QMainWindow):
             return "Filename cannot be '.' or '..'."
         if filename.endswith("."):
             return "Filename cannot end with '.'."
-        if any(ch in self.IMAGE_FILENAME_INVALID_CHARS for ch in filename):
-            return "Filename contains characters that are not valid in DOS/FAT names."
-        if any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in filename):
-            return "Use printable ASCII characters only."
+        if filename.endswith(" "):
+            return "Filename cannot end with a space."
+        invalid_chars = set('\\/:*?"<>|')
+        if any(ch in invalid_chars for ch in filename):
+            return "Filename contains characters that are not valid in FAT filenames."
+        if any(ord(ch) < 0x20 for ch in filename):
+            return "Filename cannot contain control characters."
+        if len(filename.encode("utf-16-le")) // 2 > 255:
+            return "Filename must be 255 characters or fewer."
 
         stem, ext = os.path.splitext(filename)
         if not stem or stem.startswith("."):
             return "Filename must have a name before the extension."
-        if "." in stem:
-            return "Filename can only contain one extension separator."
-        if len(stem) > 8:
-            return "DOS/FAT filename base must be 8 characters or fewer."
-        if ext:
-            if len(ext) > 4:
-                return "DOS/FAT extension must be 3 characters or fewer."
-            if "." in ext[1:]:
-                return "Filename can only contain one extension separator."
-        if len(ext.lstrip(".")) > 3:
-            return "DOS/FAT extension must be 3 characters or fewer."
+        if enforce_dos83 is None:
+            enforce_dos83 = self._dos83_filenames_enabled()
+        if enforce_dos83:
+            if any(ord(ch) > 0x7E for ch in filename):
+                return "DOS 8.3 filenames must use printable ASCII characters only."
+            if " " in filename:
+                return "DOS 8.3 filenames cannot contain spaces."
+            if any(ch in self.IMAGE_FILENAME_INVALID_CHARS for ch in filename):
+                return "Filename contains characters that are not valid in DOS 8.3 names."
+            if "." in stem:
+                return "DOS 8.3 filenames can only contain one extension separator."
+            if len(stem) > 8:
+                return "DOS 8.3 filename base must be 8 characters or fewer."
+            if len(ext.lstrip(".")) > 3:
+                return "DOS 8.3 extension must be 3 characters or fewer."
         return None
 
     def _join_image_path(self, directory, filename):
@@ -23405,10 +23616,10 @@ class MidiTitleWindow(QMainWindow):
     def _image_entry_for_path(self, image_path):
         return self.imageEntriesByPath.get(image_path)
 
-    def _prompt_for_image_filename(self, current_filename):
+    def _prompt_for_image_filename(self, current_filename, *, dialog_title="Rename Image File"):
         dialog = QDialog(self)
         apply_window_icon(dialog)
-        dialog.setWindowTitle("Rename Image File")
+        dialog.setWindowTitle(dialog_title)
         dialog.setModal(True)
         dialog.setMinimumWidth(520)
         dialog_layout = QVBoxLayout(dialog)
@@ -23418,16 +23629,28 @@ class MidiTitleWindow(QMainWindow):
         editor = QLineEdit(current_filename)
         editor.setMinimumWidth(480)
 
+        dos83_checkbox = QCheckBox(self._lt("Use 8.3 filenames"))
+        dos83_checkbox.setChecked(self._dos83_filenames_enabled())
+        dos83_checkbox.setToolTip(
+            self._lt(
+                "Restrict the filename to an eight-character name and three-character extension. "
+                "This choice is remembered in Settings."
+            )
+        )
+
         warning_label = QLabel("")
         warning_label.setStyleSheet("color: #C62828;")
         warning_label.setVisible(False)
 
         form_grid = self._make_dialog_form_grid()
-        prompt = self._add_dialog_form_row(form_grid, 0, "DOS filename:", editor)
+        prompt = self._add_dialog_form_row(form_grid, 0, "Filename:", editor)
+        option_spacer = self._make_dialog_form_label("")
+        form_grid.addWidget(option_spacer, 1, 0)
+        form_grid.addWidget(dos83_checkbox, 1, 1)
         warning_spacer = self._make_dialog_form_label("")
-        form_grid.addWidget(warning_spacer, 1, 0)
-        form_grid.addWidget(warning_label, 1, 1)
-        self._align_dialog_form_labels([prompt, warning_spacer])
+        form_grid.addWidget(warning_spacer, 2, 0)
+        form_grid.addWidget(warning_label, 2, 1)
+        self._align_dialog_form_labels([prompt, option_spacer, warning_spacer])
         dialog_layout.addLayout(form_grid)
 
         buttons = self._make_dialog_button_box(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
@@ -23435,14 +23658,21 @@ class MidiTitleWindow(QMainWindow):
         dialog_layout.addWidget(buttons)
 
         def update_state(text):
-            normalized = self._normalize_image_filename(text)
-            validation_error = self._validate_image_filename(normalized)
-            unchanged = normalized == current_filename.upper()
-            ok_button.setEnabled((validation_error is None and bool(normalized)) or unchanged)
-            warning_label.setVisible(bool(validation_error and not unchanged))
+            enforce_dos83 = dos83_checkbox.isChecked()
+            normalized = self._normalize_image_filename(
+                text,
+                enforce_dos83=enforce_dos83,
+            )
+            validation_error = self._validate_image_filename(
+                normalized,
+                enforce_dos83=enforce_dos83,
+            )
+            ok_button.setEnabled(validation_error is None and bool(normalized))
+            warning_label.setVisible(bool(validation_error))
             warning_label.setText(validation_error or "")
 
         editor.textChanged.connect(update_state)
+        dos83_checkbox.toggled.connect(lambda _checked: update_state(editor.text()))
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         update_state(current_filename)
@@ -23450,7 +23680,13 @@ class MidiTitleWindow(QMainWindow):
         editor.setFocus()
 
         if self._exec_child_dialog(dialog) == QDialog.Accepted:
-            return self._normalize_image_filename(editor.text()), True
+            enforce_dos83 = dos83_checkbox.isChecked()
+            if enforce_dos83 != self._dos83_filenames_enabled():
+                self.toggle_dos83_filenames(enforce_dos83)
+            return self._normalize_image_filename(
+                editor.text(),
+                enforce_dos83=enforce_dos83,
+            ), True
         return "", False
 
     def _handle_pianodir_row_clicked(self):
@@ -23621,6 +23857,109 @@ class MidiTitleWindow(QMainWindow):
             self.table.selectionModel().clearSelection()
             self.table.setCurrentItem(None)
 
+    def edit_regular_filename(self, row):
+        if self._is_special_pianodir_row(row):
+            return
+        path_item = self.table.item(row, 1)
+        if path_item is None:
+            return
+
+        source_path = path_item.text()
+        current_name = self._regular_row_output_filename(row)
+        new_name, ok = self._prompt_for_image_filename(
+            current_name,
+            dialog_title="Rename File",
+        )
+        if not ok or new_name == current_name:
+            return
+
+        validation_error = self._validate_image_filename(new_name)
+        if validation_error:
+            QMessageBox.warning(self, "Invalid Filename", validation_error)
+            return
+
+        plan = []
+        for candidate_row in self._regular_file_rows():
+            candidate_item = self.table.item(candidate_row, 1)
+            if candidate_item is None:
+                continue
+            candidate_source = candidate_item.text()
+            candidate_name = (
+                new_name
+                if candidate_row == row
+                else self._regular_row_output_filename(candidate_row)
+            )
+            plan.append(
+                (
+                    candidate_source,
+                    os.path.join(os.path.dirname(candidate_source), candidate_name),
+                )
+            )
+        try:
+            validate_midi_dos83_plan(plan)
+        except Exception as exc:
+            QMessageBox.warning(self, "Name Already Exists", str(exc))
+            return
+
+        self._stage_regular_row_pending_rename(row, source_path, new_name)
+        self.status_label.setText(
+            f"Pending filename change: '{os.path.basename(source_path)}' will become "
+            f"'{new_name}' on Save. Save As writes a renamed copy instead."
+        )
+        self._refresh_regular_mode_action_state()
+        self._auto_fit_table_columns_after_batch_change()
+
+    def _stage_image_filename_change(self, row, new_name):
+        path_item = self.table.item(row, 1)
+        if path_item is None:
+            return False
+
+        source_path = path_item.text()
+        directory = os.path.dirname(self.pendingImageRenames.get(source_path, source_path)).replace("\\", "/")
+        target_path = self._join_image_path(directory, new_name)
+        current_target = self.pendingImageRenames.get(source_path, source_path)
+        if target_path == current_target:
+            return False
+
+        if target_path.upper() in self._active_image_paths(exclude_row=row):
+            QMessageBox.warning(self, "Name Already Exists", f"'{new_name}' already exists in this image folder.")
+            return False
+
+        if source_path in self.pendingImageAdditions:
+            host_path = self.pendingImageAdditions.pop(source_path)
+            self.pendingImageAdditions[target_path] = host_path
+            if source_path in self.pendingImageExportFilenames:
+                self.pendingImageExportFilenames[target_path] = self.pendingImageExportFilenames.pop(source_path)
+            if source_path in self.pendingImageTitleEdits:
+                self.pendingImageTitleEdits[target_path] = self.pendingImageTitleEdits.pop(source_path)
+            if source_path in self.imageFileInfo:
+                self.imageFileInfo[target_path] = self.imageFileInfo.pop(source_path)
+            path_item.setText(target_path)
+            filename_item = self.table.item(row, 3)
+            if filename_item:
+                filename_item.setText(new_name)
+            self.status_label.setText(f"Pending addition renamed to '{new_name}'.")
+        else:
+            if target_path == source_path:
+                self.pendingImageRenames.pop(source_path, None)
+            else:
+                self.pendingImageRenames[source_path] = target_path
+            self.status_label.setText(
+                f"Pending image rename:\n'{os.path.basename(source_path)}' will become '{new_name}' on save."
+            )
+
+        self._refresh_image_filename_display(row)
+        kind_item = self.table.item(row, 6)
+        if kind_item:
+            info = self._image_info_for_path(path_item.text())
+            if info.get("is_midi"):
+                kind_item.setText(info.get("midi_type") or "MIDI")
+            else:
+                kind_item.setText(self._kind_for_image_file(new_name))
+
+        self._refresh_pianodir_row()
+        return True
+
     def edit_image_filename(self, row):
         if self._is_special_pianodir_row(row):
             return
@@ -23640,52 +23979,12 @@ class MidiTitleWindow(QMainWindow):
             QMessageBox.warning(self, "Invalid Filename", validation_error)
             return
 
-        directory = os.path.dirname(self.pendingImageRenames.get(source_path, source_path)).replace("\\", "/")
-        target_path = self._join_image_path(directory, new_name)
-        current_target = self.pendingImageRenames.get(source_path, source_path)
-        if target_path.upper() == current_target.upper():
+        if not self._stage_image_filename_change(row, new_name):
             return
-
-        if target_path.upper() in self._active_image_paths(exclude_row=row):
-            QMessageBox.warning(self, "Name Already Exists", f"'{new_name}' already exists in this image folder.")
-            return
-
-        if source_path in self.pendingImageAdditions:
-            host_path = self.pendingImageAdditions.pop(source_path)
-            self.pendingImageAdditions[target_path] = host_path
-            if source_path in self.pendingImageExportFilenames:
-                self.pendingImageExportFilenames[target_path] = self.pendingImageExportFilenames.pop(source_path)
-            if source_path in self.pendingImageTitleEdits:
-                self.pendingImageTitleEdits[target_path] = self.pendingImageTitleEdits.pop(source_path)
-            if source_path in self.imageFileInfo:
-                self.imageFileInfo[target_path] = self.imageFileInfo.pop(source_path)
-            path_item.setText(target_path)
-            filename_item = self.table.item(row, 3)
-            if filename_item:
-                filename_item.setText(new_name)
-            self.status_label.setText(f"Pending addition renamed to '{new_name}'.")
-        else:
-            if target_path.upper() == source_path.upper():
-                self.pendingImageRenames.pop(source_path, None)
-            else:
-                self.pendingImageRenames[source_path] = target_path
-            self.status_label.setText(
-                f"Pending image rename:\n'{os.path.basename(source_path)}' will become '{new_name}' on save."
-            )
-
-        self._refresh_image_filename_display(row)
-        kind_item = self.table.item(row, 6)
-        if kind_item:
-            info = self._image_info_for_path(path_item.text())
-            if info.get("is_midi"):
-                kind_item.setText(info.get("midi_type") or "MIDI")
-            else:
-                kind_item.setText(self._kind_for_image_file(new_name))
 
         if self.table.selectionModel() is not None:
             self.table.selectionModel().clearSelection()
             self.table.setCurrentItem(None)
-        self._refresh_pianodir_row()
 
     def remove_image_row(self, row):
         if self._is_special_pianodir_row(row):
@@ -23739,7 +24038,7 @@ class MidiTitleWindow(QMainWindow):
         self._reapply_image_centered_title_assumption()
 
     def _build_default_image_filename(self, host_path, used_paths):
-        return self._build_dos_image_filename(os.path.basename(host_path), used_paths)
+        return self._build_image_filename(os.path.basename(host_path), used_paths)
 
     def _image_drop_conversion_kind(self, host_path):
         if self.imageEseqMode and is_midi_file(host_path):
@@ -23755,10 +24054,13 @@ class MidiTitleWindow(QMainWindow):
     def _build_image_addition_filename(self, host_path, used_paths, conversion_kind=""):
         if conversion_kind == "eseq":
             stem = os.path.splitext(os.path.basename(host_path))[0] or "FILE"
-            return self._build_dos_image_filename(f"{stem}.{self._eseq_song_extension(self.imageEseqVariant)}", used_paths)
+            return self._build_image_filename(
+                f"{stem}.{self._eseq_song_extension(self.imageEseqVariant)}",
+                used_paths,
+            )
         if conversion_kind == "midi":
             stem = os.path.splitext(os.path.basename(host_path))[0] or "FILE"
-            return self._build_dos_image_filename(f"{stem}.MID", used_paths)
+            return self._build_image_filename(f"{stem}.MID", used_paths)
         return self._build_default_image_filename(host_path, used_paths)
 
     def _stage_image_addition_host_file(self, host_path, target_name="", conversion_kind=""):
@@ -24011,13 +24313,40 @@ class MidiTitleWindow(QMainWindow):
             candidate = candidate_stem
             if clean_ext:
                 candidate += f".{clean_ext}"
-            validation_error = self._validate_image_filename(candidate)
+            validation_error = self._validate_image_filename(candidate, enforce_dos83=True)
             if validation_error:
                 continue
             if candidate.upper() not in used_paths:
                 return candidate
 
         raise ValueError(f"Could not create a unique DOS filename for {filename}.")
+
+    def _build_image_filename(self, filename, used_paths, *, enforce_dos83=None):
+        if enforce_dos83 is None:
+            enforce_dos83 = self._dos83_filenames_enabled()
+        if enforce_dos83:
+            return self._build_dos_image_filename(filename, used_paths)
+
+        candidate = self._normalize_image_filename(
+            os.path.basename(str(filename or "")),
+            enforce_dos83=False,
+        )
+        validation_error = self._validate_image_filename(candidate, enforce_dos83=False)
+        if validation_error:
+            raise ValueError(validation_error)
+
+        used_names = {str(path).upper() for path in used_paths}
+        if candidate.upper() not in used_names:
+            return candidate
+
+        stem, ext = os.path.splitext(candidate)
+        for counter in range(2, 10000):
+            suffix = f" ({counter})"
+            available = max(1, 255 - len(ext) - len(suffix))
+            unique_candidate = f"{stem[:available]}{suffix}{ext}"
+            if unique_candidate.upper() not in used_names:
+                return unique_candidate
+        raise ValueError(f"Could not create a unique filename for {filename}.")
 
     def _pending_image_space_remaining(self, extra_additions=None):
         if self.image_session is None:
@@ -24265,7 +24594,12 @@ class MidiTitleWindow(QMainWindow):
                 continue
             used_paths.add(target_path.upper())
             self.pendingImageAdditions[target_path] = staged_host_path
-            if not conversion_kind and is_eseq_file(staged_host_path) and target_name.upper() != original_name.upper():
+            if (
+                self._dos83_filenames_enabled()
+                and not conversion_kind
+                and is_eseq_file(staged_host_path)
+                and target_name.upper() != original_name.upper()
+            ):
                 shortened.append(f"{original_name} -> {target_name}")
             if conversion_kind:
                 converted_count += 1
@@ -25910,7 +26244,7 @@ class MidiTitleWindow(QMainWindow):
             if _notify is not None:
                 _notify(index - 1, max(1, row_count), f"Preparing {display_name} for image export...")
 
-            image_name = self._build_dos_image_filename(display_name, used_names)
+            image_name = self._build_image_filename(display_name, used_names)
             used_names.add(image_name.upper())
             staged_path = os.path.join(
                 temp_dir,

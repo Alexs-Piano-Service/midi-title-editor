@@ -269,6 +269,17 @@ def _safe_midi_filename(number: int, title: str) -> str:
     return f"{number:02d} - {cleaned[:120].rstrip(' .')}.mid"
 
 
+def _dos83_midi_filename(number: int) -> str:
+    """Return the conventional short PianoDisc export name for a track."""
+    if number < 1:
+        raise ValueError("Track number must be at least 1.")
+    if number <= 999:
+        return f"PIANO{number:03d}.MID"
+    if number <= 9_999_999:
+        return f"P{number:07d}.MID"
+    raise ValueError("Track number is too large for a DOS 8.3 filename.")
+
+
 def convert_pianodisc_song_to_midi(song: PianoDiscSong) -> bytes:
     """Convert one decoded System 3 song to an SMF0 piano performance."""
     track = bytearray()
@@ -357,7 +368,11 @@ def convert_pianodisc_song_to_midi(song: PianoDiscSong) -> bytes:
     return header + b"MTrk" + struct.pack(">I", len(track)) + bytes(track)
 
 
-def convert_pianodisc_system3_image(data: bytes) -> PianoDiscImageConversion:
+def convert_pianodisc_system3_image(
+    data: bytes,
+    *,
+    long_filenames: bool = False,
+) -> PianoDiscImageConversion:
     """Convert every valid catalog song and report damaged entries separately."""
     songs = parse_pianodisc_system3_image(data)
     files = []
@@ -370,7 +385,11 @@ def convert_pianodisc_system3_image(data: bytes) -> PianoDiscImageConversion:
             errors.append(f"Track {song.number:02d} ({song.title}): {exc}")
             continue
 
-        filename = _safe_midi_filename(song.number, song.title)
+        filename = (
+            _safe_midi_filename(song.number, song.title)
+            if long_filenames
+            else _dos83_midi_filename(song.number)
+        )
         stem, extension = filename.rsplit(".", 1)
         candidate = filename
         suffix = 2

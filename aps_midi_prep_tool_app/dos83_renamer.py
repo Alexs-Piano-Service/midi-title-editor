@@ -29,7 +29,7 @@ def _letters_only_upper(filename):
     return "".join(ch for ch in stem.upper() if "A" <= ch <= "Z")
 
 
-def build_dos83_midi_filename(source_filename, counter):
+def build_dos83_filename(source_filename, counter, *, extension=None):
     if counter < 0:
         raise ValueError("Counter must be non-negative.")
 
@@ -42,7 +42,20 @@ def build_dos83_midi_filename(source_filename, counter):
     while len(letters) < remaining:
         letters += _PADDING_TEXT
     shortname = letters[:remaining]
-    return f"{prefix}{shortname}.MID"
+    if extension is None:
+        extension = os.path.splitext(source_filename)[1].lstrip(".")
+    extension = "".join(
+        ch for ch in str(extension or "").upper()
+        if "A" <= ch <= "Z" or "0" <= ch <= "9"
+    )
+    if extension == "MIDI":
+        extension = "MID"
+    extension = extension[:3]
+    return f"{prefix}{shortname}" + (f".{extension}" if extension else "")
+
+
+def build_dos83_midi_filename(source_filename, counter):
+    return build_dos83_filename(source_filename, counter, extension="MID")
 
 
 def build_midi_dos83_plan(file_paths):

@@ -4323,7 +4323,48 @@ def _fat12_data_cluster_count(geometry):
     return max(0, (geometry.total_size - geometry.data_offset) // geometry.cluster_size)
 
 
+def _fat_lfn_checksum(short_name_bytes):
+    checksum = 0
+    for value in bytes(short_name_bytes or b"")[:11]:
+        checksum = (((checksum & 1) << 7) | (checksum >> 1))
+        checksum = (checksum + value) & 0xFF
+    return checksum
+
+
+def _decode_fat_lfn_entries(lfn_entries, short_name_bytes):
+    if not lfn_entries:
+        return ""
+    expected_checksum = _fat_lfn_checksum(short_name_bytes)
+    chunks = {}
+    expected_count = 0
+    for entry in lfn_entries:
+        ordinal = entry[0]
+        sequence = ordinal & 0x1F
+        if sequence <= 0 or entry[11] != 0x0F or entry[13] != expected_checksum:
+            return ""
+        if ordinal & 0x40:
+            expected_count = sequence
+        chunks[sequence] = entry[1:11] + entry[14:26] + entry[28:32]
+    if expected_count <= 0 or set(chunks) != set(range(1, expected_count + 1)):
+        return ""
+
+    encoded_name = b"".join(chunks[index] for index in range(1, expected_count + 1))
+    clean_name = bytearray()
+    for offset in range(0, len(encoded_name), 2):
+        code_unit = encoded_name[offset:offset + 2]
+        if len(code_unit) < 2 or code_unit == b"\x00\x00":
+            break
+        if code_unit == b"\xff\xff":
+            continue
+        clean_name.extend(code_unit)
+    try:
+        return bytes(clean_name).decode("utf-16-le")
+    except UnicodeDecodeError:
+        return ""
+
+
 def _iter_fat_directory_entries(directory_bytes):
+    lfn_entries = []
     for pos in range(0, len(directory_bytes), 32):
         entry = directory_bytes[pos:pos + 32]
         if len(entry) < 32:
@@ -4332,13 +4373,20 @@ def _iter_fat_directory_entries(directory_bytes):
         attr = entry[11]
         if first == 0x00:
             break
-        if first == 0xE5 or attr == 0x0F:
+        if first == 0xE5:
+            lfn_entries = []
             continue
-        name = _decode_dos_directory_name(entry[:11])
+        if attr == 0x0F:
+            lfn_entries.append(entry)
+            continue
+        short_name = _decode_dos_directory_name(entry[:11])
+        name = _decode_fat_lfn_entries(lfn_entries, entry[:11]) or short_name
+        lfn_entries = []
         if not name or name in {".", ".."}:
             continue
         yield {
             "name": name,
+            "short_name": short_name,
             "attr": attr,
             "cluster": _u16le(entry, 26),
             "size": int.from_bytes(entry[28:32], "little"),
@@ -4473,7 +4521,10 @@ def _locate_fat12_entry(data, geometry, fat, directory_bytes, path_parts, *, ori
 
     target_name = path_parts[0].upper()
     for entry in _iter_fat_directory_entries(directory_bytes):
-        if entry["name"].upper() != target_name:
+        if (
+            entry["name"].upper() != target_name
+            and entry.get("short_name", "").upper() != target_name
+        ):
             continue
         if len(path_parts) == 1:
             return entry
@@ -7405,7 +7456,24 @@ class FloppyImageSession:
                 _raise_if_cancelled(cancel_callback)
                 if source_path in deletes:
                     continue
-                if _normalize_image_path(source_path).lower() == _normalize_image_path(target_path).lower():
+                normalized_source = _normalize_image_path(source_path)
+                normalized_target = _normalize_image_path(target_path)
+                if normalized_source == normalized_target:
+                    continue
+                if normalized_source.lower() == normalized_target.lower():
+                    directory = os.path.dirname(normalized_source).replace("\\", "/")
+                    temp_name = f"APSR{uuid.uuid4().hex[:4].upper()}.TMP"
+                    temp_path = f"{directory}/{temp_name}" if directory else temp_name
+                    self._run_mtools(
+                        [mren, "-i", target_img, mtools_path(source_path), mtools_path(temp_path)],
+                        f"Could not stage case-only rename for {source_path} in image",
+                        cancel_callback=cancel_callback,
+                    )
+                    self._run_mtools(
+                        [mren, "-i", target_img, mtools_path(temp_path), mtools_path(target_path)],
+                        f"Could not rename {source_path} in image",
+                        cancel_callback=cancel_callback,
+                    )
                     continue
                 self._run_mtools(
                     [mren, "-i", target_img, mtools_path(source_path), mtools_path(target_path)],

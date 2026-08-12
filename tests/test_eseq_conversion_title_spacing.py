@@ -25,8 +25,12 @@ class _FakeSettings:
 class EseqConversionTitleSpacingTests(unittest.TestCase):
     def test_new_title_spacing_choice_reshows_previously_hidden_dialog(self):
         class FakeWindow:
+            SETTING_LONG_MIDI_FILENAMES = MidiTitleWindow.SETTING_LONG_MIDI_FILENAMES
             SETTING_ESEQ_TO_MIDI_LONG_FILENAMES = (
                 MidiTitleWindow.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES
+            )
+            SETTING_READ_FLOPPY_LONG_FILENAMES = (
+                MidiTitleWindow.SETTING_READ_FLOPPY_LONG_FILENAMES
             )
             SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES = (
                 MidiTitleWindow.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES
@@ -38,6 +42,11 @@ class EseqConversionTitleSpacingTests(unittest.TestCase):
                 MidiTitleWindow.SETTING_HIDE_CHOICES_RESET_VERSION
             )
             HIDE_CHOICES_RESET_VERSION = MidiTitleWindow.HIDE_CHOICES_RESET_VERSION
+            DEFAULT_LONG_MIDI_FILENAMES = MidiTitleWindow.DEFAULT_LONG_MIDI_FILENAMES
+            _long_midi_filenames_enabled = MidiTitleWindow._long_midi_filenames_enabled
+            _set_long_midi_filenames_enabled = (
+                MidiTitleWindow._set_long_midi_filenames_enabled
+            )
 
         window = FakeWindow()
         window.settings = _FakeSettings(
@@ -59,8 +68,12 @@ class EseqConversionTitleSpacingTests(unittest.TestCase):
 
     def test_hidden_conversion_dialog_uses_remembered_title_spacing_choice(self):
         class FakeWindow:
+            SETTING_LONG_MIDI_FILENAMES = MidiTitleWindow.SETTING_LONG_MIDI_FILENAMES
             SETTING_ESEQ_TO_MIDI_LONG_FILENAMES = (
                 MidiTitleWindow.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES
+            )
+            SETTING_READ_FLOPPY_LONG_FILENAMES = (
+                MidiTitleWindow.SETTING_READ_FLOPPY_LONG_FILENAMES
             )
             SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES = (
                 MidiTitleWindow.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES
@@ -68,6 +81,8 @@ class EseqConversionTitleSpacingTests(unittest.TestCase):
             SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT = (
                 MidiTitleWindow.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT
             )
+            DEFAULT_LONG_MIDI_FILENAMES = MidiTitleWindow.DEFAULT_LONG_MIDI_FILENAMES
+            _long_midi_filenames_enabled = MidiTitleWindow._long_midi_filenames_enabled
 
         window = FakeWindow()
         window.settings = _FakeSettings(
@@ -85,6 +100,36 @@ class EseqConversionTitleSpacingTests(unittest.TestCase):
         )
 
         self.assertEqual(result, (True, True, True))
+
+    def test_long_filename_choice_defaults_short_and_is_shared_between_dialogs(self):
+        class FakeWindow:
+            SETTING_LONG_MIDI_FILENAMES = MidiTitleWindow.SETTING_LONG_MIDI_FILENAMES
+            SETTING_ESEQ_TO_MIDI_LONG_FILENAMES = (
+                MidiTitleWindow.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES
+            )
+            SETTING_READ_FLOPPY_LONG_FILENAMES = (
+                MidiTitleWindow.SETTING_READ_FLOPPY_LONG_FILENAMES
+            )
+            DEFAULT_LONG_MIDI_FILENAMES = MidiTitleWindow.DEFAULT_LONG_MIDI_FILENAMES
+            _long_midi_filenames_enabled = MidiTitleWindow._long_midi_filenames_enabled
+            _set_long_midi_filenames_enabled = (
+                MidiTitleWindow._set_long_midi_filenames_enabled
+            )
+
+        window = FakeWindow()
+        window.settings = _FakeSettings()
+
+        self.assertFalse(window._long_midi_filenames_enabled())
+
+        window._set_long_midi_filenames_enabled(True)
+
+        self.assertTrue(window._long_midi_filenames_enabled())
+        self.assertTrue(
+            window.settings.values[window.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES]
+        )
+        self.assertTrue(
+            window.settings.values[window.SETTING_READ_FLOPPY_LONG_FILENAMES]
+        )
 
     def test_conversion_spacing_cleanup_only_stages_requested_rows(self):
         class FakeWindow:

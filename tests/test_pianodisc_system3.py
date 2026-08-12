@@ -104,7 +104,13 @@ def test_recognizes_catalog_and_converts_timing_to_smf0(tmp_path):
     conversion = pianodisc_system3.convert_pianodisc_system3_image(image_data)
     assert len(conversion.files) == 1
     assert conversion.errors == ()
-    assert conversion.files[0].filename == "01 - Test Song.mid"
+    assert conversion.files[0].filename == "PIANO001.MID"
+
+    long_name_conversion = pianodisc_system3.convert_pianodisc_system3_image(
+        image_data,
+        long_filenames=True,
+    )
+    assert long_name_conversion.files[0].filename == "01 - Test Song.mid"
 
     midi_path = tmp_path / conversion.files[0].filename
     midi_path.write_bytes(conversion.files[0].data)
@@ -188,7 +194,7 @@ def test_floppy_session_exposes_decoded_midi_files_for_raw_images(tmp_path):
         assert session.read_only_format == "pianodisc_system3"
         assert session.disk_format.key == "pianodisc.system3"
         entries = session.list_entries().entries
-        assert [entry.path for entry in entries] == ["01 - Session Song.mid"]
+        assert [entry.path for entry in entries] == ["PIANO001.MID"]
         extracted = Path(session.extract_file(entries[0].path))
         assert extracted.read_bytes().startswith(b"MThd")
     finally:
@@ -215,5 +221,9 @@ def test_bulk_extraction_writes_good_songs_and_reports_damaged_ones(tmp_path):
     assert result.files_extracted == 1
     assert len(result.errors) == 1
     assert "Incomplete" in result.errors[0]
-    midi_paths = list(output_directory.rglob("*.mid"))
-    assert [path.name for path in midi_paths] == ["01 - Readable.mid"]
+    midi_paths = [
+        path
+        for path in output_directory.rglob("*")
+        if path.is_file() and path.suffix.lower() == ".mid"
+    ]
+    assert [path.name for path in midi_paths] == ["PIANO001.MID"]

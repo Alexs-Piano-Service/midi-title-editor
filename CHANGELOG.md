@@ -22,8 +22,8 @@ with release sections grouped by version and date.
   and song title (for example, `01 - Moon River.mid`). The option is available
   during regular conversion and Read Floppy, and `Utilities > Name MIDI Files
   from Song Titles` provides the same naming as a standalone tool. In
-  floppy/image mode, the Filename column shows the folder-export name while its
-  tooltip retains the DOS-compatible internal name.
+  floppy/image mode, descriptive names are queued inside the image unless the
+  DOS 8.3 filename option is enabled.
 
 ### Changed
 
@@ -35,6 +35,11 @@ with release sections grouped by version and date.
 - E-SEQ-to-MIDI conversion now offers a remembered option to remove leading,
   trailing, and repeated spaces from song titles before embedding them in MIDI
   files or using them in descriptive filenames.
+- Long filenames are now allowed by default in folders, images, and floppy
+  sessions. A remembered `Use 8.3 filenames` checkbox in rename dialogs and
+  Settings enables legacy filename restrictions explicitly without taking
+  space in the quick panel. The batch DOS 8.3 utility is available in every
+  editing mode and queues image/floppy renames until save.
 
 ## [0.6.12] - 2026-08-04
 

@@ -38,7 +38,9 @@ before you write anything back.
 - Creates fresh floppy images, including default PianoSoft-style 720K E-SEQ images.
 - Formats Yamaha Disklavier floppies as MIDI or E-SEQ disks.
 - Recovers damaged floppy images and physical floppies with repair and raw-carving paths.
-- Edits MIDI titles, E-SEQ titles, image filenames, and Disklavier album metadata.
+- Edits MIDI titles, E-SEQ titles, folder and image filenames, and Disklavier
+  album metadata. Long filenames are allowed by default; `Settings > Use 8.3
+  filenames` enables legacy short-name restrictions when needed.
 - Trims Disklavier-spaced title text into regular MIDI titles during floppy reads
   or as a batch utility.
 - Converts MIDI Type 1 / SMF1 files to MIDI Type 0 / SMF0, with an optional
@@ -233,11 +235,13 @@ because binary values and cleanup can remove half-pedal or archival detail.
   under `Utilities > Apply Pedal Compatibility...`.
 - Enable `Name MIDI files by track number and song title` during E-SEQ to MIDI
   conversion or Read Floppy to create names such as
-  `01 - Moon River.mid` for folder exports. Floppy and image filenames remain
-  DOS-compatible. `Utilities > Name MIDI Files from Song Titles` can stage the
+  `01 - Moon River.mid`. The choice is remembered for future conversions and
+  floppy reads. `Utilities > Name MIDI Files from Song Titles` can stage the
   same naming independently for already-converted MIDI files. In floppy/image
-  mode, the Filename column shows the descriptive folder-export names while
-  each tooltip retains the internal DOS-compatible name.
+  mode, these descriptive names are queued inside the image too, unless
+  `Settings > Use 8.3 filenames` is checked; with that compatibility option
+  enabled, the descriptive names are used only for folder exports. The same
+  option is available in filename rename dialogs.
 - `PIANODIR.FIL` is generated or refreshed on save when needed.
 - `File > Save Options > Create Album Subfolder` controls whether folder
   exports use the current album title and catalog number for a subfolder.

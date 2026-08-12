@@ -119,6 +119,10 @@ class LongMidiFilenameTests(unittest.TestCase):
                 return True
 
             @staticmethod
+            def _dos83_filenames_enabled():
+                return True
+
+            @staticmethod
             def _final_image_path(path):
                 return path
 
