@@ -88,6 +88,7 @@ from .midi_metadata import (
     extract_midi_type_label_from_midi,
     has_eseq_title_metadata,
     is_midi_file,
+    normalize_title_spacing,
 )
 from .eseq_converter import (
     ESEQ_CONTAINER_CLAVINOVA_MDA,
@@ -100,10 +101,16 @@ from .eseq_converter import (
 )
 from .dos83_renamer import apply_midi_dos83_plan, build_dos83_filename, validate_midi_dos83_plan
 from .long_midi_filename import build_long_midi_filename
+from .smart_pianosoft import (
+    SMART_PIANOSOFT_SONG_CATALOG_NAME,
+    smart_pianosoft_catalog_from_session,
+    update_smart_pianosoft_catalog_to_path,
+)
 from .midi_type0_converter import (
     _encode_vlq,
     _parse_midi_chunks,
     _parse_track_events,
+    analyze_pedal_softening_midi_bytes,
     apply_pedal_compatibility_to_midi_path,
     convert_midi_file_to_type0_path,
 )
@@ -123,6 +130,7 @@ from .disk_session_worker import (
     DiskSessionLoadWorker,
     DiskSessionRecoveryWorker,
     DiskSessionWriteTargetWorker,
+    EmulatorImageBuildWorker,
 )
 from .icon_utils import apply_window_icon
 from .onboarding_dialog import show_first_time_dialog
@@ -592,6 +600,32 @@ def _set_optional_palette_color(palette, role_name, color, *, group=None):
         palette.setColor(group, role, qcolor)
 
 
+def _table_selection_colors(dark):
+    if dark:
+        return {
+            "active": ("#155E75", "#ECFEFF"),
+            "inactive": ("#164E63", "#DFF7FA"),
+            "disabled": ("#26313A", "#BDC7D0"),
+        }
+    return {
+        "active": ("#B9EAF5", "#0B2533"),
+        "inactive": ("#D1F2F7", "#12313D"),
+        "disabled": ("#D4DAE1", "#3F4A54"),
+    }
+
+
+def _set_palette_selection_colors(palette, *, dark):
+    colors = _table_selection_colors(dark)
+    for group, state in (
+        (QPalette.Active, "active"),
+        (QPalette.Inactive, "inactive"),
+        (QPalette.Disabled, "disabled"),
+    ):
+        background, foreground = colors[state]
+        palette.setColor(group, QPalette.Highlight, QColor(background))
+        palette.setColor(group, QPalette.HighlightedText, QColor(foreground))
+
+
 def _set_application_color_scheme(app, mode):
     style_hints = app.styleHints()
     set_color_scheme = getattr(style_hints, "setColorScheme", None)
@@ -620,8 +654,7 @@ def _build_light_palette():
     palette.setColor(QPalette.ButtonText, QColor("#17202A"))
     palette.setColor(QPalette.BrightText, QColor("#FFFFFF"))
     palette.setColor(QPalette.Link, QColor("#1269A6"))
-    palette.setColor(QPalette.Highlight, QColor("#B9EAF5"))
-    palette.setColor(QPalette.HighlightedText, QColor("#0B2533"))
+    _set_palette_selection_colors(palette, dark=False)
     palette.setColor(QPalette.Mid, QColor("#A8B1BA"))
     palette.setColor(QPalette.Midlight, QColor("#D6DEE6"))
     palette.setColor(QPalette.Dark, QColor("#65707A"))
@@ -633,8 +666,6 @@ def _build_light_palette():
     palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#6D7780"))
     palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#6D7780"))
     palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#6D7780"))
-    palette.setColor(QPalette.Disabled, QPalette.Highlight, QColor("#D4DAE1"))
-    palette.setColor(QPalette.Disabled, QPalette.HighlightedText, QColor("#6D7780"))
     palette.setColor(QPalette.Disabled, QPalette.Link, QColor("#6D7780"))
     palette.setColor(QPalette.Disabled, QPalette.LinkVisited, QColor("#6D7780"))
     _set_optional_palette_color(palette, "PlaceholderText", "#8A949E", group=QPalette.Disabled)
@@ -655,8 +686,7 @@ def _build_dark_palette():
     palette.setColor(QPalette.ButtonText, QColor("#F0F4F8"))
     palette.setColor(QPalette.BrightText, QColor("#FFFFFF"))
     palette.setColor(QPalette.Link, QColor("#8FC7FF"))
-    palette.setColor(QPalette.Highlight, QColor("#155E75"))
-    palette.setColor(QPalette.HighlightedText, QColor("#ECFEFF"))
+    _set_palette_selection_colors(palette, dark=True)
     palette.setColor(QPalette.Mid, QColor("#56616D"))
     palette.setColor(QPalette.Midlight, QColor("#2F3841"))
     palette.setColor(QPalette.Dark, QColor("#0C1116"))
@@ -668,8 +698,6 @@ def _build_dark_palette():
     palette.setColor(QPalette.Disabled, QPalette.WindowText, QColor("#9099A3"))
     palette.setColor(QPalette.Disabled, QPalette.Text, QColor("#9099A3"))
     palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor("#9099A3"))
-    palette.setColor(QPalette.Disabled, QPalette.Highlight, QColor("#26313A"))
-    palette.setColor(QPalette.Disabled, QPalette.HighlightedText, QColor("#9099A3"))
     palette.setColor(QPalette.Disabled, QPalette.Link, QColor("#9099A3"))
     palette.setColor(QPalette.Disabled, QPalette.LinkVisited, QColor("#9099A3"))
     _set_optional_palette_color(palette, "PlaceholderText", "#69737C", group=QPalette.Disabled)
@@ -1987,6 +2015,7 @@ def _inspect_midi_bytes(midi_bytes, *, source_label=""):
         for event in control_changes
         if event["controller"] in PEDAL_CONTROLLER_NAMES
     ]
+    sustain_pedal_analysis = analyze_pedal_softening_midi_bytes(midi_bytes)
     pedal_segments = []
     events_by_controller_channel = {}
     for event in pedal_events:
@@ -2104,6 +2133,17 @@ def _inspect_midi_bytes(midi_bytes, *, source_label=""):
     )
     lines.append("")
     lines.append("Pedals / Controllers:")
+    sustain_classification = sustain_pedal_analysis["classification"]
+    sustain_classification_text = {
+        "binary": "Binary — on/off sustain data; eligible for pedal softening.",
+        "mixed": "Mixed — contains both binary and continuous sustain streams.",
+        "continuous": "Continuous — graduated sustain data is already present.",
+        "static": "Static — CC64 is present without a useful on/off transition.",
+        "none": "Not detected.",
+    }.get(sustain_classification, str(sustain_classification).title())
+    lines.append(
+        f"Sustain pedal classification (CC64): {sustain_classification_text}"
+    )
     if pedal_events:
         summary = {}
         for event in pedal_events:
@@ -2173,6 +2213,7 @@ def _inspect_midi_bytes(midi_bytes, *, source_label=""):
             for channel in sorted(set(channels) | set(note_counts_by_channel) | set(control_counts_by_channel))
         },
         "piano_channels": piano_channels,
+        "sustain_pedal_analysis": sustain_pedal_analysis,
     }
 
 
@@ -5532,6 +5573,15 @@ class BatchAudioRenderDialog(QDialog):
 
 
 class FileInspectionDialog(QDialog):
+    @staticmethod
+    def _file_list_label(item):
+        item = dict(item or {})
+        display_name = str(item.get("display_name") or "").strip()
+        if not display_name:
+            return str(item.get("label") or "File")
+        title = re.sub(r"\s+", " ", str(item.get("title") or "")).strip()
+        return display_name if not title or title == "Untitled" else f"{display_name} - {title}"
+
     def __init__(self, items, parent=None, initial_row=None):
         super().__init__(parent)
         self.items = list(items or [])
@@ -5608,7 +5658,7 @@ class FileInspectionDialog(QDialog):
         self.file_tree.setRootIsDecorated(False)
         initial_tree_item = None
         for item in self.items:
-            tree_item = QTreeWidgetItem([item.get("label", "File")])
+            tree_item = QTreeWidgetItem([self._file_list_label(item)])
             tree_item.setData(0, Qt.UserRole, item)
             tree_item.setToolTip(0, item.get("path", ""))
             self.file_tree.addTopLevelItem(tree_item)
@@ -8502,9 +8552,21 @@ class MidiTitleWindow(QMainWindow):
     SETTING_BULK_EXTRACTION_SOURCE = "bulk_extraction_source"
     SETTING_BULK_EXTRACTION_OUTPUT = "bulk_extraction_output"
     SETTING_BULK_EXTRACTION_CONVERT_ESEQ = "bulk_extraction_convert_eseq"
+    SETTING_BULK_EXTRACTION_LONG_MIDI_FILENAMES = "bulk_extraction_long_midi_filenames"
+    SETTING_BULK_EXTRACTION_TRIM_TITLE_SPACES = "bulk_extraction_trim_title_spaces"
+    DEFAULT_BULK_EXTRACTION_TRIM_TITLE_SPACES = True
     SETTING_BULK_EXTRACTION_INCLUDE_ESEQ_SOURCES = "bulk_extraction_include_eseq_sources"
     DEFAULT_BULK_EXTRACTION_INCLUDE_ESEQ_SOURCES = False
     SETTING_BULK_EXTRACTION_USE_ALBUM_NAMES = "bulk_extraction_use_album_names"
+    SETTING_EMULATOR_IMAGE_SOURCE = "emulator_image_source"
+    SETTING_EMULATOR_IMAGE_OUTPUT = "emulator_image_output"
+    SETTING_EMULATOR_IMAGE_SET_NAME = "emulator_image_set_name"
+    SETTING_EMULATOR_IMAGE_ALBUM_TITLE = "emulator_image_album_title"
+    SETTING_EMULATOR_IMAGE_CATALOG_NUMBER = "emulator_image_catalog_number"
+    SETTING_EMULATOR_IMAGE_CONTENT = "emulator_image_content"
+    SETTING_EMULATOR_IMAGE_OUTPUT_FORMAT = "emulator_image_output_format"
+    SETTING_EMULATOR_IMAGE_DISK_FORMAT = "emulator_image_disk_format"
+    SETTING_EMULATOR_IMAGE_INCLUDE_SUBFOLDERS = "emulator_image_include_subfolders"
     SETTING_CHECK_UPDATES_AT_STARTUP = "check_updates_at_startup"
     SETTING_SKIP_UPDATE_REMINDERS = "skip_update_reminders"
     SETTING_WRITE_TAG_SIDECARS = "write_tag_sidecars"
@@ -8580,13 +8642,17 @@ class MidiTitleWindow(QMainWindow):
         self.pendingEdits = {}         # keys: full file paths, values: new titles
         self.image_session = None
         self.pendingImageRenames = {}  # keys: image paths, values: target image paths
-        self.pendingImageTitleEdits = {}  # keys: image paths, values: new MIDI titles
+        self.pendingImageTitleEdits = {}  # keys: image paths, values: new embedded titles
         self.pendingImageDeletes = set()
         self.pendingImageAdditions = {}  # keys: target image paths, values: host file paths
         self.pendingImageReplacements = {}  # keys: image paths, values: replacement host file paths
         self.pendingImageExportFilenames = {}  # optional host-folder names that differ from image names
         self.imageEntriesByPath = {}
         self.imageFileInfo = {}
+        self.smartPianoSoftCatalogPath = ""
+        self.smartPianoSoftCatalog = {}
+        self.pendingSmartPianoSoftTitleEdits = {}
+        self.pendingSmartPianoSoftCatalogReplacement = ""
         self.imageEseqMode = False
         self.imageEseqVariant = ESEQ_VARIANT_DISKLAVIER
         self.imageTitlesLikelyCentered = False
@@ -8645,6 +8711,9 @@ class MidiTitleWindow(QMainWindow):
         self.bulkExtractionWorker = None
         self.bulkExtractionProgressDialog = None
         self.bulkExtractionContext = {}
+        self.emulatorImageWorker = None
+        self.emulatorImageProgressDialog = None
+        self.emulatorImageContext = {}
         self.updateCheckWorker = None
         self.updateCheckManual = False
         self.updateCheckStartupScheduled = False
@@ -9283,6 +9352,13 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesBulkExtractionAction.triggered.connect(self.show_bulk_extraction_utility)
         self.utilitiesMenu.addAction(self.utilitiesBulkExtractionAction)
 
+        self.utilitiesEmulatorImagesAction = QAction(self._t("emulator.action"), self)
+        self.utilitiesEmulatorImagesAction.setToolTip(
+            self._t("emulator.description")
+        )
+        self.utilitiesEmulatorImagesAction.triggered.connect(self.show_emulator_image_utility)
+        self.utilitiesMenu.addAction(self.utilitiesEmulatorImagesAction)
+
         self.utilitiesMenu.addSeparator()
 
         self.utilitiesRecoverImageAction = QAction("Recover Damaged Image...", self)
@@ -9397,10 +9473,7 @@ class MidiTitleWindow(QMainWindow):
             self.settings.value(self.SETTING_USE_DOS83_FILENAMES, False, type=bool)
         )
         self.settingsUseDos83FilenamesAction.setToolTip(
-            self._lt(
-                "Restrict newly entered and generated disk/image filenames to an eight-character name "
-                "and three-character extension. Leave this off to preserve normal long filenames."
-            )
+            self._t("filename_policy.dos83.tooltip")
         )
         self.settingsUseDos83FilenamesAction.toggled.connect(self.toggle_dos83_filenames)
         self.settingsMenu.addAction(self.settingsUseDos83FilenamesAction)
@@ -9898,6 +9971,9 @@ class MidiTitleWindow(QMainWindow):
             self.settingsUseDos83FilenamesAction.setText(
                 self._with_mnemonic(self._lt("Use 8.3 filenames"), "8")
             )
+            self.settingsUseDos83FilenamesAction.setToolTip(
+                self._t("filename_policy.dos83.tooltip")
+            )
             self.settingsUseDos83FilenamesAction.setChecked(
                 self._dos83_filenames_enabled()
             )
@@ -9966,6 +10042,7 @@ class MidiTitleWindow(QMainWindow):
             {"id": "utilities.file_inspection", "category": "Utilities", "label": "File Inspection...", "action": "utilitiesFileInspectionAction", "default": "F4"},
             {"id": "utilities.render_audio", "category": "Utilities", "label": "Render Audio...", "action": "utilitiesRenderAudioAction", "default": "F5"},
             {"id": "utilities.bulk_extraction", "category": "Utilities", "label": "Bulk Extraction...", "action": "utilitiesBulkExtractionAction", "default": ""},
+            {"id": "utilities.emulator_images", "category": "Utilities", "label": "Build Emulator Disk Set...", "action": "utilitiesEmulatorImagesAction", "default": ""},
             {"id": "utilities.rename", "category": "Utilities", "label": "Rename All to DOS 8.3", "action": "utilitiesRenameAction", "default": "Ctrl+Shift+R"},
             {"id": "utilities.long_filenames", "category": "Utilities", "label": "Name MIDI Files from Song Titles", "action": "utilitiesLongFilenamesAction", "default": ""},
             {"id": "utilities.trim_title_spaces", "category": "Utilities", "label": "Trim Title Spaces", "action": "utilitiesTrimTitleSpacesAction", "default": "Ctrl+Shift+Space"},
@@ -10233,17 +10310,25 @@ class MidiTitleWindow(QMainWindow):
         convert_checkbox.setToolTip(
             self._t("bulk.convert.tooltip")
         )
-        form_layout.addWidget(convert_checkbox, 3, 1, 1, 2)
+        form_layout.addWidget(convert_checkbox, 4, 1, 1, 2)
+
+        long_name_checkbox = QCheckBox(self._t("bulk.long_filenames"))
+        long_name_checkbox.setToolTip(self._t("bulk.long_filenames.tooltip"))
+        form_layout.addWidget(long_name_checkbox, 3, 1, 1, 2)
+
+        trim_title_spaces_checkbox = QCheckBox(self._t("bulk.trim_titles"))
+        trim_title_spaces_checkbox.setToolTip(self._t("bulk.trim_titles.tooltip"))
+        form_layout.addWidget(trim_title_spaces_checkbox, 5, 1, 1, 2)
 
         include_sources_checkbox = QCheckBox(self._t("bulk.include_sources"))
         include_sources_checkbox.setToolTip(
             self._t("bulk.include_sources.tooltip")
         )
-        form_layout.addWidget(include_sources_checkbox, 4, 1, 1, 2)
+        form_layout.addWidget(include_sources_checkbox, 6, 1, 1, 2)
 
         retention_hint = QLabel(self._t("bulk.no_overwrite"))
         retention_hint.setWordWrap(True)
-        form_layout.addWidget(retention_hint, 5, 1, 1, 2)
+        form_layout.addWidget(retention_hint, 7, 1, 1, 2)
 
         source_directory = self._bulk_extraction_default_source_directory()
         source_edit.setText(source_directory)
@@ -10259,6 +10344,20 @@ class MidiTitleWindow(QMainWindow):
                 type=bool,
             )
         )
+        long_name_checkbox.setChecked(
+            self.settings.value(
+                self.SETTING_BULK_EXTRACTION_LONG_MIDI_FILENAMES,
+                False,
+                type=bool,
+            )
+        )
+        trim_title_spaces_checkbox.setChecked(
+            self.settings.value(
+                self.SETTING_BULK_EXTRACTION_TRIM_TITLE_SPACES,
+                self.DEFAULT_BULK_EXTRACTION_TRIM_TITLE_SPACES,
+                type=bool,
+            )
+        )
         include_sources_checkbox.setChecked(
             self.settings.value(
                 self.SETTING_BULK_EXTRACTION_INCLUDE_ESEQ_SOURCES,
@@ -10266,8 +10365,13 @@ class MidiTitleWindow(QMainWindow):
                 type=bool,
             )
         )
-        include_sources_checkbox.setEnabled(convert_checkbox.isChecked())
-        convert_checkbox.toggled.connect(include_sources_checkbox.setEnabled)
+        conversion_option_checkboxes = (
+            trim_title_spaces_checkbox,
+            include_sources_checkbox,
+        )
+        for checkbox in conversion_option_checkboxes:
+            checkbox.setEnabled(convert_checkbox.isChecked())
+            convert_checkbox.toggled.connect(checkbox.setEnabled)
         use_album_names = self.settings.value(
             self.SETTING_BULK_EXTRACTION_USE_ALBUM_NAMES,
             False,
@@ -10354,10 +10458,22 @@ class MidiTitleWindow(QMainWindow):
         include_eseq_sources = bool(
             convert_eseq and include_sources_checkbox.isChecked()
         )
+        long_midi_filenames = long_name_checkbox.isChecked()
+        trim_title_spaces = bool(
+            convert_eseq and trim_title_spaces_checkbox.isChecked()
+        )
         use_album_names = naming_combo.currentData() == "album"
         self.settings.setValue(self.SETTING_BULK_EXTRACTION_SOURCE, source_directory)
         self.settings.setValue(self.SETTING_BULK_EXTRACTION_OUTPUT, output_directory)
         self.settings.setValue(self.SETTING_BULK_EXTRACTION_CONVERT_ESEQ, convert_eseq)
+        self.settings.setValue(
+            self.SETTING_BULK_EXTRACTION_LONG_MIDI_FILENAMES,
+            long_name_checkbox.isChecked(),
+        )
+        self.settings.setValue(
+            self.SETTING_BULK_EXTRACTION_TRIM_TITLE_SPACES,
+            trim_title_spaces_checkbox.isChecked(),
+        )
         self.settings.setValue(
             self.SETTING_BULK_EXTRACTION_INCLUDE_ESEQ_SOURCES,
             include_sources_checkbox.isChecked(),
@@ -10371,6 +10487,8 @@ class MidiTitleWindow(QMainWindow):
             output_directory,
             convert_eseq=convert_eseq,
             include_eseq_sources=include_eseq_sources,
+            long_midi_filenames=long_midi_filenames,
+            trim_title_spaces=trim_title_spaces,
             use_album_names=use_album_names,
         )
 
@@ -10381,6 +10499,8 @@ class MidiTitleWindow(QMainWindow):
         *,
         convert_eseq,
         include_eseq_sources,
+        long_midi_filenames,
+        trim_title_spaces,
         use_album_names,
     ):
         if self._disk_worker_busy():
@@ -10398,6 +10518,8 @@ class MidiTitleWindow(QMainWindow):
             output_directory,
             convert_eseq=convert_eseq,
             include_eseq_sources=include_eseq_sources,
+            long_midi_filenames=long_midi_filenames,
+            trim_title_spaces=trim_title_spaces,
             use_album_names=use_album_names,
             language_code=self._language_code(),
             parent=self,
@@ -10434,6 +10556,8 @@ class MidiTitleWindow(QMainWindow):
             "output_directory": output_directory,
             "convert_eseq": bool(convert_eseq),
             "include_eseq_sources": bool(include_eseq_sources),
+            "long_midi_filenames": bool(long_midi_filenames),
+            "trim_title_spaces": bool(trim_title_spaces),
             "use_album_names": bool(use_album_names),
         }
         self._set_disk_load_busy(True)
@@ -10444,6 +10568,8 @@ class MidiTitleWindow(QMainWindow):
             output=output_directory,
             convert_eseq=bool(convert_eseq),
             include_eseq_sources=bool(include_eseq_sources),
+            long_midi_filenames=bool(long_midi_filenames),
+            trim_title_spaces=bool(trim_title_spaces),
             use_album_names=bool(use_album_names),
         )
         self._show_centered_progress_dialog(progress_dialog)
@@ -10657,6 +10783,412 @@ class MidiTitleWindow(QMainWindow):
             worker.deleteLater()
         self._set_disk_load_busy(False)
 
+    def _emulator_image_default_source_directory(self):
+        saved_source = str(
+            self.settings.value(self.SETTING_EMULATOR_IMAGE_SOURCE, "") or ""
+        ).strip()
+        if saved_source and os.path.isdir(saved_source):
+            return os.path.abspath(saved_source)
+        return self._bulk_extraction_default_source_directory()
+
+    def show_emulator_image_utility(self):
+        if self._disk_worker_busy():
+            QMessageBox.information(self, self._lt("Busy"), self._t("emulator.busy"))
+            return
+
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle(self._t("emulator.action"))
+        layout = QVBoxLayout(dialog)
+
+        intro = QLabel(self._t("emulator.description"))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        form_layout = QGridLayout()
+        form_layout.setContentsMargins(0, 8, 0, 0)
+        form_layout.setHorizontalSpacing(10)
+        form_layout.setVerticalSpacing(8)
+        form_layout.setColumnStretch(1, 1)
+
+        source_edit = QLineEdit()
+        source_browse = QPushButton(self._lt("Browse..."))
+        output_edit = QLineEdit()
+        output_browse = QPushButton(self._lt("Browse..."))
+        set_name_edit = QLineEdit()
+        album_title_edit = QLineEdit()
+        catalog_number_edit = QLineEdit()
+        content_combo = QComboBox()
+        content_combo.addItem(self._t("emulator.content.eseq"), "eseq")
+        content_combo.addItem(self._t("emulator.content.midi"), "midi")
+        output_format_combo = QComboBox()
+        output_format_combo.addItem(self._t("emulator.format.img"), "img")
+        output_format_combo.addItem(self._t("emulator.format.hfe"), "hfe")
+        disk_format_combo = QComboBox()
+        for disk_format in DISK_FORMATS:
+            disk_format_combo.addItem(
+                f"{disk_format.label} ({display_bytes(disk_format.size_bytes)})",
+                disk_format,
+            )
+
+        rows = (
+            (self._t("emulator.source.label"), source_edit, source_browse),
+            (self._t("emulator.output.label"), output_edit, output_browse),
+            (self._t("emulator.set_name.label"), set_name_edit, None),
+            (self._t("emulator.content.label"), content_combo, None),
+            (self._lt("Album title"), album_title_edit, None),
+            (self._lt("Catalog number"), catalog_number_edit, None),
+            (self._t("emulator.image_format.label"), output_format_combo, None),
+            (self._t("emulator.disk_format.label"), disk_format_combo, None),
+        )
+        for row, (label_text, field, browse_button) in enumerate(rows):
+            label = QLabel(label_text)
+            label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            form_layout.addWidget(label, row, 0)
+            form_layout.addWidget(field, row, 1)
+            if browse_button is not None:
+                form_layout.addWidget(browse_button, row, 2)
+
+        album_title_label = form_layout.itemAtPosition(4, 0).widget()
+        catalog_number_label = form_layout.itemAtPosition(5, 0).widget()
+
+        include_subfolders_checkbox = QCheckBox(
+            self._t("emulator.include_subfolders")
+        )
+        form_layout.addWidget(include_subfolders_checkbox, len(rows), 1, 1, 2)
+        retention_hint = QLabel(self._t("emulator.no_overwrite"))
+        retention_hint.setWordWrap(True)
+        form_layout.addWidget(retention_hint, len(rows) + 1, 1, 1, 2)
+        layout.addLayout(form_layout)
+
+        source_directory = self._emulator_image_default_source_directory()
+        suggested_name = os.path.basename(os.path.normpath(source_directory)) or "Emulator Disks"
+        default_output = os.path.join(source_directory, "Emulator Images")
+        source_edit.setText(source_directory)
+        output_edit.setText(
+            str(self.settings.value(self.SETTING_EMULATOR_IMAGE_OUTPUT, "") or "").strip()
+            or default_output
+        )
+        set_name_edit.setText(
+            str(self.settings.value(self.SETTING_EMULATOR_IMAGE_SET_NAME, "") or "").strip()
+            or suggested_name
+        )
+        album_title_edit.setText(
+            str(self.settings.value(self.SETTING_EMULATOR_IMAGE_ALBUM_TITLE, "") or "").strip()
+            or set_name_edit.text()
+        )
+        catalog_number_edit.setText(
+            str(self.settings.value(self.SETTING_EMULATOR_IMAGE_CATALOG_NUMBER, "") or "").strip()
+        )
+        saved_content = str(
+            self.settings.value(self.SETTING_EMULATOR_IMAGE_CONTENT, "eseq") or "eseq"
+        ).lower()
+        content_index = content_combo.findData(saved_content)
+        content_combo.setCurrentIndex(max(0, content_index))
+
+        def update_content_fields():
+            eseq_selected = content_combo.currentData() == "eseq"
+            album_title_label.setEnabled(eseq_selected)
+            album_title_edit.setEnabled(eseq_selected)
+            catalog_number_label.setEnabled(eseq_selected)
+            catalog_number_edit.setEnabled(eseq_selected)
+            metadata_tip = (
+                self._t("emulator.metadata.eseq_only") if not eseq_selected else ""
+            )
+            album_title_edit.setToolTip(metadata_tip)
+            catalog_number_edit.setToolTip(metadata_tip)
+
+        content_combo.currentIndexChanged.connect(update_content_fields)
+        update_content_fields()
+        saved_output_format = str(
+            self.settings.value(self.SETTING_EMULATOR_IMAGE_OUTPUT_FORMAT, "img") or "img"
+        ).lower()
+        output_format_index = output_format_combo.findData(saved_output_format)
+        output_format_combo.setCurrentIndex(max(0, output_format_index))
+        saved_disk_format = str(
+            self.settings.value(self.SETTING_EMULATOR_IMAGE_DISK_FORMAT, "ibm.720")
+            or "ibm.720"
+        )
+        for index in range(disk_format_combo.count()):
+            if disk_format_combo.itemData(index).key == saved_disk_format:
+                disk_format_combo.setCurrentIndex(index)
+                break
+        include_subfolders_checkbox.setChecked(
+            self.settings.value(
+                self.SETTING_EMULATOR_IMAGE_INCLUDE_SUBFOLDERS,
+                True,
+                type=bool,
+            )
+        )
+
+        def browse_source():
+            previous_source = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
+            previous_name = os.path.basename(os.path.normpath(previous_source)) or "Emulator Disks"
+            previous_output = os.path.join(previous_source, "Emulator Images")
+            selected = QFileDialog.getExistingDirectory(
+                dialog,
+                self._t("emulator.select_source"),
+                previous_source if os.path.isdir(previous_source) else self._last_save_as_location(),
+            )
+            if not selected:
+                return
+            current_output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
+            update_name = not set_name_edit.text().strip() or set_name_edit.text().strip() == previous_name
+            update_album = not album_title_edit.text().strip() or album_title_edit.text().strip() == previous_name
+            source_edit.setText(selected)
+            new_name = os.path.basename(os.path.normpath(selected)) or "Emulator Disks"
+            if not output_edit.text().strip() or current_output == previous_output:
+                output_edit.setText(os.path.join(selected, "Emulator Images"))
+            if update_name:
+                set_name_edit.setText(new_name)
+            if update_album:
+                album_title_edit.setText(new_name)
+
+        def browse_output():
+            current_output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
+            initial_directory = self._existing_directory_for_dialog_path(current_output)
+            selected = QFileDialog.getExistingDirectory(
+                dialog,
+                self._t("emulator.select_output"),
+                initial_directory or self._last_save_as_location(),
+            )
+            if selected:
+                output_edit.setText(selected)
+
+        source_browse.clicked.connect(browse_source)
+        output_browse.clicked.connect(browse_output)
+
+        buttons = self._make_dialog_button_box(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            dialog,
+        )
+        create_button = buttons.button(QDialogButtonBox.Ok)
+        if create_button is not None:
+            create_button.setText(self._t("emulator.create"))
+        buttons.rejected.connect(dialog.reject)
+
+        def accept_options():
+            selected_source = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
+            selected_output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
+            if not source_edit.text().strip() or not os.path.isdir(selected_source):
+                QMessageBox.warning(
+                    dialog,
+                    self._t("emulator.invalid_options.title"),
+                    self._t("emulator.source_missing.message"),
+                )
+                return
+            if not output_edit.text().strip():
+                QMessageBox.warning(
+                    dialog,
+                    self._t("emulator.invalid_options.title"),
+                    self._t("emulator.output_required.message"),
+                )
+                return
+            if os.path.exists(selected_output) and not os.path.isdir(selected_output):
+                QMessageBox.warning(
+                    dialog,
+                    self._t("emulator.invalid_options.title"),
+                    self._t("emulator.invalid_output.message"),
+                )
+                return
+            if not set_name_edit.text().strip():
+                QMessageBox.warning(
+                    dialog,
+                    self._t("emulator.invalid_options.title"),
+                    self._t("emulator.set_name_required.message"),
+                )
+                return
+            dialog.accept()
+
+        buttons.accepted.connect(accept_options)
+        layout.addWidget(buttons)
+        dialog.resize(760, dialog.sizeHint().height())
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+            return
+
+        source_directory = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
+        output_directory = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
+        set_name = set_name_edit.text().strip()
+        album_title = album_title_edit.text().strip()
+        catalog_number = catalog_number_edit.text().strip()
+        output_content = content_combo.currentData()
+        output_ext = output_format_combo.currentData()
+        disk_format = disk_format_combo.currentData()
+        include_subfolders = include_subfolders_checkbox.isChecked()
+        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_SOURCE, source_directory)
+        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_OUTPUT, output_directory)
+        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_SET_NAME, set_name)
+        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_ALBUM_TITLE, album_title)
+        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_CATALOG_NUMBER, catalog_number)
+        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_CONTENT, output_content)
+        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_OUTPUT_FORMAT, output_ext)
+        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_DISK_FORMAT, disk_format.key)
+        self.settings.setValue(
+            self.SETTING_EMULATOR_IMAGE_INCLUDE_SUBFOLDERS,
+            include_subfolders,
+        )
+        self._start_emulator_image_build(
+            source_directory,
+            output_directory,
+            set_name=set_name,
+            album_title=album_title,
+            catalog_number=catalog_number,
+            output_content=output_content,
+            disk_format=disk_format,
+            output_ext=output_ext,
+            include_subfolders=include_subfolders,
+        )
+
+    def _start_emulator_image_build(
+        self,
+        source_directory,
+        output_directory,
+        *,
+        set_name,
+        album_title,
+        catalog_number,
+        output_content,
+        disk_format,
+        output_ext,
+        include_subfolders,
+    ):
+        if self._disk_worker_busy():
+            QMessageBox.information(self, self._lt("Busy"), self._t("emulator.busy"))
+            return
+
+        progress_dialog = QProgressDialog(
+            self._t("emulator.progress.preparing"),
+            self._lt("Cancel"),
+            0,
+            1,
+            self,
+        )
+        progress_dialog.setWindowTitle(self._t("emulator.action"))
+        self._prepare_progress_dialog(progress_dialog)
+        progress_dialog.setAutoClose(False)
+        self._apply_stage_progress(
+            progress_dialog,
+            0,
+            1,
+            self._t("emulator.progress.preparing"),
+        )
+
+        worker = EmulatorImageBuildWorker(
+            source_directory,
+            output_directory,
+            set_name=set_name,
+            album_title=album_title,
+            catalog_number=catalog_number,
+            output_content=output_content,
+            disk_format=disk_format,
+            output_ext=output_ext,
+            include_subfolders=include_subfolders,
+            language_code=self._language_code(),
+            parent=self,
+        )
+        worker.progressChanged.connect(
+            lambda step, total, message, dialog=progress_dialog: self._apply_stage_progress(
+                dialog,
+                step,
+                total,
+                message,
+            )
+        )
+        progress_dialog.canceled.connect(worker.cancel)
+        progress_dialog.canceled.connect(
+            lambda dialog=progress_dialog: dialog.setLabelText(
+                self._t("emulator.progress.cancelling")
+            )
+        )
+        worker.buildFinished.connect(self._on_emulator_image_success)
+        worker.buildFailed.connect(self._on_emulator_image_failure)
+        worker.operationCancelled.connect(self._on_emulator_image_cancelled)
+        worker.finished.connect(self._on_emulator_image_finished)
+        self.emulatorImageWorker = worker
+        self.emulatorImageProgressDialog = progress_dialog
+        self.emulatorImageContext = {
+            "source_directory": source_directory,
+            "output_directory": output_directory,
+            "set_name": set_name,
+            "output_content": output_content,
+        }
+        self._set_disk_load_busy(True)
+        self._log_event(
+            "Utilities",
+            "Emulator image creation started",
+            source=source_directory,
+            output=output_directory,
+            disk_format=disk_format.key,
+            output_format=output_ext,
+            output_content=output_content,
+            include_subfolders=include_subfolders,
+        )
+        self._show_centered_progress_dialog(progress_dialog)
+        worker.start()
+
+    def _close_emulator_image_progress(self):
+        if self.emulatorImageProgressDialog is not None:
+            dialog = self.emulatorImageProgressDialog
+            self.emulatorImageProgressDialog = None
+            dialog.hide()
+            dialog.deleteLater()
+
+    def _on_emulator_image_success(self, result):
+        self._close_emulator_image_progress()
+        summary = self._t(
+            "emulator.complete.message",
+            files=result.files_prepared,
+            content=self._t(f"emulator.content.{result.output_content}"),
+            images=result.images_created,
+            path=result.output_directory,
+        )
+        self.status_label.setText(summary.replace("\n", " "))
+        self._log_event(
+            "Utilities",
+            "Emulator image creation completed",
+            source=result.source_directory,
+            output=result.output_directory,
+            files=result.files_prepared,
+            converted=result.converted_files,
+            output_content=result.output_content,
+            images=result.images_created,
+            outputs="; ".join(result.output_paths),
+        )
+        QMessageBox.information(
+            self,
+            self._t("emulator.complete.title"),
+            summary,
+        )
+
+    def _on_emulator_image_failure(self, message):
+        self._close_emulator_image_progress()
+        output_directory = self.emulatorImageContext.get("output_directory", "")
+        self.status_label.setText(self._t("emulator.failure.status"))
+        self._show_operation_error(
+            self._t("emulator.failure.title"),
+            self._t("emulator.failure.summary", path=output_directory),
+            message,
+            guidance=self._t("emulator.failure.guidance"),
+        )
+
+    def _on_emulator_image_cancelled(self, _message):
+        self._close_emulator_image_progress()
+        self.status_label.setText(self._t("emulator.cancelled.status"))
+        self._log_warning_event(
+            "Utilities",
+            "Emulator image creation cancelled",
+            source=self.emulatorImageContext.get("source_directory", ""),
+            output=self.emulatorImageContext.get("output_directory", ""),
+        )
+
+    def _on_emulator_image_finished(self):
+        worker = self.emulatorImageWorker
+        self.emulatorImageWorker = None
+        self.emulatorImageContext = {}
+        if worker is not None:
+            worker.deleteLater()
+        self._set_disk_load_busy(False)
+
     def _with_mnemonic(self, text, mnemonic):
         if not mnemonic or "&" in text:
             return text
@@ -10783,6 +11315,10 @@ class MidiTitleWindow(QMainWindow):
             pedal_compatibility_action.setToolTip(
                 self._lt("Apply optional pedal compatibility transforms to listed MIDI files.")
             )
+        emulator_images_action = getattr(self, "utilitiesEmulatorImagesAction", None)
+        if emulator_images_action is not None:
+            emulator_images_action.setText(self._t("emulator.action"))
+            emulator_images_action.setToolTip(self._t("emulator.description"))
 
     def eventFilter(self, obj, event):
         if isinstance(obj, QDialog) and bool(obj.property("_aps_center_on_parent")):
@@ -11200,6 +11736,7 @@ class MidiTitleWindow(QMainWindow):
             or self.diskWriteTargetWorker is not None
             or self.diskImageCaptureWorker is not None
             or self.bulkExtractionWorker is not None
+            or self.emulatorImageWorker is not None
         )
 
     def _message_indicates_cancelled(self, message):
@@ -13833,6 +14370,13 @@ class MidiTitleWindow(QMainWindow):
             # users who hid the older dialog can make the new choice.
             self.settings.setValue(self.SETTING_ESEQ_TO_MIDI_TRIM_TITLE_SPACES, False)
             self.settings.setValue(self.SETTING_SKIP_ESEQ_TO_MIDI_CONVERSION_PROMPT, False)
+        dos83_setting_key = getattr(self, "SETTING_USE_DOS83_FILENAMES", "")
+        if dos83_setting_key and self.settings.value(
+            dos83_setting_key,
+            False,
+            type=bool,
+        ):
+            self._set_long_midi_filenames_enabled(False)
         version = self.settings.value(self.SETTING_HIDE_CHOICES_RESET_VERSION, 0, type=int)
         if version == self.HIDE_CHOICES_RESET_VERSION:
             return
@@ -13851,6 +14395,13 @@ class MidiTitleWindow(QMainWindow):
         self.settings.setValue(self.SETTING_HIDE_CHOICES_RESET_VERSION, self.HIDE_CHOICES_RESET_VERSION)
 
     def _long_midi_filenames_enabled(self):
+        dos83_setting_key = getattr(self, "SETTING_USE_DOS83_FILENAMES", "")
+        if dos83_setting_key and self.settings.value(
+            dos83_setting_key,
+            False,
+            type=bool,
+        ):
+            return False
         if self.settings.contains(self.SETTING_LONG_MIDI_FILENAMES):
             return self.settings.value(
                 self.SETTING_LONG_MIDI_FILENAMES,
@@ -13874,6 +14425,13 @@ class MidiTitleWindow(QMainWindow):
         # and for users who move between app versions.
         self.settings.setValue(self.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES, enabled)
         self.settings.setValue(self.SETTING_READ_FLOPPY_LONG_FILENAMES, enabled)
+        if enabled:
+            dos83_setting_key = getattr(self, "SETTING_USE_DOS83_FILENAMES", "")
+            if dos83_setting_key:
+                self.settings.setValue(dos83_setting_key, False)
+            action = getattr(self, "settingsUseDos83FilenamesAction", None)
+            if action is not None and action.isChecked():
+                action.setChecked(False)
 
     def _reset_gw_sector_report_hide_choices_if_needed(self):
         version = self.settings.value(self.SETTING_GW_SECTOR_REPORT_HIDE_VERSION, 0, type=int)
@@ -14232,10 +14790,7 @@ class MidiTitleWindow(QMainWindow):
         )
         long_name_checkbox.setChecked(use_long_filenames)
         long_name_checkbox.setToolTip(
-            self._lt(
-                "Example: 01 - Moon River.mid. In floppy/image mode, the Filename column previews "
-                "the descriptive name. If DOS 8.3 filenames are enabled, it applies only to the folder export."
-            )
+            self._t("filename_policy.long_conversion.tooltip")
         )
         layout.addWidget(long_name_checkbox)
 
@@ -14380,6 +14935,8 @@ class MidiTitleWindow(QMainWindow):
             self.feedbackWorker.requestInterruption()
         if self.bulkExtractionWorker is not None:
             self.bulkExtractionWorker.cancel()
+        if self.emulatorImageWorker is not None:
+            self.emulatorImageWorker.cancel()
         self._reset_image_state()
         self._cleanup_midi_scratch_dir()
         super().closeEvent(event)
@@ -14562,8 +15119,8 @@ class MidiTitleWindow(QMainWindow):
         dynamic_available = max(0, available_width - fixed_total)
         dynamic_total = filename_width + title_width + (type_width or 0)
 
-        # Prefer compact content widths. If those do not fit, trim the flexible
-        # columns down to their readable minimums before allowing a scrollbar.
+        # Fit compact content first. If it does not fit, trim flexible columns
+        # to readable minimums; if space remains, let Title fill the viewport.
         overflow = max(0, dynamic_total - dynamic_available)
         if overflow:
             title_reduction = min(overflow, max(0, title_width - title_min))
@@ -14576,6 +15133,10 @@ class MidiTitleWindow(QMainWindow):
         if overflow and type_width is not None:
             type_reduction = min(overflow, max(0, type_width - type_min))
             type_width -= type_reduction
+
+        fitted_total = filename_width + title_width + (type_width or 0)
+        if fitted_total < dynamic_available:
+            title_width += dynamic_available - fitted_total
 
         self._is_adjusting_columns = True
         try:
@@ -14688,13 +15249,17 @@ class MidiTitleWindow(QMainWindow):
     def toggle_dos83_filenames(self, state):
         enabled = bool(state)
         self.settings.setValue(self.SETTING_USE_DOS83_FILENAMES, enabled)
+        if enabled:
+            set_long_filenames = getattr(self, "_set_long_midi_filenames_enabled", None)
+            if callable(set_long_filenames):
+                set_long_filenames(False)
         action = getattr(self, "settingsUseDos83FilenamesAction", None)
         if action is not None and action.isChecked() != enabled:
             action.setChecked(enabled)
         self.status_label.setText(
-            "DOS 8.3 filename rules are enabled for new filename changes."
+            self._lt("DOS 8.3 filename rules are enabled for new filename changes.")
             if enabled else
-            "Long filenames are enabled. Existing pending names were left unchanged."
+            self._lt("Long filenames are enabled. Existing pending names were left unchanged.")
         )
 
     def toggle_hide_status(self, state):
@@ -14767,10 +15332,26 @@ class MidiTitleWindow(QMainWindow):
         action.setToolTip(self._lt(tooltip))
         action.setStatusTip(self._lt(tooltip))
 
-    def _pedal_compatibility_options_dialog(self, file_count):
+    def _pedal_compatibility_target_label(self, row, path):
+        filename_item = self.table.item(row, 3)
+        title_item = self.table.item(row, 4)
+        filename = (
+            filename_item.text().strip()
+            if filename_item is not None and filename_item.text().strip()
+            else os.path.basename(path)
+        )
+        title = title_item.text().strip() if title_item is not None else ""
+        if title and title.lower() != "untitled" and title != filename:
+            return f"{filename} — {title}"
+        return filename
+
+    def _pedal_compatibility_options_dialog(self, rows):
+        rows = list(rows or [])
+        file_count = len(rows)
         dialog = QDialog(self)
         apply_window_icon(dialog)
         dialog.setWindowTitle(self._lt("Apply Pedal Compatibility"))
+        dialog.setMinimumWidth(590)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(16, 14, 16, 12)
         layout.setSpacing(10)
@@ -14781,22 +15362,63 @@ class MidiTitleWindow(QMainWindow):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
+        target_group = QGroupBox(self._lt("Apply To"))
+        target_layout = QHBoxLayout(target_group)
+        target_layout.setContentsMargins(12, 10, 12, 10)
+        target_combo = QComboBox(target_group)
+        target_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        target_combo.addItem(
+            self._lt("All listed MIDI songs ({count})").format(count=file_count),
+            -1,
+        )
+        current_row = self.table.currentRow()
+        current_target_index = 0
+        for target_index, (row, path) in enumerate(rows):
+            target_combo.addItem(
+                self._pedal_compatibility_target_label(row, path),
+                target_index,
+            )
+            if row == current_row:
+                current_target_index = target_index + 1
+        target_combo.setCurrentIndex(current_target_index)
+        target_combo.setToolTip(
+            self._lt("Apply the selected transforms to one song or to every listed MIDI song as a batch.")
+        )
+        target_layout.addWidget(target_combo, stretch=1)
+        layout.addWidget(target_group)
+
         count_note = QLabel(
             self._lt("Changes will be staged for {count} listed MIDI file(s); nothing is written until you save.").format(
-                count=file_count,
+                count=1 if current_target_index else file_count,
             )
         )
         count_note.setWordWrap(True)
         layout.addWidget(count_note)
 
-        options_group = QGroupBox(self._lt("MIDI Files"))
+        def update_count_note():
+            target_count = file_count if target_combo.currentData() == -1 else 1
+            count_note.setText(
+                self._lt("Changes will be staged for {count} listed MIDI file(s); nothing is written until you save.").format(
+                    count=target_count,
+                )
+            )
+
+        target_combo.currentIndexChanged.connect(update_count_note)
+
+        options_group = QGroupBox(self._lt("Compatibility Transforms"))
         options_layout = QVBoxLayout(options_group)
         options_layout.setContentsMargins(12, 10, 12, 10)
         options_layout.setSpacing(8)
 
-        repair_checkbox = QCheckBox(self._lt("Repair legacy Disklavier channel-3 pedal"))
+        repair_checkbox = QCheckBox(
+            self._lt("Remap legacy Disklavier pedal (channel 3 → channel 1)")
+        )
         repair_checkbox.setToolTip(
-            self._lt("For listed MIDI files, move channel-3 pedal controllers to channel 1 only if channel 1 does not already contain pedal controller data.")
+            self._lt(
+                "Remap CC64, CC66, and CC67 from MIDI channel 3 to channel 1 only when channel 1 contains notes but no pedal controllers and channel 3 contains no notes."
+            )
         )
         options_layout.addWidget(repair_checkbox)
 
@@ -14820,6 +15442,91 @@ class MidiTitleWindow(QMainWindow):
 
         layout.addWidget(options_group)
 
+        softening_group = QGroupBox(self._lt("Sustain Pedal Softening (CC64)"))
+        softening_layout = QVBoxLayout(softening_group)
+        softening_layout.setContentsMargins(12, 10, 12, 10)
+        softening_layout.setSpacing(8)
+
+        soften_checkbox = QCheckBox(self._lt("Soften binary on/off sustain pedal"))
+        soften_checkbox.setToolTip(
+            self._lt(
+                "Convert binary CC64 transitions into smooth S-curves while preserving the original 64/63 on/off threshold timing. Existing continuous pedal streams are left unchanged."
+            )
+        )
+        softening_layout.addWidget(soften_checkbox)
+
+        softening_note = QLabel(
+            self._lt(
+                "Only binary sustain streams are softened. Continuous, static, and missing CC64 data are skipped without alteration."
+            )
+        )
+        softening_note.setWordWrap(True)
+        softening_layout.addWidget(softening_note)
+
+        motion_grid = QGridLayout()
+        motion_label = QLabel(self._lt("Pedal motion:"))
+        motion_combo = QComboBox(softening_group)
+        motion_combo.addItem(self._lt("Quick — 55 ms down / 85 ms release"), (55, 85))
+        motion_combo.addItem(self._lt("Natural — 100 ms down / 180 ms release"), (100, 180))
+        motion_combo.addItem(self._lt("Slow — 180 ms down / 320 ms release"), (180, 320))
+        motion_combo.addItem(self._lt("Custom"), None)
+        motion_combo.setCurrentIndex(1)
+        motion_grid.addWidget(motion_label, 0, 0)
+        motion_grid.addWidget(motion_combo, 0, 1, 1, 3)
+
+        down_label = QLabel(self._lt("Pedal down:"))
+        down_spin = QSpinBox(softening_group)
+        down_spin.setRange(20, 2000)
+        down_spin.setSingleStep(5)
+        down_spin.setSuffix(" ms")
+        down_spin.setValue(100)
+        release_label = QLabel(self._lt("Release:"))
+        release_spin = QSpinBox(softening_group)
+        release_spin.setRange(20, 2000)
+        release_spin.setSingleStep(5)
+        release_spin.setSuffix(" ms")
+        release_spin.setValue(180)
+        motion_grid.addWidget(down_label, 1, 0)
+        motion_grid.addWidget(down_spin, 1, 1)
+        motion_grid.addWidget(release_label, 1, 2)
+        motion_grid.addWidget(release_spin, 1, 3)
+        motion_grid.setColumnStretch(1, 1)
+        motion_grid.setColumnStretch(3, 1)
+        softening_layout.addLayout(motion_grid)
+
+        alternative_note = QLabel(
+            self._lt(
+                "Pedal softening and conversion to on/off values are alternatives and cannot be applied together."
+            )
+        )
+        alternative_note.setWordWrap(True)
+        softening_layout.addWidget(alternative_note)
+        layout.addWidget(softening_group)
+
+        def update_motion_controls():
+            softening_enabled = soften_checkbox.isChecked()
+            preset = motion_combo.currentData()
+            custom = preset is None
+            motion_label.setEnabled(softening_enabled)
+            motion_combo.setEnabled(softening_enabled)
+            down_label.setEnabled(softening_enabled)
+            release_label.setEnabled(softening_enabled)
+            down_spin.setEnabled(softening_enabled and custom)
+            release_spin.setEnabled(softening_enabled and custom)
+            if preset is not None:
+                down_spin.setValue(int(preset[0]))
+                release_spin.setValue(int(preset[1]))
+
+        def update_softening_choice(checked):
+            if checked and binary_checkbox.isChecked():
+                binary_checkbox.setChecked(False)
+            binary_checkbox.setEnabled(not checked)
+            update_motion_controls()
+
+        soften_checkbox.toggled.connect(update_softening_choice)
+        motion_combo.currentIndexChanged.connect(update_motion_controls)
+        update_motion_controls()
+
         preservation_note = QLabel(
             self._lt("All pedal compatibility options start unchecked so preservation remains the normal default.")
         )
@@ -14832,7 +15539,13 @@ class MidiTitleWindow(QMainWindow):
             apply_button.setText(self._lt("Apply"))
             apply_button.setEnabled(False)
 
-        checkboxes = (repair_checkbox, binary_checkbox, cleanup_checkbox, vpr_checkbox)
+        checkboxes = (
+            repair_checkbox,
+            binary_checkbox,
+            cleanup_checkbox,
+            vpr_checkbox,
+            soften_checkbox,
+        )
 
         def update_apply_enabled():
             if apply_button is not None:
@@ -14853,6 +15566,10 @@ class MidiTitleWindow(QMainWindow):
             "binary_pedal": binary_checkbox.isChecked(),
             "pedal_cleanup": cleanup_checkbox.isChecked(),
             "virtual_piano_roll_pedal": vpr_checkbox.isChecked(),
+            "soften_sustain_pedal": soften_checkbox.isChecked(),
+            "pedal_down_ms": down_spin.value(),
+            "pedal_release_ms": release_spin.value(),
+            "_target_index": int(target_combo.currentData()),
         }
 
     def show_pedal_compatibility_utility(self):
@@ -14865,10 +15582,24 @@ class MidiTitleWindow(QMainWindow):
             QMessageBox.information(self, "No MIDI Files", "No MIDI files are currently listed.")
             return
 
-        options = self._pedal_compatibility_options_dialog(len(rows))
+        options = self._pedal_compatibility_options_dialog(rows)
         if options is None:
             return
-        if not any(options.values()):
+        target_index = options.pop("_target_index", -1)
+        if target_index >= 0:
+            if target_index >= len(rows):
+                return
+            rows = [rows[target_index]]
+        if not any(
+            options[key]
+            for key in (
+                "repair_disklavier_pedal",
+                "binary_pedal",
+                "pedal_cleanup",
+                "virtual_piano_roll_pedal",
+                "soften_sustain_pedal",
+            )
+        ):
             return
 
         if self.is_image_mode():
@@ -14956,16 +15687,10 @@ class MidiTitleWindow(QMainWindow):
     def _apply_table_selection_style(self):
         if not hasattr(self, "table"):
             return
-        if is_dark_theme():
-            background = "#155E75"
-            foreground = "#ECFEFF"
-            inactive_background = "#164E63"
-            inactive_foreground = "#DFF7FA"
-        else:
-            background = "#B9EAF5"
-            foreground = "#0B2533"
-            inactive_background = "#D1F2F7"
-            inactive_foreground = "#12313D"
+        colors = _table_selection_colors(is_dark_theme())
+        background, foreground = colors["active"]
+        inactive_background, inactive_foreground = colors["inactive"]
+        disabled_background, disabled_foreground = colors["disabled"]
         self.table.setStyleSheet(
             f"""
             QTableWidget::item:selected {{
@@ -14975,6 +15700,10 @@ class MidiTitleWindow(QMainWindow):
             QTableWidget::item:selected:!active {{
                 background-color: {inactive_background};
                 color: {inactive_foreground};
+            }}
+            QTableWidget::item:selected:disabled {{
+                background-color: {disabled_background};
+                color: {disabled_foreground};
             }}
             """
         )
@@ -15093,6 +15822,10 @@ class MidiTitleWindow(QMainWindow):
         self.pendingImageExportFilenames.clear()
         self.imageEntriesByPath.clear()
         self.imageFileInfo.clear()
+        self.smartPianoSoftCatalogPath = ""
+        self.smartPianoSoftCatalog.clear()
+        self.pendingSmartPianoSoftTitleEdits.clear()
+        self.pendingSmartPianoSoftCatalogReplacement = ""
         self.imageEseqMode = False
         self.imageEseqVariant = ESEQ_VARIANT_DISKLAVIER
         self.imageTitlesLikelyCentered = False
@@ -15404,6 +16137,14 @@ class MidiTitleWindow(QMainWindow):
                 tooltip
                 if enabled
                 else self._t("bulk.busy")
+            )
+        if hasattr(self, "utilitiesEmulatorImagesAction"):
+            enabled = self.choose_button.isEnabled() and self.emulatorImageWorker is None
+            tooltip = self._t("emulator.description")
+            self.utilitiesEmulatorImagesAction.setEnabled(enabled)
+            self.utilitiesEmulatorImagesAction.setToolTip(tooltip)
+            self.utilitiesEmulatorImagesAction.setStatusTip(
+                tooltip if enabled else self._t("emulator.busy")
             )
 
     def _set_loaded_image_pianodir_metadata(self, metadata=None):
@@ -16347,7 +17088,15 @@ class MidiTitleWindow(QMainWindow):
             except Exception:
                 material_path = ""
             if material_path and os.path.isfile(material_path):
-                items.append({"label": label, "path": material_path, "row": row})
+                items.append(
+                    {
+                        "label": label,
+                        "display_name": display_name,
+                        "title": title,
+                        "path": material_path,
+                        "row": row,
+                    }
+                )
         return items
 
     def show_file_inspection_tool(self, selected_row=None):
@@ -17399,10 +18148,7 @@ class MidiTitleWindow(QMainWindow):
 
     @staticmethod
     def _trim_title_spacing(title):
-        text = str(title or "").replace("\x00", " ")
-        if len(text) > 16 and text[15].islower() and text[16].isupper():
-            text = f"{text[:16]} {text[16:]}"
-        return re.sub(r"\s+", " ", text).strip()
+        return normalize_title_spacing(title)
 
     def _set_trim_title_spaces_enabled(self, enabled, disabled_tooltip=""):
         if enabled:
@@ -17484,14 +18230,20 @@ class MidiTitleWindow(QMainWindow):
         path = path_item.text()
         filename = filename_item.text() if filename_item is not None else os.path.basename(path)
         if self.is_image_mode():
-            self.pendingImageTitleEdits[path] = new_title
+            self._stage_image_title_edit(path, new_title)
         else:
             self.pendingEdits[path] = new_title
-        self.table.setItem(
-            row,
-            4,
-            self._make_title_item(new_title, title_mode=title_mode, fallback_title=filename),
+        title_item = self._make_title_item(
+            new_title,
+            title_mode=title_mode,
+            fallback_title=filename,
         )
+        if self.is_image_mode() and self._image_title_is_smart_pianosoft_catalog_backed(path):
+            title_item.setToolTip(
+                "Click to edit this Yamaha Smart PianoSoft title in PSONG.MNG. "
+                "The MIDI track-name event is left unchanged."
+            )
+        self.table.setItem(row, 4, title_item)
         self._update_compat_indicator(row, new_title)
         return True
 
@@ -18129,6 +18881,51 @@ class MidiTitleWindow(QMainWindow):
             return ""
         return self.image_session.extract_file(image_path)
 
+    def _stage_smart_pianosoft_catalog_title(self, image_path, new_title):
+        if self.image_session is None or not self.smartPianoSoftCatalogPath:
+            raise FloppyImageError("The Smart PianoSoft PSONG.MNG catalog is not available.")
+
+        catalog_path = self.smartPianoSoftCatalogPath
+        source_catalog_path = (
+            self.pendingSmartPianoSoftCatalogReplacement
+            or self.pendingImageReplacements.get(catalog_path)
+            or self.image_session.extract_file(catalog_path)
+        )
+        title_edits = dict(self.pendingSmartPianoSoftTitleEdits)
+        title_edits[image_path] = new_title
+        catalog_title_updates = {
+            os.path.basename(source_path): title
+            for source_path, title in title_edits.items()
+        }
+        replacement_path = os.path.join(
+            self.image_session.patched_dir,
+            f"{uuid.uuid4().hex}_{SMART_PIANOSOFT_SONG_CATALOG_NAME}",
+        )
+        update_smart_pianosoft_catalog_to_path(
+            source_catalog_path,
+            replacement_path,
+            catalog_title_updates,
+        )
+
+        previous_generated = self.pendingSmartPianoSoftCatalogReplacement
+        self.pendingSmartPianoSoftTitleEdits = title_edits
+        self.pendingSmartPianoSoftCatalogReplacement = replacement_path
+        self.pendingImageReplacements[catalog_path] = replacement_path
+        self.pendingImageTitleEdits.pop(image_path, None)
+        if previous_generated and previous_generated != replacement_path:
+            try:
+                os.remove(previous_generated)
+            except OSError:
+                pass
+
+    def _stage_image_title_edit(self, image_path, new_title):
+        if self._image_title_is_smart_pianosoft_catalog_backed(image_path):
+            self._stage_smart_pianosoft_catalog_title(image_path, new_title)
+            self._image_info_for_path(image_path)["title"] = new_title
+            return "smart_pianosoft_catalog"
+        self.pendingImageTitleEdits[image_path] = new_title
+        return "embedded_title"
+
     def _is_special_pianodir_path(self, image_path):
         return image_path == PIANODIR_ROW_PATH
 
@@ -18159,6 +18956,14 @@ class MidiTitleWindow(QMainWindow):
         if self._is_special_pianodir_path(image_path):
             return ""
         return self._image_info_for_path(image_path).get("title_mode", "")
+
+    def _image_title_is_smart_pianosoft_catalog_backed(self, image_path):
+        if self._is_special_pianodir_path(image_path):
+            return False
+        return (
+            self._image_info_for_path(image_path).get("title_source")
+            == "smart_pianosoft_catalog"
+        )
 
     def _image_path_order_key(self, image_path):
         if self._is_special_pianodir_path(image_path):
@@ -19401,10 +20206,7 @@ class MidiTitleWindow(QMainWindow):
         )
         long_name_checkbox.setChecked(self._long_midi_filenames_enabled())
         long_name_checkbox.setToolTip(
-            self._lt(
-                "Use names such as 01 - Moon River.mid when the converted songs are saved to a folder. "
-                "The Filename column previews those names. DOS 8.3 restrictions apply only when that option is enabled."
-            )
+            self._t("filename_policy.long_read_floppy.tooltip")
         )
         long_name_checkbox.setEnabled(convert_to_midi_checkbox.isChecked())
         convert_to_midi_checkbox.toggled.connect(long_name_checkbox.setEnabled)
@@ -21030,6 +21832,21 @@ class MidiTitleWindow(QMainWindow):
 
     def _load_image_rows(self, entries):
         self.imageFileInfo.clear()
+        self.smartPianoSoftCatalogPath = next(
+            (
+                entry.path
+                for entry in entries
+                if os.path.basename(str(entry.path or "")).casefold()
+                == SMART_PIANOSOFT_SONG_CATALOG_NAME.casefold()
+            ),
+            "",
+        )
+        self.smartPianoSoftCatalog = smart_pianosoft_catalog_from_session(
+            self.image_session,
+            entries,
+        )
+        self.pendingSmartPianoSoftTitleEdits.clear()
+        self.pendingSmartPianoSoftCatalogReplacement = ""
         self.imageHasPianodir = False
         self.imagePianodirPopulated = False
         self.imageEseqMode = False
@@ -21073,7 +21890,18 @@ class MidiTitleWindow(QMainWindow):
             order_key = b""
             try:
                 local_path = self.image_session.extract_file(entry.path)
-                _, title, midi_type, _, order_key = self._probe_image_file(entry.path, entry.size, local_path)
+                is_midi, title, midi_type, _, order_key = self._probe_image_file(
+                    entry.path,
+                    entry.size,
+                    local_path,
+                )
+                catalog_song = self.smartPianoSoftCatalog.get(entry.name.casefold())
+                if is_midi and catalog_song is not None and catalog_song.title:
+                    title = catalog_song.title
+                    info = self._image_info_for_path(entry.path)
+                    info["title"] = title
+                    info["title_source"] = "smart_pianosoft_catalog"
+                    info["smart_pianosoft_track"] = catalog_song.track_number
                 if entry.name.upper() in image_order_overrides:
                     order_key = image_order_overrides[entry.name.upper()]
             except Exception:
@@ -21096,6 +21924,13 @@ class MidiTitleWindow(QMainWindow):
                     "midi_type": midi_type,
                     "title_mode": self._image_path_title_mode(entry.path),
                     "order_key": order_key,
+                    "smart_pianosoft_track": int(
+                        self._image_info_for_path(entry.path).get(
+                            "smart_pianosoft_track",
+                            0,
+                        )
+                        or 0
+                    ),
                 }
             )
 
@@ -21115,7 +21950,19 @@ class MidiTitleWindow(QMainWindow):
             self.imageEseqVariant = ESEQ_VARIANT_CLAVINOVA
 
         image_has_eseq_titles = self.imageHasPianodir or any(spec.get("title_mode") == "eseq" for spec in row_specs)
-        if image_has_eseq_titles:
+        image_has_smart_pianosoft_titles = any(
+            spec.get("smart_pianosoft_track", 0) > 0
+            for spec in row_specs
+        )
+        if image_has_smart_pianosoft_titles:
+            row_specs.sort(
+                key=lambda spec: (
+                    0 if spec.get("smart_pianosoft_track", 0) > 0 else 1,
+                    spec.get("smart_pianosoft_track", 0),
+                    spec["filename"].upper(),
+                )
+            )
+        elif image_has_eseq_titles:
             row_specs.sort(
                 key=lambda spec: (
                     0 if spec.get("title_mode") == "eseq" else 1,
@@ -21193,6 +22040,11 @@ class MidiTitleWindow(QMainWindow):
         is_midi = self._is_midi_image_path(image_path)
         raw_title = title if title != "" else (filename if title_mode == "midi" else "")
         title_item = self._make_title_item(raw_title, title_mode=title_mode, fallback_title=filename)
+        if self._image_title_is_smart_pianosoft_catalog_backed(image_path):
+            title_item.setToolTip(
+                "Click to edit this Yamaha Smart PianoSoft title in PSONG.MNG. "
+                "The MIDI track-name event is left unchanged."
+            )
         self.table.setItem(row, 4, title_item)
 
         self._update_compat_indicator(row, raw_title)
@@ -22213,8 +23065,13 @@ class MidiTitleWindow(QMainWindow):
         return titled_source_path
 
     def _apply_pedal_compatibility_to_regular_rows(self, rows, options):
+        softening_requested = bool(options.get("soften_sustain_pedal"))
         progressDialog = QProgressDialog(
-            "Applying pedal compatibility...",
+            (
+                "Softening sustain pedal..."
+                if softening_requested
+                else "Applying pedal compatibility..."
+            ),
             "Cancel",
             0,
             len(rows),
@@ -22269,7 +23126,16 @@ class MidiTitleWindow(QMainWindow):
 
         status_parts = [f"Staged pedal compatibility changes for {changed_count} MIDI file(s)."]
         if unchanged_count:
-            status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+            if softening_requested:
+                status_parts.append(
+                    f"{unchanged_count} MIDI file(s) had no eligible binary CC64 stream; continuous or static pedal data was preserved."
+                )
+            else:
+                status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+        if softening_requested and changed_count:
+            status_parts.append(
+                "Binary sustain transitions were softened; existing continuous pedal streams were preserved."
+            )
         if changed_count:
             status_parts.append("Use Save to overwrite the originals, or Save As to write copies.")
         if errors:
@@ -22314,8 +23180,13 @@ class MidiTitleWindow(QMainWindow):
             )
             return
 
+        softening_requested = bool(options.get("soften_sustain_pedal"))
         progressDialog = QProgressDialog(
-            "Applying pedal compatibility...",
+            (
+                "Softening sustain pedal..."
+                if softening_requested
+                else "Applying pedal compatibility..."
+            ),
             "Cancel",
             0,
             len(rows),
@@ -22376,7 +23247,16 @@ class MidiTitleWindow(QMainWindow):
 
         status_parts = [f"Queued pedal compatibility changes for {changed_count} MIDI file(s)."]
         if unchanged_count:
-            status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+            if softening_requested:
+                status_parts.append(
+                    f"{unchanged_count} MIDI file(s) had no eligible binary CC64 stream; continuous or static pedal data was preserved."
+                )
+            else:
+                status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+        if softening_requested and changed_count:
+            status_parts.append(
+                "Binary sustain transitions were softened; existing continuous pedal streams were preserved."
+            )
         if self.image_session is not None:
             remaining = self._pending_image_space_remaining()
             status_parts.append(f"Estimated free space after pending changes: {display_bytes(max(0, remaining))}.")
@@ -22425,6 +23305,7 @@ class MidiTitleWindow(QMainWindow):
         filename = self._build_image_filename(
             f"{stem}{extension}",
             self._image_used_filenames_for_directory(directory, exclude_row=exclude_row),
+            enforce_dos83=(True if target_kind == "eseq" else None),
         )
         return self._join_image_path(directory, filename)
 
@@ -23616,10 +24497,16 @@ class MidiTitleWindow(QMainWindow):
     def _image_entry_for_path(self, image_path):
         return self.imageEntriesByPath.get(image_path)
 
-    def _prompt_for_image_filename(self, current_filename, *, dialog_title="Rename Image File"):
+    def _prompt_for_image_filename(
+        self,
+        current_filename,
+        *,
+        dialog_title="Rename Image File",
+        force_dos83=False,
+    ):
         dialog = QDialog(self)
         apply_window_icon(dialog)
-        dialog.setWindowTitle(dialog_title)
+        dialog.setWindowTitle(self._lt(dialog_title))
         dialog.setModal(True)
         dialog.setMinimumWidth(520)
         dialog_layout = QVBoxLayout(dialog)
@@ -23630,7 +24517,8 @@ class MidiTitleWindow(QMainWindow):
         editor.setMinimumWidth(480)
 
         dos83_checkbox = QCheckBox(self._lt("Use 8.3 filenames"))
-        dos83_checkbox.setChecked(self._dos83_filenames_enabled())
+        dos83_checkbox.setChecked(force_dos83 or self._dos83_filenames_enabled())
+        dos83_checkbox.setEnabled(not force_dos83)
         dos83_checkbox.setToolTip(
             self._lt(
                 "Restrict the filename to an eight-character name and three-character extension. "
@@ -23669,7 +24557,7 @@ class MidiTitleWindow(QMainWindow):
             )
             ok_button.setEnabled(validation_error is None and bool(normalized))
             warning_label.setVisible(bool(validation_error))
-            warning_label.setText(validation_error or "")
+            warning_label.setText(self._lt(validation_error) if validation_error else "")
 
         editor.textChanged.connect(update_state)
         dos83_checkbox.toggled.connect(lambda _checked: update_state(editor.text()))
@@ -23681,7 +24569,7 @@ class MidiTitleWindow(QMainWindow):
 
         if self._exec_child_dialog(dialog) == QDialog.Accepted:
             enforce_dos83 = dos83_checkbox.isChecked()
-            if enforce_dos83 != self._dos83_filenames_enabled():
+            if not force_dos83 and enforce_dos83 != self._dos83_filenames_enabled():
                 self.toggle_dos83_filenames(enforce_dos83)
             return self._normalize_image_filename(
                 editor.text(),
@@ -23743,6 +24631,9 @@ class MidiTitleWindow(QMainWindow):
         else:
             return True
 
+        if eseq_mode:
+            self._ensure_eseq_filenames_dos83_for_save()
+
         if not eseq_mode or (has_pianodir and pianodir_populated) or self.pendingGeneratePianodir:
             return True
 
@@ -23751,6 +24642,44 @@ class MidiTitleWindow(QMainWindow):
             refresh_callback()
             self.status_label.setText(f"{directory_name} will be generated on save.")
         return True
+
+    def _ensure_eseq_filenames_dos83_for_save(self):
+        """Stage compatible names before any E-SEQ set is written or exported."""
+        if self.is_image_mode():
+            for row in tuple(self._image_eseq_rows()):
+                path_item = self.table.item(row, 1)
+                if path_item is None:
+                    continue
+                source_path = path_item.text()
+                final_path = self._final_image_path(source_path)
+                current_name = os.path.basename(final_path)
+                if self._validate_image_filename(current_name, enforce_dos83=True) is None:
+                    continue
+                directory = os.path.dirname(final_path).replace("\\", "/")
+                used_names = self._image_used_filenames_for_directory(
+                    directory,
+                    exclude_row=row,
+                )
+                short_name = self._build_dos_image_filename(current_name, used_names)
+                self._stage_image_filename_change(row, short_name)
+            return
+
+        if not self.is_local_eseq_mode():
+            return
+        for row in tuple(self._regular_eseq_rows()):
+            path_item = self.table.item(row, 1)
+            if path_item is None:
+                continue
+            source_path = path_item.text()
+            current_name = self._regular_row_output_filename(row)
+            if self._validate_image_filename(current_name, enforce_dos83=True) is None:
+                continue
+            used_names = self._regular_used_output_filenames_for_directory(
+                os.path.dirname(source_path),
+                exclude_row=row,
+            )
+            short_name = self._build_dos_image_filename(current_name, used_names)
+            self._stage_regular_row_pending_rename(row, source_path, short_name)
 
     def _pianodir_can_be_generated_from_current_rows(self):
         if self.is_image_mode():
@@ -23821,8 +24750,13 @@ class MidiTitleWindow(QMainWindow):
             QMessageBox.information(self, "No Editable Title", "Only MIDI and E-SEQ files have editable title metadata.")
             return
 
+        catalog_backed = self._image_title_is_smart_pianosoft_catalog_backed(image_path)
         current_title = self._row_raw_title(row)
-        new_title, ok = self._prompt_for_title(current_title, title_mode=title_mode)
+        prompt_title_mode = "smart_pianosoft" if catalog_backed else title_mode
+        new_title, ok = self._prompt_for_title(
+            current_title,
+            title_mode=prompt_title_mode,
+        )
         if not ok or not new_title.strip():
             return
 
@@ -23836,9 +24770,30 @@ class MidiTitleWindow(QMainWindow):
         if title_mode == "eseq" and len(new_title.encode("latin1")) > 32:
             QMessageBox.warning(self, "Title Too Long", "E-SEQ titles must be 32 characters or fewer.")
             return
+        if catalog_backed and len(new_title.encode("cp1252")) > 32:
+            QMessageBox.warning(
+                self,
+                "Title Too Long",
+                "Yamaha Smart PianoSoft catalog titles must be 32 characters or fewer.",
+            )
+            return
 
-        self.pendingImageTitleEdits[image_path] = new_title
+        try:
+            title_destination = self._stage_image_title_edit(image_path, new_title)
+        except Exception as exc:
+            self._show_operation_error(
+                "Title Update Failed",
+                f"The title for {filename} could not be staged",
+                exc,
+                guidance="The image and MIDI file have not been changed",
+            )
+            return
         new_title_item = self._make_title_item(new_title, title_mode=title_mode, fallback_title=filename)
+        if catalog_backed:
+            new_title_item.setToolTip(
+                "Click to edit this Yamaha Smart PianoSoft title in PSONG.MNG. "
+                "The MIDI track-name event is left unchanged."
+            )
         self.table.setItem(row, 4, new_title_item)
         self._update_compat_indicator(row, new_title)
         self._reapply_image_centered_title_assumption()
@@ -23847,7 +24802,10 @@ class MidiTitleWindow(QMainWindow):
         warning = ""
         if self._compat_warning_is_active() and self._is_title_too_long(new_title):
             warning = f"\nCompatibility warning: over {self.TITLE_COMPAT_LIMIT} characters."
-        title_kind = "E-SEQ title" if title_mode == "eseq" else "MIDI title"
+        if title_destination == "smart_pianosoft_catalog":
+            title_kind = "Smart PianoSoft catalog title"
+        else:
+            title_kind = "E-SEQ title" if title_mode == "eseq" else "MIDI title"
         shown_title = self._display_title_text(new_title, title_mode=title_mode, fallback_title=filename)
         self.status_label.setText(
             f"Pending image change:\n{title_kind} for '{filename}' will be updated to '{shown_title}' on save.{warning}"
@@ -23866,16 +24824,25 @@ class MidiTitleWindow(QMainWindow):
 
         source_path = path_item.text()
         current_name = self._regular_row_output_filename(row)
+        force_dos83 = self._listed_file_title_mode(source_path) == "eseq"
         new_name, ok = self._prompt_for_image_filename(
             current_name,
             dialog_title="Rename File",
+            force_dos83=force_dos83,
         )
         if not ok or new_name == current_name:
             return
 
-        validation_error = self._validate_image_filename(new_name)
+        validation_error = self._validate_image_filename(
+            new_name,
+            enforce_dos83=(True if force_dos83 else None),
+        )
         if validation_error:
-            QMessageBox.warning(self, "Invalid Filename", validation_error)
+            QMessageBox.warning(
+                self,
+                self._lt("Invalid Filename"),
+                self._lt(validation_error),
+            )
             return
 
         plan = []
@@ -23898,7 +24865,7 @@ class MidiTitleWindow(QMainWindow):
         try:
             validate_midi_dos83_plan(plan)
         except Exception as exc:
-            QMessageBox.warning(self, "Name Already Exists", str(exc))
+            QMessageBox.warning(self, self._lt("Name Already Exists"), str(exc))
             return
 
         self._stage_regular_row_pending_rename(row, source_path, new_name)
@@ -23922,7 +24889,11 @@ class MidiTitleWindow(QMainWindow):
             return False
 
         if target_path.upper() in self._active_image_paths(exclude_row=row):
-            QMessageBox.warning(self, "Name Already Exists", f"'{new_name}' already exists in this image folder.")
+            QMessageBox.warning(
+                self,
+                self._lt("Name Already Exists"),
+                f"'{new_name}' already exists in this image folder.",
+            )
             return False
 
         if source_path in self.pendingImageAdditions:
@@ -23970,13 +24941,27 @@ class MidiTitleWindow(QMainWindow):
 
         source_path = path_item.text()
         current_name = os.path.basename(self._final_image_path(source_path))
-        new_name, ok = self._prompt_for_image_filename(current_name)
+        force_dos83 = self._is_eseq_candidate(
+            self._final_image_path(source_path),
+            is_midi=self._image_path_is_midi(source_path),
+        )
+        new_name, ok = self._prompt_for_image_filename(
+            current_name,
+            force_dos83=force_dos83,
+        )
         if not ok:
             return
 
-        validation_error = self._validate_image_filename(new_name)
+        validation_error = self._validate_image_filename(
+            new_name,
+            enforce_dos83=(True if force_dos83 else None),
+        )
         if validation_error:
-            QMessageBox.warning(self, "Invalid Filename", validation_error)
+            QMessageBox.warning(
+                self,
+                self._lt("Invalid Filename"),
+                self._lt(validation_error),
+            )
             return
 
         if not self._stage_image_filename_change(row, new_name):
@@ -24057,10 +25042,17 @@ class MidiTitleWindow(QMainWindow):
             return self._build_image_filename(
                 f"{stem}.{self._eseq_song_extension(self.imageEseqVariant)}",
                 used_paths,
+                enforce_dos83=True,
             )
         if conversion_kind == "midi":
             stem = os.path.splitext(os.path.basename(host_path))[0] or "FILE"
             return self._build_image_filename(f"{stem}.MID", used_paths)
+        if is_eseq_file(host_path):
+            return self._build_image_filename(
+                os.path.basename(host_path),
+                used_paths,
+                enforce_dos83=True,
+            )
         return self._build_default_image_filename(host_path, used_paths)
 
     def _stage_image_addition_host_file(self, host_path, target_name="", conversion_kind=""):
@@ -24665,7 +25657,7 @@ class MidiTitleWindow(QMainWindow):
         dialog_layout.setContentsMargins(12, 10, 12, 10)
         dialog_layout.setSpacing(8)
         dialog_layout.setSizeConstraint(QLayout.SetFixedSize)
-        enforce_eseq_limit = title_mode == "eseq"
+        enforce_eseq_limit = title_mode in {"eseq", "smart_pianosoft"}
         use_screen_format = bool(
             getattr(self, "format_disklavier_checkbox", None)
             and self.format_disklavier_checkbox.isChecked()
@@ -25083,6 +26075,8 @@ class MidiTitleWindow(QMainWindow):
             self.pendingImageDeletes.clear()
             self.pendingImageAdditions.clear()
             self.pendingImageReplacements.clear()
+            self.pendingSmartPianoSoftTitleEdits.clear()
+            self.pendingSmartPianoSoftCatalogReplacement = ""
             self.pendingGeneratePianodir = False
             self.pendingDeletePianodir = False
             progress_callback(5, 5, "Reloading floppy view...")
@@ -25166,6 +26160,8 @@ class MidiTitleWindow(QMainWindow):
         self.pendingImageDeletes.clear()
         self.pendingImageAdditions.clear()
         self.pendingImageReplacements.clear()
+        self.pendingSmartPianoSoftTitleEdits.clear()
+        self.pendingSmartPianoSoftCatalogReplacement = ""
         self.pendingGeneratePianodir = False
         self.pendingDeletePianodir = False
 
@@ -26244,7 +27240,11 @@ class MidiTitleWindow(QMainWindow):
             if _notify is not None:
                 _notify(index - 1, max(1, row_count), f"Preparing {display_name} for image export...")
 
-            image_name = self._build_image_filename(display_name, used_names)
+            image_name = self._build_image_filename(
+                display_name,
+                used_names,
+                enforce_dos83=(True if self.is_local_eseq_mode() else None),
+            )
             used_names.add(image_name.upper())
             staged_path = os.path.join(
                 temp_dir,
@@ -26771,6 +27771,14 @@ class MidiTitleWindow(QMainWindow):
                         self.listedFileInfo[full_path]["order_key"] = normalize_eseq_order_key(order_key)
             self.pendingEdits.clear()
 
+        renamed_count = 0
+        _rename_backup_count = 0
+        if not errors and has_pending_renames:
+            rename_errors, renamed_count, _rename_backup_count = self._save_pending_regular_renames(
+                skip_backup_paths=backup_created_for,
+            )
+            errors.extend(rename_errors)
+
         if not errors and should_write_local_pianodir:
             try:
                 output_path = self._write_regular_pianodir()
@@ -26782,14 +27790,6 @@ class MidiTitleWindow(QMainWindow):
                 self._refresh_regular_pianodir_row()
             except Exception as exc:
                 errors.append(f"Could not write {self._eseq_directory_filename(self.regularEseqVariant)}: {exc}")
-
-        renamed_count = 0
-        _rename_backup_count = 0
-        if not errors and has_pending_renames:
-            rename_errors, renamed_count, _rename_backup_count = self._save_pending_regular_renames(
-                skip_backup_paths=backup_created_for,
-            )
-            errors.extend(rename_errors)
 
         if not errors and should_write_tag_sidecars:
             errors.extend(self._write_tag_sidecars_for_regular_rows())

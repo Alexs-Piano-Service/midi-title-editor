@@ -19,7 +19,15 @@ from .floppy_image import (
     FloppyOperationCancelled,
     is_supported_image_path,
 )
+from .long_midi_filename import build_long_midi_filename
 from .message_catalog import tr
+from .midi_metadata import (
+    is_midi_file,
+    normalize_title_spacing,
+    read_eseq_title_from_file,
+    read_first_title_from_midi,
+)
+from .smart_pianosoft import smart_pianosoft_catalog_from_session
 
 
 _INVALID_FOLDER_CHARS = '<>:"/\\|?*'
@@ -132,11 +140,24 @@ def _relative_key(parts):
     return "/".join(parts).casefold()
 
 
-def _available_midi_path(image_output_directory, source_parts, reserved_keys):
+def _available_midi_path(
+    image_output_directory,
+    source_parts,
+    reserved_keys,
+    *,
+    preferred_filename="",
+):
     source_filename = source_parts[-1]
     source_stem = os.path.splitext(source_filename)[0] or source_filename or "song"
     parent_parts = source_parts[:-1]
-    candidates = [f"{source_stem}.mid", f"{source_stem}_converted.mid"]
+    preferred_filename = os.path.basename(str(preferred_filename or "").strip())
+    if preferred_filename:
+        preferred_stem = os.path.splitext(preferred_filename)[0] or source_stem
+        candidates = [preferred_filename, f"{preferred_stem}_converted.mid"]
+        collision_stem = preferred_stem
+    else:
+        candidates = [f"{source_stem}.mid", f"{source_stem}_converted.mid"]
+        collision_stem = source_stem
     suffix = 2
     while True:
         for filename in candidates:
@@ -146,7 +167,7 @@ def _available_midi_path(image_output_directory, source_parts, reserved_keys):
             if key not in reserved_keys and not os.path.lexists(path):
                 reserved_keys.add(key)
                 return path
-        candidates = [f"{source_stem}_converted_{suffix}.mid"]
+        candidates = [f"{collision_stem}_converted_{suffix}.mid"]
         suffix += 1
 
 
@@ -156,6 +177,8 @@ def bulk_extract_images(
     *,
     convert_eseq=False,
     include_eseq_sources=False,
+    long_midi_filenames=False,
+    trim_title_spaces=False,
     use_album_names=False,
     progress_callback=None,
     progress_detail_callback=None,
@@ -163,6 +186,7 @@ def bulk_extract_images(
     session_loader=None,
     eseq_detector=None,
     eseq_converter=None,
+    eseq_title_reader=None,
     language_code=None,
 ):
     """Extract every file from every supported image directly in a folder.
@@ -199,6 +223,7 @@ def bulk_extract_images(
     session_loader = session_loader or FloppyImageSession.load
     eseq_detector = eseq_detector or is_eseq_file
     eseq_converter = eseq_converter or convert_eseq_file_to_midi_path
+    eseq_title_reader = eseq_title_reader or read_eseq_title_from_file
     errors = []
     output_directories = []
     used_folder_names = set()
@@ -255,6 +280,10 @@ def bulk_extract_images(
             _raise_if_cancelled(cancel_callback)
             entries = list(session.list_entries().entries)
             entry_total = len(entries)
+            smart_pianosoft_song_catalog = smart_pianosoft_catalog_from_session(
+                session,
+                entries,
+            )
             for warning in getattr(session, "conversion_warnings", ()) or ():
                 errors.append(f"{image_name}: {warning}")
             preferred_name = os.path.splitext(image_name)[0] or image_name
@@ -279,6 +308,8 @@ def bulk_extract_images(
                 entry_parts[id(entry)] = parts
                 reserved_keys.add(_relative_key(parts))
 
+            converted_song_number = 0
+            extracted_midi_number = 0
             for file_index, entry in enumerate(entries, start=1):
                 _raise_if_cancelled(cancel_callback)
                 parts = entry_parts.get(id(entry))
@@ -319,10 +350,34 @@ def bulk_extract_images(
 
                 written_paths = []
                 if convert_entry:
+                    converted_song_number += 1
+                    source_title = ""
+                    title_read_successfully = False
+                    if long_midi_filenames or trim_title_spaces:
+                        try:
+                            source_title = str(eseq_title_reader(extracted_path) or "")
+                            title_read_successfully = True
+                        except Exception as exc:
+                            errors.append(
+                                f"{image_name} / {entry.path} (E-SEQ title): {exc}"
+                            )
+                    conversion_title = (
+                        normalize_title_spacing(source_title)
+                        if trim_title_spaces
+                        else source_title
+                    )
+                    preferred_filename = ""
+                    if long_midi_filenames:
+                        preferred_filename = build_long_midi_filename(
+                            converted_song_number,
+                            conversion_title,
+                            parts[-1],
+                        )
                     midi_path = _available_midi_path(
                         image_output_directory,
                         parts,
                         reserved_keys,
+                        preferred_filename=preferred_filename,
                     )
                     notify(
                         image_index,
@@ -336,12 +391,51 @@ def bulk_extract_images(
                     )
                     try:
                         os.makedirs(os.path.dirname(midi_path), exist_ok=True)
-                        eseq_converter(extracted_path, midi_path)
+                        if trim_title_spaces and title_read_successfully:
+                            eseq_converter(
+                                extracted_path,
+                                midi_path,
+                                title_override=conversion_title,
+                            )
+                        else:
+                            eseq_converter(extracted_path, midi_path)
                         files_converted += 1
                         written_paths.append(midi_path)
                     except Exception as exc:
                         errors.append(f"{image_name} / {entry.path} (E-SEQ conversion): {exc}")
                         continue
+
+                if not convert_entry and long_midi_filenames:
+                    try:
+                        rename_midi_entry = is_midi_file(extracted_path)
+                    except Exception:
+                        rename_midi_entry = False
+                    if rename_midi_entry:
+                        extracted_midi_number += 1
+                        catalog_song = smart_pianosoft_song_catalog.get(
+                            os.path.basename(str(entry.path or "")).casefold()
+                        )
+                        if catalog_song is not None:
+                            track_number = catalog_song.track_number
+                            midi_title = catalog_song.title
+                        else:
+                            track_number = extracted_midi_number
+                            try:
+                                midi_title = read_first_title_from_midi(extracted_path)
+                            except Exception:
+                                midi_title = ""
+                        long_filename = build_long_midi_filename(
+                            track_number,
+                            normalize_title_spacing(midi_title),
+                            parts[-1],
+                        )
+                        reserved_keys.discard(_relative_key(parts))
+                        destination_path = _available_midi_path(
+                            image_output_directory,
+                            parts,
+                            reserved_keys,
+                            preferred_filename=long_filename,
+                        )
 
                 if not convert_entry or include_eseq_sources:
                     try:

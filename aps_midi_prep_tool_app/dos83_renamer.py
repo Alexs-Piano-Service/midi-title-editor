@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 _DOS_BASE_LENGTH = 8
 _PADDING_TEXT = "DKSONG"
+_DOS83_INVALID_CHARS = set('\\/:*?"<>|+,;=[]')
 
 
 @dataclass(frozen=True)
@@ -13,6 +14,21 @@ class RenameResult:
     renamed: list[tuple[str, str]]
     unchanged: list[str]
     backups_created: list[str]
+
+
+def is_dos83_filename(filename):
+    """Return whether a basename follows the app's Yamaha-safe DOS 8.3 rules."""
+    name = str(filename or "").replace("\\", "/").rsplit("/", 1)[-1]
+    if not name or name in {".", ".."} or name.endswith(".") or " " in name:
+        return False
+    if any(ord(char) < 0x21 or ord(char) > 0x7E for char in name):
+        return False
+    if any(char in _DOS83_INVALID_CHARS for char in name):
+        return False
+    stem, extension = os.path.splitext(name)
+    if not stem or stem.startswith(".") or "." in stem:
+        return False
+    return len(stem) <= _DOS_BASE_LENGTH and len(extension.lstrip(".")) <= 3
 
 
 def _normalize_path_key(path):

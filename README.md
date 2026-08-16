@@ -4,7 +4,7 @@ APS MIDI Prep Tool is a modern Disklavier preservation and preparation
 workstation for MIDI files, Yamaha E-SEQ files, floppy images, and physical
 floppy disks.
 
-Current version: `0.6.12`
+Current version: `0.8.0`
 
 Author: Alexander Peppe
 
@@ -24,10 +24,14 @@ before you write anything back.
 - Opens MIDI folders, Yamaha E-SEQ folders, floppy images, and physical floppies.
 - Reads common floppy-image formats supported through Greaseweazle conversion,
   including IMG/BIN-style raw images and HFE workflows.
+- Uses Yamaha Smart PianoSoft `PSONG.MNG` catalogs as the authoritative source
+  for song titles and playback order when opening compatible images or
+  floppies. Editing a catalog-backed title updates `PSONG.MNG` while leaving
+  the MIDI track-name event unchanged.
 - Recognizes PianoDisc System 3 IMG/BIN-style and HFE floppy images and decodes
   their non-FAT song catalog and performance streams to piano SMF0 files. The
-  outputs use track-number/title filenames, and the source image stays
-  unchanged.
+  outputs use DOS 8.3 filenames by default, with an optional remembered choice
+  for track-number/title names, and the source image stays unchanged.
 - Reads and writes physical floppies using a normal floppy drive or Greaseweazle.
 - Shows Greaseweazle sector-map previews after reads, writes, and image conversions
   so good and bad sector positions can be reviewed visually.
@@ -45,6 +49,9 @@ before you write anything back.
   or as a batch utility.
 - Converts MIDI Type 1 / SMF1 files to MIDI Type 0 / SMF0, with an optional
   one-piano mode that combines instruments on MIDI channel 1.
+- Softens binary sustain-pedal CC64 into continuous S-curve motion for one
+  selected song or every listed MIDI song as a batch, while preserving existing
+  continuous pedal streams.
 - Converts Yamaha E-SEQ `.FIL` files to standard MIDI, optionally naming folder
   outputs from track order and song title.
 - Extracts Akai MPC `.SEQ` files and embedded sequences in MPC `.ALL` files,
@@ -68,6 +75,9 @@ before you write anything back.
   MIDI while preserving millisecond timing and SysEx events.
 - Converts MIDI to Yamaha E-SEQ, converting Type 1 MIDI to Type 0 first when needed.
 - Generates and refreshes `PIANODIR.FIL` for Yamaha E-SEQ disks and folders.
+- Builds a numbered emulator disk set from MIDI and Yamaha E-SEQ songs. Each
+  disk set contains either only Standard MIDI or only E-SEQ; E-SEQ sets receive
+  a disk-specific `PIANODIR.FIL` on every image.
 - Stages destructive or format-changing work until you choose `File > Save`,
   `File > Save As...`, `File > Save As ZIP...`, `File > Save As Image...`, or
   `Disk > Write Current Image to Floppy...`.
@@ -141,20 +151,59 @@ capture.
 2. Select the folder containing the images and an output folder.
 3. Choose whether each output subfolder should use the image filename or the
    album title stored in `PIANODIR.FIL` when one is available.
-4. Optionally enable MIDI-only E-SEQ conversion.
-5. Choose `Extract`.
+4. Choose whether MIDI files should be named by track number and song title.
+   This applies both to MIDI already stored in an image and to MIDI created by
+   E-SEQ conversion.
+5. Optionally enable MIDI-only E-SEQ conversion. Its dependent options remove
+   excess title spacing (enabled by default) and retain the original
+   E-SEQ/Yamaha directory files.
+6. Choose `Extract`.
 
 Every supported image directly inside the selected folder gets a separate
 output subfolder. Internal image paths are preserved. Existing output folders
 are not overwritten. With conversion enabled, detected E-SEQ songs are replaced
 by MIDI files; original E-SEQ, `PIANODIR.FIL`, and `MUSIC.DIR` files are not
-written by default. Enable `Also include original E-SEQ and Yamaha directory
-files` when those source files should accompany the converted MIDI. Other files
-from each image are still extracted. A stable progress window shows overall
-image progress and progress within the current image.
+written by default. Descriptive MIDI filenames use names such as `01 - Moon
+River.mid`, numbered independently within each image. For Yamaha Smart
+PianoSoft images, `PSONG.MNG` catalog titles are preferred over blank or generic
+embedded MIDI track names. The same catalog-first behavior is used when an
+image or floppy is opened normally. E-SEQ title cleanup removes leading,
+trailing, and repeated spaces before embedding the title in MIDI and before
+building a descriptive filename. Enable `Also include original E-SEQ and Yamaha
+directory files` when those source files should accompany the converted MIDI.
+Other files from each image are still extracted. A stable progress window shows
+overall image progress and progress within the current image.
 
 PianoDisc System 3 images are read-only sources and are always extracted as
 decoded MIDI songs; they do not need the optional E-SEQ conversion setting.
+
+### Build Emulator Disk Sets
+
+1. Choose `Utilities > Build Emulator Disk Set...`.
+2. Select any folder containing MIDI or Yamaha E-SEQ song files and choose the
+   output folder. Subfolders are included by default.
+3. Choose the disk contents: `Yamaha E-SEQ (with PIANODIR.FIL)` or `Standard
+   MIDI (MIDI files only)`.
+4. Enter the image-set name. For E-SEQ, optionally enter the Yamaha album title
+   and catalog number used in each directory file.
+5. Choose raw IMG or HFE output and the virtual floppy size. The default is the
+   common Yamaha 720K DD format.
+6. Choose `Build Disk Set`.
+
+The utility converts each song only when necessary, assigns unique DOS 8.3
+names, and fills as many images as needed. E-SEQ output contains `.FIL` songs
+and a `PIANODIR.FIL` built only from the songs on that image; source MIDI files
+are not included. E-SEQ disks enforce the 60-song limit as well as FAT12
+capacity. MIDI output contains only `.MID` songs, converts E-SEQ sources when
+needed, and does not add a Yamaha directory file. Every image's file list is
+verified before output is committed. One image uses the set name directly;
+multi-image output is numbered `_01`, `_02`, and so on. Existing image files
+are never overwritten.
+
+Raw IMG is the most broadly useful emulator interchange format. HFE output uses
+Greaseweazle conversion support and is suitable for HxC/Nalbantov-style
+workflows. Vendor-specific slot names and USB-stick setup files are outside the
+disk image, so copy or rename the finished images as required by the emulator.
 
 ### Save Safely
 
@@ -179,8 +228,12 @@ spill across multiple images, and does not affect floppy writes.
 
 ### Prepare A Nalbantov USB Stick Image
 
-1. Open an existing HFE image with `File > Open > Open Image...`, or use
-   `File > New Image...`.
+For a whole folder of songs, use `Utilities > Build Emulator Disk Set...` and
+choose E-SEQ disk contents with HFE image output. For one image that you want
+to edit manually:
+
+1. Open an existing HFE image with `File > Open > Open Image...`, or use `File
+   > New Image...`.
 2. Use the default 720K E-SEQ image settings for PianoSoft-style disks.
 3. Drag MIDI or E-SEQ files into the table.
 4. In E-SEQ image mode, dropped MIDI files are staged as E-SEQ conversions.
@@ -212,13 +265,32 @@ Pedal channels are preserved by default.
 ### Apply Pedal Compatibility To MIDI Files
 
 Choose `Utilities > Apply Pedal Compatibility...` when you need an explicit
-compatibility transform on listed MIDI files. The utility stages changes for
-save, so originals are not modified until you use `Save`, `Save As`, or save
-the current image/floppy session. Available transforms include repairing
-controller-only legacy Disklavier channel-3 pedal lanes, converting pedal
-controllers to on/off values, cleaning duplicate or stuck pedal events, and
-adding Piano Roll Vector note-18 sustain markers. All options start unchecked
-because binary values and cleanup can remove half-pedal or archival detail.
+compatibility transform on listed MIDI files. Choose one song in the `Apply To`
+list, or choose all listed MIDI songs to run a batch. The utility stages changes
+for save, so originals are not modified until you use `Save`, `Save As`, or save
+the current image/floppy session.
+
+Available transforms include remapping controller-only legacy Disklavier pedal
+data from channel 3 to channel 1, converting pedal controllers to on/off values,
+cleaning duplicate or stuck pedal events, adding Piano Roll Vector note-18 sustain
+markers, and softening binary CC64 sustain. All options start unchecked because
+compatibility transforms can alter half-pedal or archival detail.
+
+Pedal softening offers four motion choices:
+
+- **Quick:** 55 ms pedal down / 85 ms release.
+- **Natural:** 100 ms pedal down / 180 ms release.
+- **Slow:** 180 ms pedal down / 320 ms release.
+- **Custom:** independent pedal-down and release timing from 20 to 2000 ms.
+
+Only binary sustain streams are softened. Existing continuous streams in mixed
+files, static CC64 data, and files without useful sustain transitions are left
+unchanged. Each original binary transition remains the threshold event: pedal
+down writes value 64 at the original tick, while release writes value 63 at the
+original tick. Intermediate values form smooth S-curves around those events,
+which retains standard switch-pedal timing while adding gradual motion for
+continuous and half-pedal-capable playback systems. Pedal softening supports
+Standard MIDI File Types 0, 1, and 2, PPQN tempo maps, and SMPTE divisions.
 
 ### Convert Between MIDI And E-SEQ
 
@@ -238,10 +310,16 @@ because binary values and cleanup can remove half-pedal or archival detail.
   `01 - Moon River.mid`. The choice is remembered for future conversions and
   floppy reads. `Utilities > Name MIDI Files from Song Titles` can stage the
   same naming independently for already-converted MIDI files. In floppy/image
-  mode, these descriptive names are queued inside the image too, unless
-  `Settings > Use 8.3 filenames` is checked; with that compatibility option
-  enabled, the descriptive names are used only for folder exports. The same
-  option is available in filename rename dialogs.
+  mode, these descriptive names are queued inside the image too. The remembered
+  conversion choice and `Settings > Use 8.3 filenames` are inverse preferences:
+  enabling 8.3 naming defaults descriptive conversion names off, while choosing
+  track-number/title names turns 8.3 naming off. The 8.3 option is also
+  available in filename rename dialogs.
+- E-SEQ song filenames are always restricted to DOS 8.3 for Yamaha
+  compatibility, even when `Use 8.3 filenames` is off. The app shortens
+  converted, imported, renamed, and externally supplied E-SEQ names before
+  writing or exporting them; the setting only relaxes naming for MIDI and
+  other ordinary files.
 - `PIANODIR.FIL` is generated or refreshed on save when needed.
 - `File > Save Options > Create Album Subfolder` controls whether folder
   exports use the current album title and catalog number for a subfolder.
@@ -255,7 +333,12 @@ Use `Utilities > File Inspection...`, or double-click a song's `Type` field.
 The inspection window shows a piano roll, metadata, tracks, channels, controller
 notes, selectable channels, position control, and playback preview. Channel
 selectors use the same colors as their piano-roll notes, forming a compact
-legend. Tempo can be changed from 5%-400% while a preview is playing.
+legend. For readability, repeated and edge spaces are collapsed in titles in
+the left-hand file list only; source title metadata is not changed. Tempo can
+be changed from 5%-400% while a preview is playing.
+The details panel classifies CC64 sustain-pedal data as binary, mixed,
+continuous, static, or not detected; binary streams are eligible for the Pedal
+Compatibility softening transform.
 Instrument choices are grouped by General MIDI family and can be found by
 typing part of a name; changes do not edit the source and take effect without
 returning to the beginning. Channel checkboxes likewise mute and restore
@@ -401,9 +484,24 @@ command from a terminal:
 make appimage
 ```
 
-The build writes the versioned AppImage to `release/`. It bundles the APS icon
-for Qt to use in the window title bar and installs the same artwork as the
-AppImage desktop, launcher, and directory icon.
+The build writes the versioned AppImage and a matching `.sha256` checksum to
+`release/`. It bundles the APS icon for Qt to use in the window title bar and
+installs the same artwork as the AppImage desktop, launcher, and directory
+icon.
+
+## Prepare a Release
+
+Keep the version in `aps_midi_prep_tool_app/app_info.py`, the current version
+near the top of this README, and the newest dated section in `CHANGELOG.md`
+in sync. Then run the local release gate:
+
+```bash
+make release-check
+```
+
+This checks Python syntax, the full test suite, release-version consistency,
+translation coverage and placeholders, patch whitespace, and the AppImage build
+script's shell syntax. Build the distributable afterward with `make appimage`.
 
 ## Update Checks
 

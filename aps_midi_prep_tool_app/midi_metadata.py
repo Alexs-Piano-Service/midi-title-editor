@@ -1,4 +1,5 @@
 import os
+import re
 
 from .eseq_converter import (
     is_clavinova_mda_eseq_bytes,
@@ -23,6 +24,14 @@ _LEGACY_TITLE_MAX_CODEPOINT = 0x7E
 _ESEQ_TITLE_START = 0x57
 _ESEQ_TITLE_END = 0x76
 _ESEQ_TITLE_LENGTH = _ESEQ_TITLE_END - _ESEQ_TITLE_START + 1
+
+
+def normalize_title_spacing(title):
+    """Return a title with Disklavier splits and excess spacing cleaned up."""
+    text = str(title or "").replace("\x00", " ")
+    if len(text) > 16 and text[15].islower() and text[16].isupper():
+        text = f"{text[:16]} {text[16:]}"
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _extract_midi_format_type(midi_bytes):
@@ -350,25 +359,28 @@ def _set_first_title_in_midi_bytes(midi_bytes, new_title):
     patched.extend(title_track_chunk)
     return bytes(patched)
 
+def read_first_title_from_midi(midi_path):
+    """Read the first MIDI track name, allowing format and I/O errors to propagate."""
+    with open(midi_path, "rb") as f:
+        midi_bytes = f.read()
+
+    _, chunks = _parse_midi_chunks(midi_bytes)
+    for chunk in chunks:
+        if chunk["id"] != b"MTrk":
+            continue
+        track_data = midi_bytes[chunk["data_start"]:chunk["data_end"]]
+        title_event = _find_first_track_name_event(track_data)
+        if title_event is None:
+            continue
+
+        title_bytes = track_data[title_event["payload_start"]:title_event["payload_end"]]
+        return _decode_title_bytes(title_bytes)
+    return ""
+
+
 def extract_first_title_from_midi(midi_path):
     try:
-        with open(midi_path, "rb") as f:
-            midi_bytes = f.read()
-
-        _, chunks = _parse_midi_chunks(midi_bytes)
-        result = ""
-        for chunk in chunks:
-            if chunk["id"] != b"MTrk":
-                continue
-            track_data = midi_bytes[chunk["data_start"]:chunk["data_end"]]
-            title_event = _find_first_track_name_event(track_data)
-            if title_event is None:
-                continue
-
-            title_bytes = track_data[title_event["payload_start"]:title_event["payload_end"]]
-            result = _decode_title_bytes(title_bytes)
-            break
-
+        result = read_first_title_from_midi(midi_path)
         print(f"extract: {os.path.basename(midi_path)} => '{result}'")
         return result
     except Exception as e:
@@ -376,16 +388,21 @@ def extract_first_title_from_midi(midi_path):
         return f"Error reading MIDI title from {os.path.basename(midi_path)}: {e}"
 
 
+def read_eseq_title_from_file(file_path):
+    """Read an E-SEQ title, allowing format and I/O errors to propagate."""
+    with open(file_path, "rb") as f:
+        return _extract_eseq_title_from_bytes(f.read())
+
+
 def extract_eseq_title_from_file(file_path):
     try:
-        with open(file_path, "rb") as f:
-            data = f.read()
-        result = _extract_eseq_title_from_bytes(data)
+        result = read_eseq_title_from_file(file_path)
         print(f"extract eseq: {os.path.basename(file_path)} => '{result}'")
         return result
     except Exception as e:
         print(f"Error extracting E-SEQ title from {file_path}: {e}")
         return f"Error reading E-SEQ title from {os.path.basename(file_path)}: {e}"
+
 
 def update_midi_title(midi_path, new_title):
     try:

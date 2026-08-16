@@ -1,7 +1,9 @@
 import os
 import shutil
 import uuid
+from bisect import bisect_right
 from dataclasses import dataclass
+from math import ceil
 
 
 _SYSTEM_MESSAGE_DATA_LENGTHS = {
@@ -24,6 +26,10 @@ VIRTUAL_PIANO_ROLL_SUSTAIN_NOTE = 18
 VIRTUAL_PIANO_ROLL_SUSTAIN_VELOCITY = 1
 MIDI_BANK_SELECT_CONTROLLERS = {0, 32}
 MIDI_CHANNEL_MODE_CONTROLLERS = set(range(120, 128))
+SUSTAIN_PEDAL_CONTROLLER = 64
+SUSTAIN_PEDAL_ON_THRESHOLD = 64
+DEFAULT_MIDI_TEMPO_US = 500000
+DEFAULT_PEDAL_RAMP_STEP_MS = 12
 
 
 @dataclass(frozen=True)
@@ -454,6 +460,490 @@ def add_virtual_piano_roll_pedal_notes_to_midi_events(events, *, end_tick=None):
     return output, changed
 
 
+def _tempo_from_raw_midi_event(raw):
+    if len(raw) < 6 or raw[:2] != b"\xFF\x51":
+        return None
+    try:
+        payload_length, payload_start = _parse_vlq(raw, 2, len(raw))
+    except ValueError:
+        return None
+    payload_end = payload_start + payload_length
+    if payload_length != 3 or payload_end > len(raw):
+        return None
+    tempo = int.from_bytes(raw[payload_start:payload_end], "big")
+    return tempo if tempo > 0 else None
+
+
+class _MidiTimeMap:
+    def __init__(self, division, tempo_events):
+        self.division = int(division)
+        self.smpte = bool(self.division & 0x8000)
+        self.segment_ticks = []
+        self.segment_milliseconds = []
+        self.segment_tempos = []
+
+        if self.smpte:
+            raw_frames = (self.division >> 8) & 0xFF
+            signed_frames = raw_frames - 0x100 if raw_frames >= 0x80 else raw_frames
+            frame_code = abs(signed_frames)
+            frames_per_second = 29.97 if frame_code == 29 else frame_code
+            ticks_per_frame = self.division & 0xFF
+            if not frames_per_second or not ticks_per_frame:
+                raise ValueError("The MIDI file contains an invalid SMPTE time division.")
+            self.ticks_per_second = frames_per_second * ticks_per_frame
+            return
+
+        self.ppqn = self.division & 0x7FFF
+        if not self.ppqn:
+            raise ValueError("The MIDI file contains an invalid time division of zero.")
+
+        tempo_by_tick = {}
+        for tick, track_index, order, tempo in sorted(
+            tempo_events,
+            key=lambda item: (item[0], item[1], item[2]),
+        ):
+            tempo_by_tick[int(tick)] = int(tempo)
+
+        current_tick = 0
+        current_milliseconds = 0.0
+        current_tempo = tempo_by_tick.get(0, DEFAULT_MIDI_TEMPO_US)
+        self.segment_ticks.append(0)
+        self.segment_milliseconds.append(0.0)
+        self.segment_tempos.append(current_tempo)
+
+        for tick in sorted(value for value in tempo_by_tick if value > 0):
+            current_milliseconds += (
+                (tick - current_tick) * current_tempo / self.ppqn / 1000.0
+            )
+            current_tick = tick
+            current_tempo = tempo_by_tick[tick]
+            self.segment_ticks.append(current_tick)
+            self.segment_milliseconds.append(current_milliseconds)
+            self.segment_tempos.append(current_tempo)
+
+    def tick_to_milliseconds(self, tick):
+        safe_tick = max(0.0, float(tick or 0))
+        if self.smpte:
+            return safe_tick * 1000.0 / self.ticks_per_second
+        index = max(0, bisect_right(self.segment_ticks, safe_tick) - 1)
+        return self.segment_milliseconds[index] + (
+            (safe_tick - self.segment_ticks[index])
+            * self.segment_tempos[index]
+            / self.ppqn
+            / 1000.0
+        )
+
+    def milliseconds_to_tick(self, milliseconds):
+        safe_milliseconds = max(0.0, float(milliseconds or 0))
+        if self.smpte:
+            return safe_milliseconds * self.ticks_per_second / 1000.0
+        index = max(
+            0,
+            bisect_right(self.segment_milliseconds, safe_milliseconds) - 1,
+        )
+        return self.segment_ticks[index] + (
+            (safe_milliseconds - self.segment_milliseconds[index])
+            * 1000.0
+            * self.ppqn
+            / self.segment_tempos[index]
+        )
+
+
+def _pedal_softening_time_maps(format_type, division, track_event_groups):
+    all_tempo_events = []
+    per_track_tempo_events = [[] for _ in track_event_groups]
+    for track_index, track_info in enumerate(track_event_groups):
+        for tick, order, raw in track_info["events"]:
+            tempo = _tempo_from_raw_midi_event(raw)
+            if tempo is None:
+                continue
+            event = (tick, track_index, order, tempo)
+            all_tempo_events.append(event)
+            per_track_tempo_events[track_index].append(event)
+
+    return [
+        _MidiTimeMap(
+            division,
+            per_track_tempo_events[track_index]
+            if format_type == 2
+            else all_tempo_events,
+        )
+        for track_index in range(len(track_event_groups))
+    ]
+
+
+def _compact_pedal_values(events):
+    values = []
+    for _tick, _order, raw in events:
+        value = raw[2]
+        if not values or values[-1] != value:
+            values.append(value)
+    return values
+
+
+def _has_monotonic_pedal_ramp(values):
+    if len(values) < 4:
+        return False
+
+    for start in range(len(values) - 3):
+        direction = 0
+        minimum = values[start]
+        maximum = values[start]
+        count = 1
+        for index in range(start + 1, len(values)):
+            difference = values[index] - values[index - 1]
+            if difference == 0:
+                continue
+            next_direction = 1 if difference > 0 else -1
+            if direction == 0:
+                direction = next_direction
+            elif next_direction != direction:
+                break
+            minimum = min(minimum, values[index])
+            maximum = max(maximum, values[index])
+            count += 1
+            if (
+                count >= 4
+                and maximum - minimum >= 28
+                and any(3 < value < 124 for value in values[start:index + 1])
+            ):
+                return True
+    return False
+
+
+def _pedal_state_transitions(events):
+    transitions = []
+    state = 0
+    for event in events:
+        next_state = 1 if event[-1][2] >= SUSTAIN_PEDAL_ON_THRESHOLD else 0
+        if next_state == state:
+            continue
+        transitions.append({"event": event, "from": state, "to": next_state})
+        state = next_state
+    return transitions
+
+
+def _classify_pedal_stream(events):
+    compact_values = _compact_pedal_values(events)
+    unique_values = sorted(set(compact_values))
+    transitions = _pedal_state_transitions(events)
+    if not transitions:
+        return "static", unique_values, transitions
+
+    intermediate_values = [value for value in unique_values if 3 < value < 124]
+    looks_continuous = (
+        _has_monotonic_pedal_ramp(compact_values)
+        or len(intermediate_values) >= 3
+        or len(unique_values) >= 6
+    )
+    return (
+        "continuous" if looks_continuous else "binary",
+        unique_values,
+        transitions,
+    )
+
+
+def _pedal_softening_streams(track_event_groups, time_maps):
+    streams = []
+    for track_index, track_info in enumerate(track_event_groups):
+        events_by_channel = {}
+        for event in track_info["events"]:
+            raw = event[-1]
+            if not _is_sustain_controller(raw):
+                continue
+            events_by_channel.setdefault(raw[0] & 0x0F, []).append(event)
+
+        for channel, events in sorted(events_by_channel.items()):
+            events.sort(key=lambda item: (item[0], item[1]))
+            classification, unique_values, transitions = _classify_pedal_stream(events)
+            streams.append(
+                {
+                    "track_index": track_index,
+                    "channel": channel,
+                    "events": events,
+                    "classification": classification,
+                    "unique_values": unique_values,
+                    "transitions": transitions,
+                    "time_map": time_maps[track_index],
+                }
+            )
+    return streams
+
+
+def analyze_pedal_softening_midi_bytes(midi_bytes):
+    """Describe which sustain-pedal streams can safely be softened."""
+    _header_end, format_type, _, chunks = _parse_midi_chunks(midi_bytes)
+    if format_type not in (0, 1, 2):
+        raise ValueError(f"MIDI format {format_type} is not a Standard MIDI File type.")
+    track_chunks = [chunk for chunk in chunks if chunk["id"] == b"MTrk"]
+    if not track_chunks:
+        raise ValueError("No track chunks were found in this MIDI file.")
+    division = int.from_bytes(midi_bytes[12:14], "big")
+    track_event_groups, _max_end_tick = _read_track_event_groups(
+        midi_bytes,
+        track_chunks,
+    )
+    time_maps = _pedal_softening_time_maps(
+        format_type,
+        division,
+        track_event_groups,
+    )
+    streams = _pedal_softening_streams(track_event_groups, time_maps)
+    counts = {
+        kind: sum(stream["classification"] == kind for stream in streams)
+        for kind in ("binary", "continuous", "static")
+    }
+    if counts["binary"] and counts["continuous"]:
+        classification = "mixed"
+    elif counts["binary"]:
+        classification = "binary"
+    elif counts["continuous"]:
+        classification = "continuous"
+    elif counts["static"]:
+        classification = "static"
+    else:
+        classification = "none"
+    return {
+        "classification": classification,
+        "stream_count": len(streams),
+        "binary_stream_count": counts["binary"],
+        "continuous_stream_count": counts["continuous"],
+        "static_stream_count": counts["static"],
+        "pedal_message_count": sum(len(stream["events"]) for stream in streams),
+        "channels": sorted({stream["channel"] + 1 for stream in streams}),
+    }
+
+
+def _normalized_pedal_softening_options(down_ms, release_ms, step_ms):
+    def normalized(value, default, minimum, maximum):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            numeric = default
+        if numeric <= 0:
+            numeric = default
+        return max(minimum, min(maximum, numeric))
+
+    return (
+        normalized(down_ms, 100, 20, 2000),
+        normalized(release_ms, 180, 20, 2000),
+        normalized(step_ms, DEFAULT_PEDAL_RAMP_STEP_MS, 5, 50),
+    )
+
+
+def _smoothstep(value):
+    clamped = max(0.0, min(1.0, float(value)))
+    return clamped * clamped * (3.0 - (2.0 * clamped))
+
+
+def _make_pedal_ramp_half(
+    *,
+    start_ms,
+    end_ms,
+    start_value,
+    end_value,
+    time_map,
+    step_ms,
+    anchor_ms,
+    anchor_order,
+    channel,
+    include_start=True,
+):
+    points = []
+    duration = max(0.0, end_ms - start_ms)
+    steps = max(1, int(ceil(duration / step_ms)))
+    first_index = 0 if include_start else 1
+    for index in range(first_index, steps + 1):
+        ratio = index / steps
+        point_ms = start_ms + (duration * ratio)
+        value = round(start_value + ((end_value - start_value) * _smoothstep(ratio)))
+        relative = max(
+            -0.45,
+            min(0.45, (point_ms - anchor_ms) / max(1.0, duration * 4.0)),
+        )
+        points.append(
+            (
+                max(0, round(time_map.milliseconds_to_tick(point_ms))),
+                anchor_order + relative,
+                bytes([
+                    0xB0 | channel,
+                    SUSTAIN_PEDAL_CONTROLLER,
+                    max(0, min(127, value)),
+                ]),
+                point_ms,
+            )
+        )
+    return points
+
+
+def _soften_pedal_stream_events(stream, *, down_ms, release_ms, step_ms):
+    transitions = stream["transitions"]
+    if not transitions:
+        return []
+
+    generated = []
+    first_event = stream["events"][0]
+    if (
+        first_event[-1][2] < SUSTAIN_PEDAL_ON_THRESHOLD
+        and first_event[0] <= transitions[0]["event"][0]
+    ):
+        generated.append(
+            (
+                first_event[0],
+                first_event[1],
+                bytes([0xB0 | stream["channel"], SUSTAIN_PEDAL_CONTROLLER, 0]),
+                stream["time_map"].tick_to_milliseconds(first_event[0]),
+            )
+        )
+
+    transition_times = [
+        stream["time_map"].tick_to_milliseconds(transition["event"][0])
+        for transition in transitions
+    ]
+    for index, transition in enumerate(transitions):
+        center_ms = transition_times[index]
+        duration = down_ms if transition["to"] == 1 else release_ms
+        previous_center = transition_times[index - 1] if index > 0 else None
+        next_center = (
+            transition_times[index + 1]
+            if index < len(transition_times) - 1
+            else None
+        )
+        left_limit = 0.0 if previous_center is None else (previous_center + center_ms) / 2.0
+        right_limit = float("inf") if next_center is None else (center_ms + next_center) / 2.0
+        start_ms = max(0.0, left_limit, center_ms - (duration / 2.0))
+        end_ms = max(center_ms, min(right_limit, center_ms + (duration / 2.0)))
+        anchor_order = transition["event"][1]
+        threshold_event = (
+            transition["event"][0],
+            anchor_order,
+            bytes([
+                0xB0 | stream["channel"],
+                SUSTAIN_PEDAL_CONTROLLER,
+                64 if transition["to"] == 1 else 63,
+            ]),
+            center_ms,
+        )
+
+        if transition["to"] == 1:
+            before_threshold = _make_pedal_ramp_half(
+                start_ms=start_ms,
+                end_ms=center_ms,
+                start_value=0,
+                end_value=63,
+                time_map=stream["time_map"],
+                step_ms=step_ms,
+                anchor_ms=center_ms,
+                anchor_order=anchor_order,
+                channel=stream["channel"],
+            )
+            after_threshold = _make_pedal_ramp_half(
+                start_ms=center_ms,
+                end_ms=end_ms,
+                start_value=64,
+                end_value=127,
+                time_map=stream["time_map"],
+                step_ms=step_ms,
+                anchor_ms=center_ms,
+                anchor_order=anchor_order,
+                channel=stream["channel"],
+                include_start=False,
+            )
+        else:
+            before_threshold = _make_pedal_ramp_half(
+                start_ms=start_ms,
+                end_ms=center_ms,
+                start_value=127,
+                end_value=64,
+                time_map=stream["time_map"],
+                step_ms=step_ms,
+                anchor_ms=center_ms,
+                anchor_order=anchor_order,
+                channel=stream["channel"],
+            )
+            after_threshold = _make_pedal_ramp_half(
+                start_ms=center_ms,
+                end_ms=end_ms,
+                start_value=63,
+                end_value=0,
+                time_map=stream["time_map"],
+                step_ms=step_ms,
+                anchor_ms=center_ms,
+                anchor_order=anchor_order,
+                channel=stream["channel"],
+                include_start=False,
+            )
+
+        if before_threshold:
+            last_tick, _last_order, last_raw, last_ms = before_threshold[-1]
+            before_threshold[-1] = (last_tick, anchor_order - 0.001, last_raw, last_ms)
+        generated.extend(before_threshold)
+        generated.append(threshold_event)
+        generated.extend(after_threshold)
+
+    generated.sort(key=lambda item: (item[3], item[0], item[1]))
+    cleaned = []
+    for event in generated:
+        if cleaned:
+            previous = cleaned[-1]
+            if (
+                previous[0] == event[0]
+                and previous[2] == event[2]
+                and abs(previous[1] - event[1]) < 0.00001
+            ):
+                continue
+        cleaned.append(event)
+    return [(tick, order, raw) for tick, order, raw, _point_ms in cleaned]
+
+
+def _soften_binary_sustain_pedal_streams(
+    track_event_groups,
+    *,
+    format_type,
+    division,
+    down_ms,
+    release_ms,
+    step_ms=DEFAULT_PEDAL_RAMP_STEP_MS,
+):
+    down_ms, release_ms, step_ms = _normalized_pedal_softening_options(
+        down_ms,
+        release_ms,
+        step_ms,
+    )
+    time_maps = _pedal_softening_time_maps(
+        format_type,
+        division,
+        track_event_groups,
+    )
+    streams = _pedal_softening_streams(track_event_groups, time_maps)
+    binary_streams = [
+        stream for stream in streams if stream["classification"] == "binary"
+    ]
+    if not binary_streams:
+        return False
+
+    for stream in binary_streams:
+        track_info = track_event_groups[stream["track_index"]]
+        track_info["events"] = [
+            event
+            for event in track_info["events"]
+            if not (
+                _is_sustain_controller(event[-1])
+                and (event[-1][0] & 0x0F) == stream["channel"]
+            )
+        ]
+        track_info["events"].extend(
+            _soften_pedal_stream_events(
+                stream,
+                down_ms=down_ms,
+                release_ms=release_ms,
+                step_ms=step_ms,
+            )
+        )
+        track_info["events"].sort(key=lambda item: (item[0], item[1]))
+    return True
+
+
 def _build_raw_midi_track(events, end_tick=0):
     track = bytearray()
     prev_tick = 0
@@ -529,17 +1019,34 @@ def apply_pedal_compatibility_to_midi_bytes(
     binary_pedal=False,
     pedal_cleanup=False,
     virtual_piano_roll_pedal=False,
+    soften_sustain_pedal=False,
+    pedal_down_ms=100,
+    pedal_release_ms=180,
+    pedal_ramp_step_ms=DEFAULT_PEDAL_RAMP_STEP_MS,
 ):
     if not (
         repair_disklavier_pedal
         or binary_pedal
         or pedal_cleanup
         or virtual_piano_roll_pedal
+        or soften_sustain_pedal
     ):
         return midi_bytes, False
 
+    if binary_pedal and soften_sustain_pedal:
+        raise ValueError(
+            "Pedal softening cannot be combined with conversion to on/off pedal values."
+        )
+
     header_end, format_type, _, chunks = _parse_midi_chunks(midi_bytes)
-    if format_type == 2:
+    if soften_sustain_pedal and format_type not in (0, 1, 2):
+        raise ValueError(f"MIDI format {format_type} is not a Standard MIDI File type.")
+    if format_type == 2 and (
+        repair_disklavier_pedal
+        or binary_pedal
+        or pedal_cleanup
+        or virtual_piano_roll_pedal
+    ):
         raise ValueError("MIDI format 2 files are not supported for pedal compatibility utilities.")
 
     track_chunks = [chunk for chunk in chunks if chunk["id"] == b"MTrk"]
@@ -570,10 +1077,24 @@ def apply_pedal_compatibility_to_midi_bytes(
         )
         changed = changed or pedal_note_changed
 
+    if changed:
+        _replace_track_event_groups_from_merged(track_event_groups, merged_events)
+
+    if soften_sustain_pedal:
+        division = int.from_bytes(midi_bytes[12:14], "big")
+        softening_changed = _soften_binary_sustain_pedal_streams(
+            track_event_groups,
+            format_type=format_type,
+            division=division,
+            down_ms=pedal_down_ms,
+            release_ms=pedal_release_ms,
+            step_ms=pedal_ramp_step_ms,
+        )
+        changed = changed or softening_changed
+
     if not changed:
         return midi_bytes, False
 
-    _replace_track_event_groups_from_merged(track_event_groups, merged_events)
     rebuilt = _rebuild_midi_with_track_event_groups(midi_bytes, header_end, chunks, track_event_groups)
     return rebuilt, rebuilt != midi_bytes
 
@@ -586,6 +1107,10 @@ def apply_pedal_compatibility_to_midi_path(
     binary_pedal=False,
     pedal_cleanup=False,
     virtual_piano_roll_pedal=False,
+    soften_sustain_pedal=False,
+    pedal_down_ms=100,
+    pedal_release_ms=180,
+    pedal_ramp_step_ms=DEFAULT_PEDAL_RAMP_STEP_MS,
 ):
     if not os.path.isfile(source_path):
         raise ValueError("File does not exist.")
@@ -599,6 +1124,10 @@ def apply_pedal_compatibility_to_midi_path(
         binary_pedal=binary_pedal,
         pedal_cleanup=pedal_cleanup,
         virtual_piano_roll_pedal=virtual_piano_roll_pedal,
+        soften_sustain_pedal=soften_sustain_pedal,
+        pedal_down_ms=pedal_down_ms,
+        pedal_release_ms=pedal_release_ms,
+        pedal_ramp_step_ms=pedal_ramp_step_ms,
     )
     if not changed:
         return False

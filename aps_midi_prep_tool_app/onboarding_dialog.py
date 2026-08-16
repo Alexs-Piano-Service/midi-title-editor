@@ -149,6 +149,21 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 """,
             ),
             (
+                "Build Emulator Disk Sets",
+                """
+                <p>Use <strong>Utilities &gt; Build Emulator Disk Set...</strong> to turn a whole
+                folder of MIDI and Yamaha E-SEQ songs into numbered emulator-ready disks.</p>
+                <ul>
+                  <li>Subfolders can be included, and the utility fills as many raw IMG or HFE images as needed.</li>
+                  <li>Choose either E-SEQ-only disks or Standard-MIDI-only disks; source songs are converted only when necessary.</li>
+                  <li>E-SEQ disks receive DOS 8.3 <strong>.FIL</strong> names and a <strong>PIANODIR.FIL</strong> containing only that image's songs and album metadata.</li>
+                  <li>MIDI disks contain only <strong>.MID</strong> files and do not receive a Yamaha directory file.</li>
+                  <li>The usual Disklavier choice is 720K DD; disk capacity and the E-SEQ-only 60-song limit are enforced.</li>
+                  <li>Generated images are verified and existing output files are never overwritten.</li>
+                </ul>
+                """,
+            ),
+            (
                 "Format Or Fill A Floppy",
                 """
                 <p>Use this path when you want to create a fresh Disklavier floppy or add files to
@@ -168,8 +183,9 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
             (
                 "Save For Nalbantov",
                 """
-                <p>Use <strong>File &gt; Save As Image...</strong> and choose <strong>HFE (Nalbantov)</strong>
-                when preparing a USB stick for a Nalbantov floppy disk emulator.</p>
+                <p>For a folder of songs, use <strong>Utilities &gt; Build Emulator Disk Set...</strong>
+                and choose E-SEQ contents with HFE output. For a manually edited image, use <strong>File &gt; Save As Image...</strong>
+                and choose <strong>HFE (Nalbantov)</strong>.</p>
                 <ul>
                   <li>Copy the finished HFE file to the USB stick prepared for the emulator.</li>
                   <li>For Nalbantov emulators, keep the setup/configuration files from the original Nalbantov USB stick and use Nalbantov's instructions or software when preparing replacement media.</li>

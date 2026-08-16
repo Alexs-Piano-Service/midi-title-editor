@@ -34,12 +34,13 @@ FluidSynth with a redistributable SoundFont, and LAME.
 Run the basic syntax and whitespace checks:
 
 ```bash
-python3 -m py_compile aps_midi_prep_tool.py aps_midi_prep_tool_app/*.py
-git diff --check
+make release-check
 ```
 
-When changing floppy, image, E-SEQ, or MIDI conversion behavior, test with
-copies of representative files and note what workflow you verified.
+This also runs the full automated test suite and validates release-version and
+translation-catalog consistency. When changing floppy, image, E-SEQ, or MIDI
+conversion behavior, test with copies of representative files and note what
+workflow you verified.
 
 ## Documentation
 

@@ -1,6 +1,7 @@
 from PySide6.QtCore import QThread, Signal
 
 from .bulk_extraction import bulk_extract_images
+from .emulator_image_builder import build_emulator_disk_images
 from .floppy_image import (
     BlankDiskImageError,
     FloppyImageSession,
@@ -185,6 +186,8 @@ class BulkExtractionWorker(_CancellableDiskWorker):
         *,
         convert_eseq=False,
         include_eseq_sources=False,
+        long_midi_filenames=False,
+        trim_title_spaces=False,
         use_album_names=False,
         language_code=None,
         parent=None,
@@ -194,6 +197,8 @@ class BulkExtractionWorker(_CancellableDiskWorker):
         self.output_directory = output_directory
         self.convert_eseq = bool(convert_eseq)
         self.include_eseq_sources = bool(include_eseq_sources)
+        self.long_midi_filenames = bool(long_midi_filenames)
+        self.trim_title_spaces = bool(trim_title_spaces)
         self.use_album_names = bool(use_album_names)
         self.language_code = language_code
 
@@ -209,6 +214,8 @@ class BulkExtractionWorker(_CancellableDiskWorker):
                 self.output_directory,
                 convert_eseq=self.convert_eseq,
                 include_eseq_sources=self.include_eseq_sources,
+                long_midi_filenames=self.long_midi_filenames,
+                trim_title_spaces=self.trim_title_spaces,
                 use_album_names=self.use_album_names,
                 language_code=self.language_code,
                 progress_callback=self._emit_progress,
@@ -224,6 +231,65 @@ class BulkExtractionWorker(_CancellableDiskWorker):
                 self._emit_cancelled(exc)
                 return
             self.extractionFailed.emit(str(exc))
+
+
+class EmulatorImageBuildWorker(_CancellableDiskWorker):
+    buildFinished = Signal(object)
+    buildFailed = Signal(str)
+    CANCELLED_MESSAGE = "Emulator image creation cancelled."
+
+    def __init__(
+        self,
+        source_directory,
+        output_directory,
+        *,
+        set_name,
+        album_title,
+        catalog_number,
+        disk_format,
+        output_ext,
+        output_content="eseq",
+        include_subfolders=True,
+        language_code=None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.source_directory = source_directory
+        self.output_directory = output_directory
+        self.set_name = set_name
+        self.album_title = album_title
+        self.catalog_number = catalog_number
+        self.disk_format = disk_format
+        self.output_ext = output_ext
+        self.output_content = output_content
+        self.include_subfolders = bool(include_subfolders)
+        self.language_code = language_code
+
+    def run(self):
+        try:
+            result = build_emulator_disk_images(
+                self.source_directory,
+                self.output_directory,
+                set_name=self.set_name,
+                album_title=self.album_title,
+                catalog_number=self.catalog_number,
+                disk_format=self.disk_format,
+                output_ext=self.output_ext,
+                output_content=self.output_content,
+                include_subfolders=self.include_subfolders,
+                language_code=self.language_code,
+                progress_callback=self._emit_progress,
+                cancel_callback=self._cancel_requested,
+            )
+            self._raise_if_cancelled()
+            self.buildFinished.emit(result)
+        except FloppyOperationCancelled as exc:
+            self._emit_cancelled(exc)
+        except Exception as exc:
+            if self._should_treat_as_cancelled(exc):
+                self._emit_cancelled(exc)
+                return
+            self.buildFailed.emit(str(exc))
 
 
 class DiskImageCaptureWorker(_CancellableDiskWorker):

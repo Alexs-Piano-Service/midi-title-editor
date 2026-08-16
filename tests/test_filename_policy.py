@@ -1,13 +1,42 @@
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
-from aps_midi_prep_tool_app.dos83_renamer import build_dos83_filename
+import pytest
+
+from aps_midi_prep_tool_app import floppy_image as floppy_image_module
+from aps_midi_prep_tool_app.dos83_renamer import (
+    build_dos83_filename,
+    is_dos83_filename,
+)
 from aps_midi_prep_tool_app.floppy_image import (
     DISK_FORMATS,
+    FloppyImageError,
     FloppyImageSession,
     create_floppy_images_from_files,
     read_image_listing,
 )
 from aps_midi_prep_tool_app.main_window import MidiTitleWindow, QMessageBox
+from aps_midi_prep_tool_app.message_catalog import (
+    COMMON_TEXT_TRANSLATIONS,
+    SUPPORTED_LANGUAGES,
+)
+
+
+FILENAME_POLICY_TRANSLATION_SOURCES = (
+    "Use 8.3 filenames",
+    "Restrict newly entered and generated disk/image filenames to an eight-character name and three-character extension. Leave this off to preserve normal long filenames.",
+    "Restrict the filename to an eight-character name and three-character extension. This choice is remembered in Settings.",
+    "Rename File",
+    "Invalid Filename",
+    "Name Already Exists",
+    "DOS 8.3 filename rules are enabled for new filename changes.",
+    "Long filenames are enabled. Existing pending names were left unchanged.",
+    "DOS 8.3 filenames must use printable ASCII characters only.",
+    "DOS 8.3 filenames cannot contain spaces.",
+    "Filename contains characters that are not valid in DOS 8.3 names.",
+    "DOS 8.3 filenames can only contain one extension separator.",
+    "DOS 8.3 filename base must be 8 characters or fewer.",
+    "DOS 8.3 extension must be 3 characters or fewer.",
+)
 
 
 class FilenamePolicyWindow:
@@ -35,6 +64,14 @@ class FilenamePolicyWindow:
 
     def _build_dos_image_filename(self, filename, used_paths):
         return MidiTitleWindow._build_dos_image_filename(self, filename, used_paths)
+
+    def _build_image_filename(self, filename, used_paths, *, enforce_dos83=None):
+        return MidiTitleWindow._build_image_filename(
+            self,
+            filename,
+            used_paths,
+            enforce_dos83=enforce_dos83,
+        )
 
 
 class FakeItem:
@@ -74,6 +111,9 @@ class FakeSettings:
     def value(self, key, default=None, **_kwargs):
         return self.values.get(key, default)
 
+    def contains(self, key):
+        return key in self.values
+
     def setValue(self, key, value):
         self.values[key] = value
 
@@ -110,6 +150,7 @@ def test_dos83_policy_is_backed_by_settings_action_instead_of_quick_panel():
         settings=FakeSettings({setting_key: False}),
         settingsUseDos83FilenamesAction=FakeCheckableAction(False),
         status_label=FakeStatusLabel(),
+        _lt=lambda source: source,
     )
 
     assert not MidiTitleWindow._dos83_filenames_enabled(window)
@@ -119,6 +160,60 @@ def test_dos83_policy_is_backed_by_settings_action_instead_of_quick_panel():
     assert MidiTitleWindow._dos83_filenames_enabled(window)
     assert window.settingsUseDos83FilenamesAction.isChecked()
     assert "enabled" in window.status_label.value
+
+
+def test_dos83_and_track_title_filename_preferences_are_inverse():
+    window = SimpleNamespace(
+        SETTING_USE_DOS83_FILENAMES=MidiTitleWindow.SETTING_USE_DOS83_FILENAMES,
+        SETTING_LONG_MIDI_FILENAMES=MidiTitleWindow.SETTING_LONG_MIDI_FILENAMES,
+        SETTING_ESEQ_TO_MIDI_LONG_FILENAMES=(
+            MidiTitleWindow.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES
+        ),
+        SETTING_READ_FLOPPY_LONG_FILENAMES=(
+            MidiTitleWindow.SETTING_READ_FLOPPY_LONG_FILENAMES
+        ),
+        DEFAULT_LONG_MIDI_FILENAMES=MidiTitleWindow.DEFAULT_LONG_MIDI_FILENAMES,
+        settings=FakeSettings(
+            {
+                MidiTitleWindow.SETTING_USE_DOS83_FILENAMES: False,
+                MidiTitleWindow.SETTING_LONG_MIDI_FILENAMES: True,
+                MidiTitleWindow.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES: True,
+                MidiTitleWindow.SETTING_READ_FLOPPY_LONG_FILENAMES: True,
+            }
+        ),
+        settingsUseDos83FilenamesAction=FakeCheckableAction(False),
+        status_label=FakeStatusLabel(),
+        _lt=lambda source: source,
+    )
+    window._set_long_midi_filenames_enabled = MethodType(
+        MidiTitleWindow._set_long_midi_filenames_enabled,
+        window,
+    )
+
+    MidiTitleWindow.toggle_dos83_filenames(window, True)
+
+    assert window.settings.values[window.SETTING_USE_DOS83_FILENAMES]
+    assert not MidiTitleWindow._long_midi_filenames_enabled(window)
+    assert not window.settings.values[window.SETTING_LONG_MIDI_FILENAMES]
+    assert not window.settings.values[window.SETTING_ESEQ_TO_MIDI_LONG_FILENAMES]
+    assert not window.settings.values[window.SETTING_READ_FLOPPY_LONG_FILENAMES]
+
+    MidiTitleWindow._set_long_midi_filenames_enabled(window, True)
+
+    assert MidiTitleWindow._long_midi_filenames_enabled(window)
+    assert not window.settings.values[window.SETTING_USE_DOS83_FILENAMES]
+    assert not window.settingsUseDos83FilenamesAction.isChecked()
+
+
+def test_filename_policy_ui_has_complete_translation_coverage():
+    translated_codes = {
+        language.code
+        for language in SUPPORTED_LANGUAGES
+        if language.code != "en"
+    }
+
+    for source in FILENAME_POLICY_TRANSLATION_SOURCES:
+        assert translated_codes <= set(COMMON_TEXT_TRANSLATIONS[source])
 
 
 def test_image_name_builder_preserves_long_name_when_dos83_is_off():
@@ -131,9 +226,101 @@ def test_image_name_builder_preserves_long_name_when_dos83_is_off():
     ) == "My Favorite Song.mid"
 
 
+def test_eseq_image_conversion_forces_dos83_when_preference_is_off():
+    window = FilenamePolicyWindow(use_dos83=False)
+    window.imageEseqVariant = "disklavier"
+    window._eseq_song_extension = lambda _variant=None: "FIL"
+    window._image_used_filenames_for_directory = lambda *_args, **_kwargs: set()
+    window._join_image_path = lambda directory, filename: (
+        f"{directory}/{filename}" if directory else filename
+    )
+
+    target_path = MidiTitleWindow._converted_image_path_for_kind(
+        window,
+        "MUSIC/A Very Long Song Name.mid",
+        "eseq",
+    )
+
+    target_name = target_path.rsplit("/", 1)[-1]
+    stem, extension = target_name.rsplit(".", 1)
+    assert len(stem) <= 8
+    assert extension == "FIL"
+    assert " " not in target_name
+
+
+def test_existing_eseq_addition_forces_dos83_when_preference_is_off(monkeypatch):
+    window = FilenamePolicyWindow(use_dos83=False)
+    monkeypatch.setattr(
+        "aps_midi_prep_tool_app.main_window.is_eseq_file",
+        lambda _path: True,
+    )
+
+    target_name = MidiTitleWindow._build_image_addition_filename(
+        window,
+        "/songs/A Very Long Existing ESEQ Name.fil",
+        set(),
+    )
+
+    stem, extension = target_name.rsplit(".", 1)
+    assert len(stem) <= 8
+    assert extension == "FIL"
+    assert " " not in target_name
+
+
+def test_save_preflight_stages_short_names_for_external_eseq_files():
+    source_path = "/songs/A Very Long External ESEQ Name.fil"
+    window = FilenamePolicyWindow(use_dos83=False)
+    window.table = FakeTable([source_path])
+    window.table.rows[0][3] = FakeItem("A Very Long External ESEQ Name.fil")
+    window.is_image_mode = lambda: False
+    window.is_local_eseq_mode = lambda: True
+    window._regular_eseq_rows = lambda: (0,)
+    window._regular_row_output_filename = MethodType(
+        MidiTitleWindow._regular_row_output_filename,
+        window,
+    )
+    window._regular_used_output_filenames_for_directory = (
+        lambda *_args, **_kwargs: set()
+    )
+    staged = {}
+    window._stage_regular_row_pending_rename = (
+        lambda _row, source, target: staged.update({source: target})
+    )
+
+    MidiTitleWindow._ensure_eseq_filenames_dos83_for_save(window)
+
+    target_name = staged[source_path]
+    stem, extension = target_name.rsplit(".", 1)
+    assert len(stem) <= 8
+    assert extension == "FIL"
+    assert " " not in target_name
+
+
 def test_bulk_dos83_name_preserves_non_midi_extension():
     assert build_dos83_filename("A Very Long ESEQ Name.fil", 3).endswith(".FIL")
     assert build_dos83_filename("A Very Long ESEQ Name.fil", 3).startswith("03")
+
+
+def test_dos83_validator_covers_eseq_disk_filename_rules():
+    assert is_dos83_filename("PIANO001.FIL")
+    assert is_dos83_filename("SONG.P01")
+    assert not is_dos83_filename("A Very Long Song.FIL")
+    assert not is_dos83_filename("TOO_LONG1.MDA")
+    assert not is_dos83_filename("SONG NAME.FIL")
+    assert not is_dos83_filename("SONG.")
+
+
+def test_low_level_image_packer_rejects_long_eseq_name(tmp_path, monkeypatch):
+    source_path = tmp_path / "staged-eseq.bin"
+    source_path.write_bytes(b"E-SEQ fixture")
+    monkeypatch.setattr(floppy_image_module, "is_eseq_file", lambda _path: True)
+
+    with pytest.raises(FloppyImageError, match="DOS 8.3"):
+        floppy_image_module._copy_host_file_into_image(
+            str(tmp_path / "unused.img"),
+            str(source_path),
+            "A Very Long ESEQ Name.FIL",
+        )
 
 
 def test_bulk_dos83_utility_queues_image_renames(monkeypatch):

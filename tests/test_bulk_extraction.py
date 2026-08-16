@@ -56,6 +56,32 @@ def _pianodir_bytes(album_title):
     return bytes(data)
 
 
+def _minimal_midi_bytes():
+    track = b"\x00\xFF\x2F\x00"
+    return (
+        b"MThd\x00\x00\x00\x06\x00\x00\x00\x01\x01\xE0"
+        + b"MTrk"
+        + len(track).to_bytes(4, "big")
+        + track
+    )
+
+
+def _psong_bytes(records):
+    record_size = 0xB0
+    data = bytearray(b" " * (0x80 + len(records) * record_size))
+    data[0x00:0x10] = b"PSONG   MNG   \r\n"
+    data[0x10:0x20] = f"MAX{len(records):03d}        \r\n".encode("ascii")
+    data[0x20:0x30] = f"FILE{len(records):03d}       \r\n".encode("ascii")
+    for index, (filename, title) in enumerate(records):
+        start = 0x80 + index * record_size
+        stem, extension = filename.rsplit(".", 1)
+        data[start:start + 8] = stem.encode("cp1252").ljust(8, b" ")
+        data[start + 8:start + 11] = extension.encode("cp1252").ljust(3, b" ")
+        data[start + 14:start + 16] = b"\r\n"
+        data[start + 16:start + 48] = title.encode("cp1252").ljust(32, b" ")
+    return bytes(data)
+
+
 def test_discover_image_files_only_scans_selected_directory(tmp_path):
     (tmp_path / "B.HFE").write_bytes(b"")
     (tmp_path / "a.img").write_bytes(b"")
@@ -178,6 +204,87 @@ def test_bulk_extraction_can_include_eseq_sources_with_midi_conversions(tmp_path
     assert result.files_extracted == 4
     assert result.files_converted == 1
     assert result.included_eseq_sources is True
+    assert result.errors == ()
+
+
+def test_bulk_extraction_can_use_long_filenames_and_trim_converted_titles(tmp_path):
+    source = tmp_path / "images"
+    output = tmp_path / "output"
+    source.mkdir()
+    (source / "disk.img").write_bytes(b"image")
+    source_files = {
+        "MUSIC/FIRST.FIL": b"  Moon   River  ",
+        "MUSIC/SECOND.FIL": b" Summer   Wind ",
+        "NOTES.TXT": b"keep this",
+    }
+    converted_titles = []
+
+    def session_loader(image_path, **_kwargs):
+        return FakeImageSession(image_path, source_files)
+
+    def convert_to_midi(source_path, destination_path, *, title_override=None):
+        converted_titles.append(title_override)
+        Path(destination_path).write_bytes(str(title_override).encode("utf-8"))
+
+    result = bulk_extract_images(
+        source,
+        output,
+        convert_eseq=True,
+        long_midi_filenames=True,
+        trim_title_spaces=True,
+        session_loader=session_loader,
+        eseq_detector=lambda path: path.lower().endswith(".fil"),
+        eseq_converter=convert_to_midi,
+        eseq_title_reader=lambda path: Path(path).read_text(encoding="utf-8"),
+    )
+
+    music = output / "disk" / "MUSIC"
+    assert (music / "01 - Moon River.mid").read_text(encoding="utf-8") == "Moon River"
+    assert (music / "02 - Summer Wind.mid").read_text(encoding="utf-8") == "Summer Wind"
+    assert converted_titles == ["Moon River", "Summer Wind"]
+    assert (output / "disk" / "NOTES.TXT").read_bytes() == b"keep this"
+    assert result.files_converted == 2
+    assert result.errors == ()
+
+
+def test_bulk_extraction_long_filenames_use_smart_pianosoft_catalog_for_existing_midi(
+    tmp_path,
+):
+    source = tmp_path / "images"
+    output = tmp_path / "output"
+    source.mkdir()
+    (source / "disk.img").write_bytes(b"image")
+    midi_bytes = _minimal_midi_bytes()
+    source_files = {
+        "PSONG.MNG": _psong_bytes(
+            [
+                ("FIRST.MID", "  Moon   River  "),
+                ("SECOND.MID", "  Summer   Wind  "),
+            ]
+        ),
+        # Deliberately reverse filesystem order to verify catalog numbering.
+        "SECOND.MID": midi_bytes,
+        "FIRST.MID": midi_bytes,
+    }
+
+    def session_loader(image_path, **_kwargs):
+        return FakeImageSession(image_path, source_files)
+
+    result = bulk_extract_images(
+        source,
+        output,
+        long_midi_filenames=True,
+        session_loader=session_loader,
+    )
+
+    disk_output = output / "disk"
+    assert (disk_output / "01 - Moon River.mid").read_bytes() == midi_bytes
+    assert (disk_output / "02 - Summer Wind.mid").read_bytes() == midi_bytes
+    assert not (disk_output / "FIRST.MID").exists()
+    assert not (disk_output / "SECOND.MID").exists()
+    assert (disk_output / "PSONG.MNG").exists()
+    assert result.files_converted == 0
+    assert result.files_extracted == 3
     assert result.errors == ()
 
 

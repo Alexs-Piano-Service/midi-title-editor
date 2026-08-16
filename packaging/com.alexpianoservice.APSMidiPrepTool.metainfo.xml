@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.alexpianoservice.APSMidiPrepTool</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Apache-2.0</project_license>
+  <developer id="com.alexpianoservice">
+    <name>Alex's Piano Service LLC</name>
+  </developer>
+  <name>APS MIDI Prep Tool</name>
+  <summary>Prepare and preserve Disklavier MIDI, E-SEQ, floppy, and image data</summary>
+  <description>
+    <p>
+      APS MIDI Prep Tool is a Disklavier preservation and preparation
+      workstation for MIDI files, Yamaha E-SEQ files, floppy images, and
+      physical floppy disks.
+    </p>
+    <p>
+      It can build numbered emulator disk sets containing either Standard MIDI
+      files only or Yamaha E-SEQ files with a correct PIANODIR.FIL on every
+      image.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.alexpianoservice.APSMidiPrepTool.desktop</launchable>
+  <provides>
+    <binary>APSMidiPrepTool</binary>
+  </provides>
+  <url type="homepage">https://www.alexanderpeppe.com/</url>
+  <content_rating type="oars-1.1"/>
+</component>

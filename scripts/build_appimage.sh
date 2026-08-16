@@ -48,10 +48,11 @@ PY
 
 DISPLAY_NAME="${APP_INFO[0]}"
 APP_VERSION="${APP_INFO[1]}"
-APP_ID="aps-midi-prep-tool"
+APP_ID="com.alexpianoservice.APSMidiPrepTool"
 APP_BIN="APSMidiPrepTool"
 APP_ICON_PNG="$ROOT_DIR/aps_midi_prep_tool_app/aps.png"
 APP_ICON_ICO="$ROOT_DIR/aps_midi_prep_tool_app/aps.ico"
+APP_METAINFO="$ROOT_DIR/packaging/com.alexpianoservice.APSMidiPrepTool.metainfo.xml"
 VENV_DIR="${VENV_DIR:-$ROOT_DIR/.venv-appimage}"
 BUILD_DIR="$ROOT_DIR/build"
 APPIMAGE_BUILD_DIR="$BUILD_DIR/appimage"
@@ -59,6 +60,7 @@ PYINSTALLER_BUILD_DIR="$BUILD_DIR/pyinstaller"
 APPDIR="$APPIMAGE_BUILD_DIR/$APP_BIN.AppDir"
 OUT_DIR="$ROOT_DIR/release"
 APPIMAGE_PATH="$OUT_DIR/$APP_BIN-$APP_VERSION-$APPIMAGE_ARCH.AppImage"
+CHECKSUM_PATH="$APPIMAGE_PATH.sha256"
 APPIMAGETOOL="${APPIMAGETOOL:-$APPIMAGE_BUILD_DIR/appimagetool-$APPIMAGE_ARCH.AppImage}"
 APPIMAGETOOL_URL="${APPIMAGETOOL_URL:-https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-$APPIMAGE_ARCH.AppImage}"
 BUNDLE_MTOOLS="${BUNDLE_MTOOLS:-1}"
@@ -86,6 +88,11 @@ for icon_path in "$APP_ICON_PNG" "$APP_ICON_ICO"; do
         exit 1
     fi
 done
+
+if [[ ! -f "$APP_METAINFO" ]]; then
+    echo "AppStream metadata not found: $APP_METAINFO" >&2
+    exit 1
+fi
 
 is_enabled() {
     case "${1,,}" in
@@ -314,6 +321,7 @@ install -Dm644 "$ROOT_DIR/LICENSE" "$APPDIR/usr/share/doc/$APP_ID/LICENSE"
 install -Dm644 "$ROOT_DIR/NOTICE" "$APPDIR/usr/share/doc/$APP_ID/NOTICE"
 install -Dm644 "$ROOT_DIR/README.md" "$APPDIR/usr/share/doc/$APP_ID/README.md"
 install -Dm644 "$ROOT_DIR/CHANGELOG.md" "$APPDIR/usr/share/doc/$APP_ID/CHANGELOG.md"
+install -Dm644 "$APP_METAINFO" "$APPDIR/usr/share/metainfo/$APP_ID.appdata.xml"
 
 cat > "$APPDIR/$APP_ID.desktop" <<EOF
 [Desktop Entry]
@@ -352,8 +360,13 @@ if [[ ! -x "$APPIMAGETOOL" ]]; then
     download_appimagetool
 fi
 
-rm -f "$APPIMAGE_PATH"
+rm -f "$APPIMAGE_PATH" "$CHECKSUM_PATH"
 ARCH="$APPIMAGE_ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" "$APPDIR" "$APPIMAGE_PATH"
 
 chmod +x "$APPIMAGE_PATH"
+(
+    cd "$OUT_DIR"
+    sha256sum "$(basename "$APPIMAGE_PATH")" > "$(basename "$CHECKSUM_PATH")"
+)
 echo "Built $APPIMAGE_PATH"
+echo "Wrote $CHECKSUM_PATH"

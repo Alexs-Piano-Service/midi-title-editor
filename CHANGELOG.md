@@ -7,14 +7,59 @@ with release sections grouped by version and date.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-15
+
 ### Added
 
+- Pedal Compatibility can now soften binary on/off CC64 sustain into smooth
+  S-curve motion. Quick, Natural, Slow, and independent custom down/release
+  timings are available for one chosen song or every listed MIDI song as a
+  batch. The transform preserves each original 64/63 threshold tick, skips
+  continuous and static pedal streams, supports SMF Types 0, 1, and 2 with
+  PPQN or SMPTE timing, and remains staged until the user saves.
+
+### Changed
+
+- Bulk Extraction now has an independent, remembered track-number/title naming
+  choice for MIDI already stored in an image as well as MIDI created from
+  E-SEQ. Yamaha Smart PianoSoft `PSONG.MNG` catalog titles and track order now
+  take precedence both in Bulk Extraction and when images or floppies are opened
+  normally. Editing one of these catalog-backed titles updates `PSONG.MNG`
+  instead of the MIDI track-name event. Optional E-SEQ conversion also offers
+  cleaned embedded title spacing, enabled by default in this workflow.
+- File Inspection now identifies CC64 sustain as binary, mixed, continuous,
+  static, or not detected, using the same classification as Pedal Softening.
+- Pedal Compatibility's individual-song target list now shows song labels
+  directly without a repeated `One song:` prefix.
+- The legacy Disklavier pedal option is now labeled explicitly as a channel-3
+  to channel-1 remap, with its note and existing-pedal safety conditions stated
+  in the tooltip.
+
+### Fixed
+
+- Post-import file-list column fitting now expands the Title column to consume
+  unused viewport width instead of leaving a blank area after the Type column.
+
+## [0.6.13] - 2026-08-12
+
+### Added
+
+- `Utilities > Build Emulator Disk Set...` prepares an arbitrary folder of MIDI
+  and Yamaha E-SEQ songs as a numbered series of raw IMG or HFE disks. A
+  mutually exclusive disk-content choice produces either E-SEQ-only disks with
+  unique DOS 8.3 `.FIL` names and a per-disk metadata-aware `PIANODIR.FIL`, or
+  MIDI-only disks with `.MID` songs and no Yamaha directory file. Files are
+  converted only when needed, E-SEQ output spills at the 60-song or FAT12
+  capacity limit, every image is verified before committing, all choices are
+  remembered, and existing images are never overwritten. The complete workflow
+  and progress text are available in all 12 supported languages.
 - Read-only PianoDisc System 3 floppy-image support for raw IMG/BIN-style
   sector images and HFE images. The proprietary catalog and compact performance
   stream are decoded directly to piano SMF0 files with 480 PPQ timing, sustain
-  and soft-pedal events, track-number/title filenames, and per-song damage
-  reporting. Opening one of these images loads the decoded MIDI songs without
-  modifying the source; Bulk Extraction can process the format as well.
+  and soft-pedal events, DOS 8.3 filenames by default, an optional remembered
+  choice for track-number/title names, and per-song damage reporting. Opening
+  one of these images loads the decoded MIDI songs without modifying the
+  source; Bulk Extraction can process the format as well.
 - An SMF1-to-SMF0 conversion option that combines channel voice events on MIDI
   channel 1 (zero-based channel 0), removes bank and channel-mode events that
   can conflict after channels are merged, and selects Acoustic Grand Piano.
@@ -22,8 +67,8 @@ with release sections grouped by version and date.
   and song title (for example, `01 - Moon River.mid`). The option is available
   during regular conversion and Read Floppy, and `Utilities > Name MIDI Files
   from Song Titles` provides the same naming as a standalone tool. In
-  floppy/image mode, descriptive names are queued inside the image unless the
-  DOS 8.3 filename option is enabled.
+  floppy/image mode, descriptive names are queued inside the image; choosing
+  them as the conversion default disables the DOS 8.3 filename preference.
 
 ### Changed
 
@@ -40,6 +85,18 @@ with release sections grouped by version and date.
   Settings enables legacy filename restrictions explicitly without taking
   space in the quick panel. The batch DOS 8.3 utility is available in every
   editing mode and queues image/floppy renames until save.
+- `Use 8.3 filenames` and the conversion option to name MIDI files by track
+  number and title now behave as inverse remembered defaults. Enabling either
+  preference disables the other.
+- E-SEQ filenames now unconditionally use DOS 8.3 names across conversion,
+  image/floppy additions, manual renames, folder and image exports, and final
+  save validation, regardless of the general filename preference.
+- File Inspection collapses leading, trailing, and repeated spaces in titles in
+  its left-hand file list for readability without changing title metadata.
+- Completed the remaining common-interface translations for feedback, logging,
+  disk and recovery status, SoundFont management, and audio rendering in all 12
+  supported languages. Release checks now verify catalog coverage, placeholder
+  integrity, and version consistency across the app, README, and changelog.
 
 ## [0.6.12] - 2026-08-04
 
@@ -146,7 +203,7 @@ with release sections grouped by version and date.
 - About, welcome, Help disclaimer, and project documentation now include clearer
   lawful-use, non-affiliation, and third-party trademark notices.
 - E-SEQ to MIDI exports include the short APS conversion text marker, but omit APS archival round-trip header metadata by default while still accepting older metadata when present.
-- E-SEQ to MIDI and SMF1 to SMF0 conversions now preserve pedal channels by default. `Utilities > Apply Pedal Compatibility...` can stage conservative legacy Disklavier channel-3 pedal repair, binary pedal values, duplicate/stuck pedal cleanup, or Piano Roll Vector note-18 sustain markers for listed MIDI files.
+- E-SEQ to MIDI and SMF1 to SMF0 conversions now preserve pedal channels by default. `Utilities > Apply Pedal Compatibility...` can stage conservative legacy Disklavier channel-3-to-channel-1 pedal remapping, binary pedal values, duplicate/stuck pedal cleanup, or Piano Roll Vector note-18 sustain markers for listed MIDI files.
 - Pedal compatibility options now start unchecked every time so preservation remains the default behavior unless a user explicitly stages a transform.
 - Portuguese locale aliases such as `pt-PT` now use the included Brazilian Portuguese translation set instead of falling back to English.
 

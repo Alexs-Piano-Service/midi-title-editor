@@ -39,6 +39,7 @@ from .eseq_pianodir import (
     update_eseq_order_key,
 )
 from .eseq_converter import is_eseq_file
+from .dos83_renamer import is_dos83_filename
 from .midi_metadata import (
     extract_eseq_title_from_file,
     has_eseq_title_metadata,
@@ -1749,6 +1750,10 @@ def _run_mcopy_host_to_image(command_runner, target_img, host_path, image_path, 
 def _copy_host_file_into_image(target_img, host_path, image_path, cancel_callback=None):
     if not os.path.isfile(host_path):
         raise FloppyImageError(f"File to add no longer exists: {host_path}")
+    if is_eseq_file(host_path) and not is_dos83_filename(os.path.basename(image_path)):
+        raise FloppyImageError(
+            f"E-SEQ file '{os.path.basename(image_path)}' must use a DOS 8.3 filename."
+        )
     _run_mcopy_host_to_image(
         _run_command,
         target_img,
