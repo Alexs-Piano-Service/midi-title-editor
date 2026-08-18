@@ -5,10 +5,12 @@ import pytest
 
 from aps_midi_prep_tool_app import emulator_image_builder
 from aps_midi_prep_tool_app.emulator_image_builder import (
+    DEFAULT_SAFETY_MARGIN_BYTES,
     build_emulator_disk_images,
     build_emulator_eseq_images,
     discover_midi_files,
     discover_song_files,
+    sanitize_image_prefix,
     sanitize_image_set_name,
 )
 from aps_midi_prep_tool_app.eseq_converter import (
@@ -24,9 +26,13 @@ from aps_midi_prep_tool_app.floppy_image import (
     DISK_FORMATS,
     FloppyImageError,
     FloppyImageSession,
+    FloppyOperationCancelled,
     read_image_listing,
 )
-from aps_midi_prep_tool_app.midi_metadata import is_midi_file
+from aps_midi_prep_tool_app.midi_metadata import (
+    extract_first_title_from_midi,
+    is_midi_file,
+)
 
 
 def _midi_bytes(title):
@@ -37,6 +43,39 @@ def _midi_bytes(title):
         + title_bytes
         + b"\x00\x90\x3c\x40"
         + b"\x60\x80\x3c\x00"
+        + b"\x00\xff\x2f\x00"
+    )
+    return (
+        b"MThd"
+        + (6).to_bytes(4, "big")
+        + (0).to_bytes(2, "big")
+        + (1).to_bytes(2, "big")
+        + (96).to_bytes(2, "big")
+        + b"MTrk"
+        + len(track).to_bytes(4, "big")
+        + track
+    )
+
+
+def _vlq(value):
+    encoded = [value & 0x7F]
+    value >>= 7
+    while value:
+        encoded.append((value & 0x7F) | 0x80)
+        value >>= 7
+    return bytes(reversed(encoded))
+
+
+def _large_midi_bytes(title, payload_size):
+    title_bytes = title.encode("ascii")
+    payload = b"x" * payload_size
+    track = (
+        b"\x00\xff\x03"
+        + bytes((len(title_bytes),))
+        + title_bytes
+        + b"\x00\xff\x7f"
+        + _vlq(len(payload))
+        + payload
         + b"\x00\xff\x2f\x00"
     )
     return (
@@ -90,6 +129,9 @@ def test_discovers_midi_files_recursively_in_natural_order(tmp_path):
 def test_sanitizes_portable_image_set_names():
     assert sanitize_image_set_name('  My: Emulator / Set?  ') == "My Emulator Set"
     assert sanitize_image_set_name("...") == "Emulator Disks"
+    assert sanitize_image_prefix(" dsk-a ") == "DSKA"
+    assert sanitize_image_prefix("library") == "LIBR"
+    assert sanitize_image_prefix("---") == "DSKA"
 
 
 def test_builds_multiple_verified_images_with_a_pianodir_per_disk(
@@ -108,9 +150,9 @@ def test_builds_multiple_verified_images_with_a_pianodir_per_disk(
     result = build_emulator_eseq_images(
         source,
         output,
-        set_name="Customer Set",
+        prefix="DSKB",
+        starting_number=12,
         album_title="Customer Album",
-        catalog_number="APS-0001",
         disk_format=_disk_format(),
         output_ext="img",
     )
@@ -119,9 +161,12 @@ def test_builds_multiple_verified_images_with_a_pianodir_per_disk(
     assert result.converted_files == 3
     assert result.images_created == 2
     assert [Path(path).name for path in result.output_paths] == [
-        "Customer Set_01.img",
-        "Customer Set_02.img",
+        "DSKB0012.img",
+        "DSKB0013.img",
     ]
+    assert result.image_prefix == "DSKB"
+    assert result.starting_number == 12
+    assert result.safety_margin_bytes == DEFAULT_SAFETY_MARGIN_BYTES
 
     song_counts = []
     collected_names = []
@@ -142,7 +187,8 @@ def test_builds_multiple_verified_images_with_a_pianodir_per_disk(
                 "little",
             ) == len(eseq_names) + 1
             metadata = read_pianodir_metadata_from_file(pianodir_path)
-            assert metadata.catalog_number == "APS-0001"
+            disk_number = int(Path(image_path).stem[-4:])
+            assert metadata.catalog_number == f"DSKB-{disk_number:04d}"
             assert metadata.disk_title == "Customer Album"
             for eseq_name in eseq_names:
                 assert is_eseq_file(session.extract_file(eseq_name))
@@ -177,6 +223,7 @@ def test_builds_midi_only_images_and_converts_eseq_only_when_needed(
         set_name="MIDI Set",
         disk_format=_disk_format(),
         output_content="midi",
+        output_ext="img",
     )
 
     assert result.song_files_found == 2
@@ -216,6 +263,7 @@ def test_builds_eseq_only_images_without_including_source_midi(tmp_path):
         set_name="ESEQ Set",
         disk_format=_disk_format(),
         output_content="eseq",
+        output_ext="img",
     )
 
     assert result.files_prepared == 2
@@ -237,7 +285,7 @@ def test_existing_output_is_not_overwritten(tmp_path):
     source.mkdir()
     (source / "Song.mid").write_bytes(_midi_bytes("Song"))
     output.mkdir()
-    existing = output / "Existing.img"
+    existing = output / "EXIS0001.img"
     existing.write_bytes(b"keep this")
     before = hashlib.sha256(existing.read_bytes()).digest()
 
@@ -247,6 +295,325 @@ def test_existing_output_is_not_overwritten(tmp_path):
             output,
             set_name="Existing",
             disk_format=_disk_format(),
+            output_ext="img",
         )
 
     assert hashlib.sha256(existing.read_bytes()).digest() == before
+
+
+def test_existing_output_can_be_approved_for_replacement(tmp_path):
+    source = tmp_path / "midi"
+    output = tmp_path / "images"
+    source.mkdir()
+    output.mkdir()
+    (source / "Song.mid").write_bytes(_midi_bytes("Song"))
+    existing = output / "REPL0007.img"
+    existing.write_bytes(b"previous image")
+    requested_paths = []
+
+    result = build_emulator_disk_images(
+        source,
+        output,
+        prefix="REPL",
+        starting_number=7,
+        disk_format=_disk_format(),
+        output_ext="img",
+        output_content="midi",
+        overwrite_callback=lambda paths: requested_paths.extend(paths) or True,
+    )
+
+    assert requested_paths == [str(existing)]
+    assert result.output_paths == (str(existing),)
+    assert existing.read_bytes() != b"previous image"
+    assert len(read_image_listing(existing).entries) == 1
+
+
+def test_declining_output_replacement_preserves_existing_file(tmp_path):
+    source = tmp_path / "midi"
+    output = tmp_path / "images"
+    source.mkdir()
+    output.mkdir()
+    (source / "Song.mid").write_bytes(_midi_bytes("Song"))
+    existing = output / "STAY0003.img"
+    existing.write_bytes(b"keep this image")
+
+    with pytest.raises(FloppyOperationCancelled, match="replacement was cancelled"):
+        build_emulator_disk_images(
+            source,
+            output,
+            prefix="STAY",
+            starting_number=3,
+            disk_format=_disk_format(),
+            output_ext="img",
+            output_content="midi",
+            overwrite_callback=lambda _paths: False,
+        )
+
+    assert existing.read_bytes() == b"keep this image"
+
+
+def test_replacement_commit_failure_restores_every_existing_image(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "midi"
+    output = tmp_path / "images"
+    source.mkdir()
+    output.mkdir()
+    for index in range(1, 3):
+        (source / f"Song {index}.mid").write_bytes(
+            _midi_bytes(f"Song {index}")
+        )
+    first = output / "ROLL0001.img"
+    second = output / "ROLL0002.img"
+    first.write_bytes(b"first existing image")
+    second.write_bytes(b"second existing image")
+    real_finish = emulator_image_builder._finish_temp_output
+    commit_calls = []
+
+    def fail_second_commit(staged_path, final_path):
+        commit_calls.append(final_path)
+        if len(commit_calls) == 2:
+            raise OSError("simulated commit failure")
+        return real_finish(staged_path, final_path)
+
+    monkeypatch.setattr(emulator_image_builder, "PIANODIR_MAX_TRACKS", 1)
+    monkeypatch.setattr(
+        emulator_image_builder,
+        "_finish_temp_output",
+        fail_second_commit,
+    )
+
+    with pytest.raises(OSError, match="simulated commit failure"):
+        build_emulator_disk_images(
+            source,
+            output,
+            prefix="ROLL",
+            starting_number=1,
+            disk_format=_disk_format(),
+            output_ext="img",
+            output_content="eseq",
+            overwrite_existing=True,
+        )
+
+    assert commit_calls == [str(first), str(second)]
+    assert first.read_bytes() == b"first existing image"
+    assert second.read_bytes() == b"second existing image"
+
+
+def test_default_prefix_numbers_even_a_single_image(tmp_path):
+    source = tmp_path / "songs"
+    output = tmp_path / "images"
+    source.mkdir()
+    (source / "Song.mid").write_bytes(_midi_bytes("Song"))
+
+    result = build_emulator_disk_images(
+        source,
+        output,
+        disk_format=_disk_format(),
+        output_ext="img",
+        output_content="midi",
+    )
+
+    assert [Path(path).name for path in result.output_paths] == ["DSKA0001.img"]
+    assert result.song_list_path == ""
+    assert not list(output.glob("*.txt"))
+
+
+def test_include_song_lists_writes_every_image_and_song_in_packed_order(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "songs"
+    output = tmp_path / "images"
+    source.mkdir()
+    for index, title in enumerate(("First   Song", "Second Song", "Third Song"), start=1):
+        (source / f"Song {index}.mid").write_bytes(_midi_bytes(title))
+
+    monkeypatch.setattr(emulator_image_builder, "PIANODIR_MAX_TRACKS", 2)
+    result = build_emulator_disk_images(
+        source,
+        output,
+        prefix="LIST",
+        starting_number=5,
+        album_title="Customer Album",
+        disk_format=_disk_format(),
+        output_ext="img",
+        output_content="eseq",
+        include_song_lists=True,
+    )
+
+    assert Path(result.song_list_path).name == "LIST0005-LIST0006-song-lists.txt"
+    assert Path(result.song_list_path).read_text(encoding="utf-8") == (
+        "Emulator Disk Set Song Lists\n"
+        "Images: 2\n"
+        "Songs: 3\n"
+        "\n"
+        "Image 1 of 2: LIST0005.img\n"
+        "Album: Customer Album\n"
+        "Catalog: LIST-0005\n"
+        "\n"
+        "1. First Song\n"
+        "2. Second Song\n"
+        "\n"
+        "Image 2 of 2: LIST0006.img\n"
+        "Album: Customer Album\n"
+        "Catalog: LIST-0006\n"
+        "\n"
+        "1. Third Song\n"
+    )
+
+
+def test_existing_song_list_is_not_overwritten(tmp_path):
+    source = tmp_path / "songs"
+    output = tmp_path / "images"
+    source.mkdir()
+    output.mkdir()
+    (source / "Song.mid").write_bytes(_midi_bytes("Song"))
+    existing = output / "KEEP0007-song-list.txt"
+    existing.write_text("keep this", encoding="utf-8")
+
+    with pytest.raises(FloppyImageError, match="already exists"):
+        build_emulator_disk_images(
+            source,
+            output,
+            prefix="KEEP",
+            starting_number=7,
+            disk_format=_disk_format(),
+            output_ext="img",
+            output_content="midi",
+            include_song_lists=True,
+        )
+
+    assert existing.read_text(encoding="utf-8") == "keep this"
+    assert not (output / "KEEP0007.img").exists()
+
+
+def test_eseq_album_title_defaults_to_the_generated_catalog_id(tmp_path):
+    source = tmp_path / "songs"
+    output = tmp_path / "images"
+    source.mkdir()
+    (source / "Song.mid").write_bytes(_midi_bytes("Song"))
+
+    result = build_emulator_disk_images(
+        source,
+        output,
+        prefix="DSKC",
+        starting_number=42,
+        disk_format=_disk_format(),
+        output_ext="img",
+        output_content="eseq",
+    )
+
+    session = FloppyImageSession.load(result.output_paths[0])
+    try:
+        metadata = read_pianodir_metadata_from_file(
+            session.extract_file(PIANODIR_FILENAME)
+        )
+    finally:
+        session.cleanup()
+
+    assert metadata.catalog_number == "DSKC-0042"
+    assert metadata.disk_title == "DSKC-0042"
+
+
+def test_shuffle_randomizes_the_order_before_disk_packing(tmp_path, monkeypatch):
+    source = tmp_path / "songs"
+    output = tmp_path / "images"
+    source.mkdir()
+    for index in range(1, 4):
+        (source / f"Song {index}.mid").write_bytes(_midi_bytes(f"Song {index}"))
+
+    monkeypatch.setattr(
+        emulator_image_builder.random,
+        "shuffle",
+        lambda paths: paths.reverse(),
+    )
+    result = build_emulator_disk_images(
+        source,
+        output,
+        shuffle=True,
+        disk_format=_disk_format(),
+        output_ext="img",
+        output_content="midi",
+        include_song_lists=True,
+    )
+
+    session = FloppyImageSession.load(result.output_paths[0])
+    try:
+        titles = [
+            extract_first_title_from_midi(session.extract_file(entry.path))
+            for entry in session.list_entries().entries
+        ]
+    finally:
+        session.cleanup()
+
+    assert result.shuffled is True
+    assert titles == ["Song 3", "Song 2", "Song 1"]
+    song_list_text = Path(result.song_list_path).read_text(encoding="utf-8")
+    assert song_list_text.index("1. Song 3") < song_list_text.index("2. Song 2")
+    assert song_list_text.index("2. Song 2") < song_list_text.index("3. Song 1")
+
+
+def test_reserves_requested_free_space_when_packing_disks(tmp_path):
+    source = tmp_path / "songs"
+    output = tmp_path / "images"
+    source.mkdir()
+    for index in range(1, 3):
+        (source / f"Large {index}.mid").write_bytes(
+            _large_midi_bytes(f"Large {index}", 190_000)
+        )
+
+    margin = 400 * 1024
+    result = build_emulator_disk_images(
+        source,
+        output,
+        prefix="SAFE",
+        starting_number=7,
+        safety_margin_bytes=margin,
+        disk_format=_disk_format(),
+        output_ext="img",
+        output_content="midi",
+    )
+
+    assert [Path(path).name for path in result.output_paths] == [
+        "SAFE0007.img",
+        "SAFE0008.img",
+    ]
+    assert all(
+        read_image_listing(path).free_space >= margin
+        for path in result.output_paths
+    )
+
+
+@pytest.mark.parametrize("starting_number", [-1, 10_000, "invalid"])
+def test_rejects_invalid_starting_numbers(tmp_path, starting_number):
+    source = tmp_path / "songs"
+    source.mkdir()
+    (source / "Song.mid").write_bytes(_midi_bytes("Song"))
+
+    with pytest.raises(FloppyImageError, match="starting disk number"):
+        build_emulator_disk_images(
+            source,
+            tmp_path / "images",
+            starting_number=starting_number,
+            output_ext="img",
+            output_content="midi",
+        )
+
+
+def test_rejects_a_set_that_would_run_past_slot_9999(tmp_path, monkeypatch):
+    source = tmp_path / "songs"
+    source.mkdir()
+    for index in range(2):
+        (source / f"Song {index}.mid").write_bytes(_midi_bytes(f"Song {index}"))
+    monkeypatch.setattr(emulator_image_builder, "PIANODIR_MAX_TRACKS", 1)
+
+    with pytest.raises(FloppyImageError, match="exceed disk 9999"):
+        build_emulator_disk_images(
+            source,
+            tmp_path / "images",
+            starting_number=9999,
+            output_ext="img",
+            output_content="eseq",
+        )

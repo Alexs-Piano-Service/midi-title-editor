@@ -1,15 +1,75 @@
+import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import pytest
 from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import (
+    QApplication,
+    QProgressDialog,
+    QStyle,
+    QStyleFactory,
+    QWidget,
+    QWidgetItem,
+)
 
 from aps_midi_prep_tool_app.main_window import (
     MidiTitleWindow,
+    _TooltipDelayStyle,
     _build_dark_palette,
     _build_light_palette,
     _effective_appearance_mode,
 )
+
+
+def test_tooltip_style_sanitizes_internal_layout_items_before_base_call():
+    app = QApplication.instance() or QApplication([])
+    widget = QWidget()
+    layout_item = QWidgetItem(widget)
+    style = _TooltipDelayStyle(QStyleFactory.create("Fusion"))
+
+    result = style.styleHint(
+        QStyle.StyleHint.SH_ToolTip_WakeUpDelay,
+        None,
+        layout_item,
+        None,
+    )
+
+    assert isinstance(result, int)
+    widget.deleteLater()
+    del app
+
+
+def test_emulator_progress_dialog_keeps_a_stable_width_for_long_paths():
+    app = QApplication.instance() or QApplication([])
+    dialog = QProgressDialog("Preparing...", "Cancel", 0, 10)
+    window = SimpleNamespace(
+        _scaled_int=lambda value, minimum=0: max(int(minimum), int(value)),
+    )
+    window._set_progress_dialog_message = (
+        lambda progress_dialog, message: MidiTitleWindow._set_progress_dialog_message(
+            window,
+            progress_dialog,
+            message,
+        )
+    )
+
+    MidiTitleWindow._stabilize_progress_dialog_width(window, dialog)
+    long_message = (
+        "Preparing /a/very/long/customer/library/path/"
+        + "/nested-folder" * 40
+        + "/Song.mid"
+    )
+    MidiTitleWindow._set_progress_dialog_message(window, dialog, long_message)
+
+    assert dialog.minimumWidth() == 640
+    assert dialog.maximumWidth() == 640
+    assert dialog.labelText() != long_message
+    assert dialog._aps_stable_progress_label.toolTip() == long_message
+    dialog.deleteLater()
+    del app
 
 
 def _relative_luminance(color):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import random
 import re
 import shutil
 import tempfile
@@ -34,6 +35,7 @@ from .floppy_image import (
     _finish_temp_output,
     _is_image_capacity_error,
     _write_image_direct,
+    allocated_size,
     create_blank_floppy_image,
     read_image_listing,
 )
@@ -50,6 +52,10 @@ ESEQ_EXTENSIONS = {".fil", ".mda"}
 SONG_EXTENSIONS = MIDI_EXTENSIONS | ESEQ_EXTENSIONS
 EMULATOR_IMAGE_EXTENSIONS = {"img", "hfe"}
 EMULATOR_CONTENT_FORMATS = {"eseq", "midi"}
+DEFAULT_IMAGE_PREFIX = "DSKA"
+DEFAULT_STARTING_NUMBER = 1
+DEFAULT_SAFETY_MARGIN_BYTES = 32 * 1024
+MAX_IMAGE_NUMBER = 9999
 _INVALID_PORTABLE_FILENAME_CHARS = '<>:"/\\|?*'
 _NATURAL_NUMBER_RE = re.compile(r"(\d+)")
 
@@ -64,6 +70,11 @@ class EmulatorImageBuildResult:
     images_created: int
     output_content: str
     output_paths: tuple[str, ...]
+    image_prefix: str
+    starting_number: int
+    safety_margin_bytes: int
+    shuffled: bool
+    song_list_path: str = ""
 
     @property
     def midi_files_found(self):
@@ -148,13 +159,34 @@ def sanitize_image_set_name(name, fallback="Emulator Disks"):
     return (text or fallback)[:120].rstrip(" .") or fallback
 
 
-def _volume_label(set_name, image_number):
-    base = "".join(
-        char for char in str(set_name or "").upper()
+def sanitize_image_prefix(prefix, fallback=DEFAULT_IMAGE_PREFIX):
+    """Return a Nalbantov-style one-to-four-character image prefix."""
+    cleaned = "".join(
+        char
+        for char in str(prefix or "").upper()
         if "A" <= char <= "Z" or "0" <= char <= "9"
-    ) or "ESEQ"
-    suffix = f"{max(1, int(image_number)):02d}"
-    return f"{base[:max(1, 11 - len(suffix))]}{suffix}"[:11]
+    )[:4]
+    if cleaned:
+        return cleaned
+    fallback_cleaned = "".join(
+        char
+        for char in str(fallback or DEFAULT_IMAGE_PREFIX).upper()
+        if "A" <= char <= "Z" or "0" <= char <= "9"
+    )[:4]
+    return fallback_cleaned or DEFAULT_IMAGE_PREFIX
+
+
+def _numbered_image_stem(image_prefix, image_number):
+    image_number = int(image_number)
+    if not 0 <= image_number <= MAX_IMAGE_NUMBER:
+        raise FloppyImageError(
+            f"Disk number must be between 0 and {MAX_IMAGE_NUMBER}."
+        )
+    return f"{sanitize_image_prefix(image_prefix)}{image_number:04d}"
+
+
+def _volume_label(image_prefix, image_number):
+    return _numbered_image_stem(image_prefix, image_number)[:11]
 
 
 def _raise_if_cancelled(cancel_callback):
@@ -306,7 +338,26 @@ def _directory_path_for_songs(temp_directory, songs, metadata, image_number):
     return output_path
 
 
-def _verify_raw_image(raw_path, songs, *, include_pianodir):
+def _metadata_for_disk(metadata, image_prefix, disk_number):
+    """Use the emulator slot as the catalog ID unless an API caller overrides it."""
+    catalog_number = (
+        metadata.catalog_number
+        or f"{sanitize_image_prefix(image_prefix)}-{int(disk_number):04d}"
+    )
+    return PianodirMetadata(
+        catalog_number=catalog_number,
+        disk_title=metadata.disk_title or catalog_number,
+        raw_label_bytes=metadata.raw_label_bytes,
+    )
+
+
+def _verify_raw_image(
+    raw_path,
+    songs,
+    *,
+    include_pianodir,
+    safety_margin_bytes=0,
+):
     listing = read_image_listing(raw_path)
     actual_names = {
         os.path.basename(entry.path).upper()
@@ -328,6 +379,12 @@ def _verify_raw_image(raw_path, songs, *, include_pianodir):
             "Generated image verification failed"
             + (f" ({'; '.join(detail)})" if detail else ".")
         )
+    if listing.free_space < safety_margin_bytes:
+        raise FloppyImageError(
+            "Generated image verification failed: the disk has only "
+            f"{listing.free_space:,} bytes free, below the requested "
+            f"{safety_margin_bytes:,}-byte safety margin."
+        )
 
 
 def _pack_raw_images(
@@ -335,7 +392,9 @@ def _pack_raw_images(
     temp_directory,
     disk_format,
     *,
-    set_name,
+    image_prefix,
+    starting_number,
+    safety_margin_bytes,
     metadata,
     output_content,
     progress_callback=None,
@@ -344,7 +403,12 @@ def _pack_raw_images(
 ):
     include_pianodir = output_content == "eseq"
     placeholder_path = (
-        _directory_path_for_songs(temp_directory, [], metadata, 0)
+        _directory_path_for_songs(
+            temp_directory,
+            [],
+            _metadata_for_disk(metadata, image_prefix, starting_number),
+            0,
+        )
         if include_pianodir
         else ""
     )
@@ -355,10 +419,16 @@ def _pack_raw_images(
 
     def start_image(image_number):
         raw_path = os.path.join(temp_directory, f"raw_{image_number:03d}.img")
+        disk_number = starting_number + image_number - 1
+        if disk_number > MAX_IMAGE_NUMBER:
+            raise FloppyImageError(
+                f"This set would exceed disk {MAX_IMAGE_NUMBER}; choose a lower "
+                "starting number."
+            )
         create_blank_floppy_image(
             raw_path,
             disk_format,
-            volume_label=_volume_label(set_name, image_number),
+            volume_label=_volume_label(image_prefix, disk_number),
             cancel_callback=cancel_callback,
         )
         if include_pianodir:
@@ -370,15 +440,38 @@ def _pack_raw_images(
             )
         return raw_path
 
+    def has_room_with_margin(raw_path, song):
+        listing = read_image_listing(raw_path)
+        required_bytes = allocated_size(
+            os.path.getsize(song.local_path),
+            listing.cluster_size,
+        )
+        return listing.free_space - required_bytes >= safety_margin_bytes
+
+    def too_large_message(song):
+        preparation_note = (
+            " after E-SEQ conversion" if output_content == "eseq" else ""
+        )
+        margin_note = (
+            f" while preserving the {safety_margin_bytes // 1024:,} KiB safety margin"
+            if safety_margin_bytes
+            else ""
+        )
+        return (
+            f"'{os.path.basename(song.source_path)}' is too large to fit on "
+            f"a {disk_format.label} image{preparation_note}{margin_note}."
+        )
+
     def finish_image():
         if not current_raw or not current_songs:
             return
         image_number = len(raw_images) + 1
         if include_pianodir:
+            disk_number = starting_number + image_number - 1
             directory_path = _directory_path_for_songs(
                 temp_directory,
                 current_songs,
-                metadata,
+                _metadata_for_disk(metadata, image_prefix, disk_number),
                 image_number,
             )
             _delete_eseq_directory_entries_from_image(
@@ -395,6 +488,7 @@ def _pack_raw_images(
             current_raw,
             current_songs,
             include_pianodir=include_pianodir,
+            safety_margin_bytes=safety_margin_bytes,
         )
         raw_images.append((current_raw, tuple(current_songs)))
 
@@ -418,6 +512,15 @@ def _pack_raw_images(
             current_songs = []
             current_raw = start_image(len(raw_images) + 1)
 
+        if not has_room_with_margin(current_raw, song):
+            if not current_songs:
+                raise FloppyImageError(too_large_message(song))
+            finish_image()
+            current_songs = []
+            current_raw = start_image(len(raw_images) + 1)
+            if not has_room_with_margin(current_raw, song):
+                raise FloppyImageError(too_large_message(song))
+
         try:
             _copy_host_file_into_image(
                 current_raw,
@@ -432,17 +535,13 @@ def _pack_raw_images(
                 raise
 
         if not current_songs:
-            preparation_note = (
-                " after E-SEQ conversion" if output_content == "eseq" else ""
-            )
-            raise FloppyImageError(
-                f"'{os.path.basename(song.source_path)}' is too large to fit on "
-                f"a {disk_format.label} image{preparation_note}."
-            )
+            raise FloppyImageError(too_large_message(song))
 
         finish_image()
         current_songs = []
         current_raw = start_image(len(raw_images) + 1)
+        if not has_room_with_margin(current_raw, song):
+            raise FloppyImageError(too_large_message(song))
         try:
             _copy_host_file_into_image(
                 current_raw,
@@ -452,13 +551,7 @@ def _pack_raw_images(
             )
         except FloppyImageError as exc:
             if _is_image_capacity_error(exc):
-                preparation_note = (
-                    " after E-SEQ conversion" if output_content == "eseq" else ""
-                )
-                raise FloppyImageError(
-                    f"'{os.path.basename(song.source_path)}' is too large to fit on "
-                    f"a {disk_format.label} image{preparation_note}."
-                ) from exc
+                raise FloppyImageError(too_large_message(song)) from exc
             raise
         current_songs.append(song)
 
@@ -466,39 +559,121 @@ def _pack_raw_images(
     return raw_images
 
 
-def _output_paths(output_directory, set_name, output_ext, image_count):
-    if image_count == 1:
-        filenames = [f"{set_name}.{output_ext}"]
-    else:
-        digits = max(2, len(str(image_count)))
-        filenames = [
-            f"{set_name}_{index:0{digits}d}.{output_ext}"
-            for index in range(1, image_count + 1)
-        ]
+def _output_paths(
+    output_directory,
+    image_prefix,
+    output_ext,
+    image_count,
+    starting_number,
+):
+    filenames = [
+        f"{_numbered_image_stem(image_prefix, image_number)}.{output_ext}"
+        for image_number in range(
+            starting_number,
+            starting_number + image_count,
+        )
+    ]
     return [os.path.join(output_directory, filename) for filename in filenames]
+
+
+def _song_lists_output_path(
+    output_directory,
+    image_prefix,
+    starting_number,
+    image_count,
+):
+    first_stem = _numbered_image_stem(image_prefix, starting_number)
+    if image_count == 1:
+        filename = f"{first_stem}-song-list.txt"
+    else:
+        last_stem = _numbered_image_stem(
+            image_prefix,
+            starting_number + image_count - 1,
+        )
+        filename = f"{first_stem}-{last_stem}-song-lists.txt"
+    return os.path.join(output_directory, filename)
+
+
+def _song_list_display_text(value, fallback=""):
+    text = re.sub(r"\s+", " ", str(value or "").replace("\x00", " ")).strip()
+    return text or fallback
+
+
+def _build_emulator_song_lists_text(
+    raw_images,
+    final_paths,
+    *,
+    image_prefix,
+    starting_number,
+    metadata,
+    output_content,
+):
+    lines = [
+        "Emulator Disk Set Song Lists",
+        f"Images: {len(final_paths)}",
+        f"Songs: {sum(len(songs) for _raw_path, songs in raw_images)}",
+        "",
+    ]
+    for image_index, ((_raw_path, songs), final_path) in enumerate(
+        zip(raw_images, final_paths),
+        start=1,
+    ):
+        lines.append(
+            f"Image {image_index} of {len(final_paths)}: {os.path.basename(final_path)}"
+        )
+        if output_content == "eseq":
+            disk_metadata = _metadata_for_disk(
+                metadata,
+                image_prefix,
+                starting_number + image_index - 1,
+            )
+            disk_title = _song_list_display_text(disk_metadata.disk_title)
+            catalog_number = _song_list_display_text(disk_metadata.catalog_number)
+            if disk_title:
+                lines.append(f"Album: {disk_title}")
+            if catalog_number:
+                lines.append(f"Catalog: {catalog_number}")
+        lines.append("")
+        for song_index, song in enumerate(songs, start=1):
+            lines.append(
+                f"{song_index}. {_song_list_display_text(song.title, 'Untitled')}"
+            )
+        if image_index < len(final_paths):
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def build_emulator_disk_images(
     source_directory,
     output_directory,
     *,
-    set_name="",
+    prefix=None,
+    starting_number=DEFAULT_STARTING_NUMBER,
+    safety_margin_bytes=DEFAULT_SAFETY_MARGIN_BYTES,
+    set_name=None,
     album_title="",
     catalog_number="",
     disk_format=None,
-    output_ext="img",
+    output_ext="hfe",
     output_content="eseq",
     include_subfolders=True,
+    shuffle=False,
+    include_song_lists=False,
+    overwrite_existing=False,
+    overwrite_callback=None,
     language_code=None,
     progress_callback=None,
     cancel_callback=None,
     midi_to_eseq_converter=None,
     eseq_to_midi_converter=None,
 ):
-    """Build emulator-ready disk images containing only E-SEQ or only MIDI."""
+    """Build numbered emulator-ready images containing only E-SEQ or only MIDI.
+
+    ``set_name`` is retained as a compatibility alias for ``prefix``.
+    """
     source_directory = os.path.abspath(os.fspath(source_directory))
     output_directory = os.path.abspath(os.fspath(output_directory))
-    output_ext = str(output_ext or "img").lower().lstrip(".")
+    output_ext = str(output_ext or "hfe").lower().lstrip(".")
     if output_ext not in EMULATOR_IMAGE_EXTENSIONS:
         raise FloppyImageError(
             "Emulator image format must be raw IMG or HFE."
@@ -510,6 +685,20 @@ def build_emulator_disk_images(
         disk_format = next(item for item in DISK_FORMATS if item.key == "ibm.720")
     if disk_format not in DISK_FORMATS:
         raise FloppyImageError("Choose a supported IBM floppy disk format.")
+    try:
+        starting_number = int(starting_number)
+    except (TypeError, ValueError) as exc:
+        raise FloppyImageError("The starting disk number must be a whole number.") from exc
+    if not 0 <= starting_number <= MAX_IMAGE_NUMBER:
+        raise FloppyImageError(
+            f"The starting disk number must be between 0 and {MAX_IMAGE_NUMBER}."
+        )
+    try:
+        safety_margin_bytes = int(safety_margin_bytes)
+    except (TypeError, ValueError) as exc:
+        raise FloppyImageError("The safety margin must be a whole number of bytes.") from exc
+    if safety_margin_bytes < 0:
+        raise FloppyImageError("The safety margin cannot be negative.")
 
     song_paths = discover_song_files(
         source_directory,
@@ -519,11 +708,13 @@ def build_emulator_disk_images(
         raise FloppyImageError(
             "The selected folder does not contain any MIDI or Yamaha E-SEQ song files."
         )
+    shuffle = bool(shuffle)
+    include_song_lists = bool(include_song_lists)
+    if shuffle:
+        random.shuffle(song_paths)
 
-    set_name = sanitize_image_set_name(
-        set_name or os.path.basename(os.path.normpath(source_directory))
-    )
-    album_title = str(album_title or set_name).strip()
+    image_prefix = sanitize_image_prefix(prefix if prefix is not None else set_name)
+    album_title = str(album_title or "").strip()
     catalog_number = str(catalog_number or "").strip()
     metadata = PianodirMetadata(
         catalog_number=catalog_number,
@@ -538,6 +729,7 @@ def build_emulator_disk_images(
 
     temp_directory = tempfile.mkdtemp(prefix="aps_emulator_images_")
     committed_paths = []
+    replacement_backups = {}
     try:
         prepared_songs, converted_count = _prepare_song_files(
             song_paths,
@@ -553,28 +745,75 @@ def build_emulator_disk_images(
             prepared_songs,
             temp_directory,
             disk_format,
-            set_name=set_name,
+            image_prefix=image_prefix,
+            starting_number=starting_number,
+            safety_margin_bytes=safety_margin_bytes,
             metadata=metadata,
             output_content=output_content,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
             language_code=language_code,
         )
+        ending_number = starting_number + len(raw_images) - 1
+        if ending_number > MAX_IMAGE_NUMBER:
+            raise FloppyImageError(
+                f"This set would end at disk {ending_number}; choose a starting "
+                f"number that keeps every disk at {MAX_IMAGE_NUMBER} or below."
+            )
         final_paths = _output_paths(
             output_directory,
-            set_name,
+            image_prefix,
             output_ext,
             len(raw_images),
+            starting_number,
         )
-        existing_paths = [path for path in final_paths if os.path.lexists(path)]
-        if existing_paths:
-            names = ", ".join(os.path.basename(path) for path in existing_paths[:3])
-            if len(existing_paths) > 3:
-                names += ", ..."
-            raise FloppyImageError(
-                f"Output image already exists: {names}. Choose another set name "
-                "or output folder."
+        song_list_path = (
+            _song_lists_output_path(
+                output_directory,
+                image_prefix,
+                starting_number,
+                len(raw_images),
             )
+            if include_song_lists
+            else ""
+        )
+        output_candidates = [*final_paths]
+        if song_list_path:
+            output_candidates.append(song_list_path)
+        existing_paths = [path for path in output_candidates if os.path.lexists(path)]
+        if existing_paths:
+            invalid_paths = [
+                path
+                for path in existing_paths
+                if not os.path.isfile(path) or os.path.islink(path)
+            ]
+            if invalid_paths:
+                names = ", ".join(
+                    os.path.basename(path) for path in invalid_paths[:3]
+                )
+                if len(invalid_paths) > 3:
+                    names += ", ..."
+                raise FloppyImageError(
+                    f"Output path cannot be replaced as a regular file: {names}."
+                )
+
+            overwrite_approved = bool(overwrite_existing)
+            if not overwrite_approved and overwrite_callback is not None:
+                _raise_if_cancelled(cancel_callback)
+                overwrite_approved = bool(overwrite_callback(tuple(existing_paths)))
+                _raise_if_cancelled(cancel_callback)
+            if not overwrite_approved:
+                if overwrite_callback is not None:
+                    raise FloppyOperationCancelled(
+                        "Emulator image replacement was cancelled."
+                    )
+                names = ", ".join(os.path.basename(path) for path in existing_paths[:3])
+                if len(existing_paths) > 3:
+                    names += ", ..."
+                raise FloppyImageError(
+                    f"Output file already exists: {names}. Choose another prefix, "
+                    "starting number, or output folder."
+                )
 
         staged_outputs = []
         total_steps = len(prepared_songs) * 2 + len(raw_images)
@@ -601,10 +840,41 @@ def build_emulator_disk_images(
             _write_image_direct(raw_path, staged_path, output_ext, disk_format)
             staged_outputs.append((staged_path, final_path))
 
+        if song_list_path:
+            staged_song_list_path = os.path.join(
+                temp_directory,
+                "emulator_song_lists.txt",
+            )
+            with open(
+                staged_song_list_path,
+                "w",
+                encoding="utf-8",
+                newline="\n",
+            ) as handle:
+                handle.write(
+                    _build_emulator_song_lists_text(
+                        raw_images,
+                        final_paths,
+                        image_prefix=image_prefix,
+                        starting_number=starting_number,
+                        metadata=metadata,
+                        output_content=output_content,
+                    )
+                )
+            staged_outputs.append((staged_song_list_path, song_list_path))
+
         _raise_if_cancelled(cancel_callback)
+        for backup_index, existing_path in enumerate(existing_paths, start=1):
+            backup_path = os.path.join(
+                temp_directory,
+                f"existing_output_{backup_index:04d}.bak",
+            )
+            shutil.copy2(existing_path, backup_path)
+            replacement_backups[existing_path] = backup_path
+
         for staged_path, final_path in staged_outputs:
-            _finish_temp_output(staged_path, final_path)
             committed_paths.append(final_path)
+            _finish_temp_output(staged_path, final_path)
 
         _notify(
             progress_callback,
@@ -625,11 +895,20 @@ def build_emulator_disk_images(
             images_created=len(final_paths),
             output_content=output_content,
             output_paths=tuple(final_paths),
+            image_prefix=image_prefix,
+            starting_number=starting_number,
+            safety_margin_bytes=safety_margin_bytes,
+            shuffled=shuffle,
+            song_list_path=song_list_path,
         )
     except Exception:
-        for path in committed_paths:
+        for path in reversed(committed_paths):
             try:
-                os.remove(path)
+                backup_path = replacement_backups.get(path)
+                if backup_path and os.path.isfile(backup_path):
+                    shutil.copy2(backup_path, path)
+                elif os.path.lexists(path):
+                    os.remove(path)
             except OSError:
                 pass
         raise

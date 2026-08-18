@@ -1,3 +1,5 @@
+import threading
+
 from PySide6.QtCore import QThread, Signal
 
 from .bulk_extraction import bulk_extract_images
@@ -236,6 +238,7 @@ class BulkExtractionWorker(_CancellableDiskWorker):
 class EmulatorImageBuildWorker(_CancellableDiskWorker):
     buildFinished = Signal(object)
     buildFailed = Signal(str)
+    overwriteRequested = Signal(object)
     CANCELLED_MESSAGE = "Emulator image creation cancelled."
 
     def __init__(
@@ -243,40 +246,70 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
         source_directory,
         output_directory,
         *,
-        set_name,
+        prefix,
+        starting_number,
+        safety_margin_bytes,
         album_title,
-        catalog_number,
         disk_format,
         output_ext,
         output_content="eseq",
         include_subfolders=True,
+        shuffle=False,
+        include_song_lists=False,
         language_code=None,
         parent=None,
     ):
         super().__init__(parent)
         self.source_directory = source_directory
         self.output_directory = output_directory
-        self.set_name = set_name
+        self.prefix = prefix
+        self.starting_number = int(starting_number)
+        self.safety_margin_bytes = int(safety_margin_bytes)
         self.album_title = album_title
-        self.catalog_number = catalog_number
         self.disk_format = disk_format
         self.output_ext = output_ext
         self.output_content = output_content
         self.include_subfolders = bool(include_subfolders)
+        self.shuffle = bool(shuffle)
+        self.include_song_lists = bool(include_song_lists)
         self.language_code = language_code
+        self._overwrite_response = False
+        self._overwrite_response_event = threading.Event()
+
+    def cancel(self):
+        super().cancel()
+        self._overwrite_response_event.set()
+
+    def resolve_overwrite_request(self, approved):
+        self._overwrite_response = bool(approved)
+        self._overwrite_response_event.set()
+
+    def _request_overwrite_confirmation(self, existing_paths):
+        self._raise_if_cancelled()
+        self._overwrite_response = False
+        self._overwrite_response_event.clear()
+        self.overwriteRequested.emit(tuple(existing_paths or ()))
+        while not self._overwrite_response_event.wait(0.1):
+            self._raise_if_cancelled()
+        self._raise_if_cancelled()
+        return self._overwrite_response
 
     def run(self):
         try:
             result = build_emulator_disk_images(
                 self.source_directory,
                 self.output_directory,
-                set_name=self.set_name,
+                prefix=self.prefix,
+                starting_number=self.starting_number,
+                safety_margin_bytes=self.safety_margin_bytes,
                 album_title=self.album_title,
-                catalog_number=self.catalog_number,
                 disk_format=self.disk_format,
                 output_ext=self.output_ext,
                 output_content=self.output_content,
                 include_subfolders=self.include_subfolders,
+                shuffle=self.shuffle,
+                include_song_lists=self.include_song_lists,
+                overwrite_callback=self._request_overwrite_confirmation,
                 language_code=self.language_code,
                 progress_callback=self._emit_progress,
                 cancel_callback=self._cancel_requested,

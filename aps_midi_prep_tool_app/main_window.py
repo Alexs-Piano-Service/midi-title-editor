@@ -61,6 +61,8 @@ from PySide6.QtWidgets import (
     QToolTip,
     QStyledItemDelegate,
     QStyle,
+    QStyleHintReturn,
+    QStyleOption,
     QStyleOptionViewItem,
     QComboBox,
     QCompleter,
@@ -114,6 +116,7 @@ from .midi_type0_converter import (
     apply_pedal_compatibility_to_midi_path,
     convert_midi_file_to_type0_path,
 )
+from .xf_stripper import strip_xf_from_midi_path
 from .ui_utils import (
     center_dialog_on_parent,
     embedded_logo_dt,
@@ -390,6 +393,13 @@ class _TooltipDelayStyle(QProxyStyle):
     DEFAULT_WAKE_UP_DELAY_MS = 700
 
     def styleHint(self, hint, option=None, widget=None, returnData=None):
+        # Some Qt layout paths reach this Python override with a QWidgetItem in
+        # the nominal QWidget slot. PySide's bound base method rejects that
+        # internal QLayoutItem type, so only forward arguments accepted by the
+        # public QStyle signature.
+        option = option if isinstance(option, QStyleOption) else None
+        widget = widget if isinstance(widget, QWidget) else None
+        returnData = returnData if isinstance(returnData, QStyleHintReturn) else None
         if hint == QStyle.StyleHint.SH_ToolTip_WakeUpDelay:
             base_delay = super().styleHint(hint, option, widget, returnData)
             return base_delay if base_delay >= 400 else self.DEFAULT_WAKE_UP_DELAY_MS
@@ -8560,13 +8570,16 @@ class MidiTitleWindow(QMainWindow):
     SETTING_BULK_EXTRACTION_USE_ALBUM_NAMES = "bulk_extraction_use_album_names"
     SETTING_EMULATOR_IMAGE_SOURCE = "emulator_image_source"
     SETTING_EMULATOR_IMAGE_OUTPUT = "emulator_image_output"
-    SETTING_EMULATOR_IMAGE_SET_NAME = "emulator_image_set_name"
-    SETTING_EMULATOR_IMAGE_ALBUM_TITLE = "emulator_image_album_title"
-    SETTING_EMULATOR_IMAGE_CATALOG_NUMBER = "emulator_image_catalog_number"
+    SETTING_EMULATOR_IMAGE_PREFIX = "emulator_image_prefix"
+    SETTING_EMULATOR_IMAGE_STARTING_NUMBER = "emulator_image_starting_number"
+    SETTING_EMULATOR_IMAGE_SAFETY_MARGIN_KIB = "emulator_image_safety_margin_kib"
+    SETTING_EMULATOR_IMAGE_ALBUM_TITLE_OVERRIDE = "emulator_image_album_title_override"
     SETTING_EMULATOR_IMAGE_CONTENT = "emulator_image_content"
     SETTING_EMULATOR_IMAGE_OUTPUT_FORMAT = "emulator_image_output_format"
     SETTING_EMULATOR_IMAGE_DISK_FORMAT = "emulator_image_disk_format"
     SETTING_EMULATOR_IMAGE_INCLUDE_SUBFOLDERS = "emulator_image_include_subfolders"
+    SETTING_EMULATOR_IMAGE_SHUFFLE = "emulator_image_shuffle"
+    SETTING_EMULATOR_IMAGE_INCLUDE_SONG_LISTS = "emulator_image_include_song_lists"
     SETTING_CHECK_UPDATES_AT_STARTUP = "check_updates_at_startup"
     SETTING_SKIP_UPDATE_REMINDERS = "skip_update_reminders"
     SETTING_WRITE_TAG_SIDECARS = "write_tag_sidecars"
@@ -9393,6 +9406,13 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesPedalCompatibilityAction.triggered.connect(self.show_pedal_compatibility_utility)
         self.utilitiesMenu.addAction(self.utilitiesPedalCompatibilityAction)
 
+        self.utilitiesStripXfAction = QAction("Strip XF Data...", self)
+        self.utilitiesStripXfAction.setToolTip(
+            self._lt("Remove Yamaha XF metadata from one listed MIDI file or all listed MIDI files.")
+        )
+        self.utilitiesStripXfAction.triggered.connect(self.show_xf_stripping_utility)
+        self.utilitiesMenu.addAction(self.utilitiesStripXfAction)
+
         self.utilitiesSmfAction = QAction("Convert All SMF1 to SMF0", self)
         self.utilitiesSmfAction.triggered.connect(self.convert_all_to_type0)
 
@@ -10050,6 +10070,7 @@ class MidiTitleWindow(QMainWindow):
             {"id": "utilities.eseq_to_midi", "category": "Utilities", "label": "Convert All E-SEQ to MIDI", "action": "utilitiesEseqToMidiAction", "default": "Ctrl+Shift+M"},
             {"id": "utilities.midi_to_eseq", "category": "Utilities", "label": "Convert All MIDI to E-SEQ", "action": "utilitiesMidiToEseqAction", "default": "Ctrl+Shift+E"},
             {"id": "utilities.pedal_compatibility", "category": "Utilities", "label": "Apply Pedal Compatibility...", "action": "utilitiesPedalCompatibilityAction", "default": ""},
+            {"id": "utilities.strip_xf", "category": "Utilities", "label": "Strip XF Data...", "action": "utilitiesStripXfAction", "default": ""},
             {"id": "utilities.recover_image", "category": "Disk", "label": "Recover Damaged Image...", "action": "utilitiesRecoverImageAction", "default": "Ctrl+Shift+D"},
             {"id": "utilities.format_floppy", "category": "Disk", "label": "Format Floppy Disk...", "action": "utilitiesFormatFloppyAction", "default": "F6"},
             {"id": "settings.reset_hidden_dialogs", "category": "Settings", "label": "Reset Hidden Dialogs...", "action": "settingsResetHiddenDialogsAction", "default": "Ctrl+Shift+H"},
@@ -10815,9 +10836,20 @@ class MidiTitleWindow(QMainWindow):
         source_browse = QPushButton(self._lt("Browse..."))
         output_edit = QLineEdit()
         output_browse = QPushButton(self._lt("Browse..."))
-        set_name_edit = QLineEdit()
+        prefix_edit = QLineEdit()
+        prefix_edit.setMaxLength(4)
+        prefix_edit.setPlaceholderText("DSKA")
+        starting_number_spin = QSpinBox()
+        starting_number_spin.setRange(0, 9999)
+        starting_number_spin.setValue(1)
+        starting_number_spin.setToolTip(self._t("emulator.starting_number.tip"))
+        safety_margin_spin = QSpinBox()
+        safety_margin_spin.setRange(0, 1024)
+        safety_margin_spin.setSingleStep(4)
+        safety_margin_spin.setSuffix(" KiB")
+        safety_margin_spin.setToolTip(self._t("emulator.safety_margin.tip"))
         album_title_edit = QLineEdit()
-        catalog_number_edit = QLineEdit()
+        album_title_edit.setPlaceholderText(self._t("emulator.album_title.placeholder"))
         content_combo = QComboBox()
         content_combo.addItem(self._t("emulator.content.eseq"), "eseq")
         content_combo.addItem(self._t("emulator.content.midi"), "midi")
@@ -10834,10 +10866,11 @@ class MidiTitleWindow(QMainWindow):
         rows = (
             (self._t("emulator.source.label"), source_edit, source_browse),
             (self._t("emulator.output.label"), output_edit, output_browse),
-            (self._t("emulator.set_name.label"), set_name_edit, None),
+            (self._t("emulator.set_name.label"), prefix_edit, None),
+            (self._t("emulator.starting_number.label"), starting_number_spin, None),
+            (self._t("emulator.safety_margin.label"), safety_margin_spin, None),
             (self._t("emulator.content.label"), content_combo, None),
-            (self._lt("Album title"), album_title_edit, None),
-            (self._lt("Catalog number"), catalog_number_edit, None),
+            (self._t("emulator.album_title.label"), album_title_edit, None),
             (self._t("emulator.image_format.label"), output_format_combo, None),
             (self._t("emulator.disk_format.label"), disk_format_combo, None),
         )
@@ -10849,36 +10882,57 @@ class MidiTitleWindow(QMainWindow):
             if browse_button is not None:
                 form_layout.addWidget(browse_button, row, 2)
 
-        album_title_label = form_layout.itemAtPosition(4, 0).widget()
-        catalog_number_label = form_layout.itemAtPosition(5, 0).widget()
+        album_title_label = form_layout.itemAtPosition(6, 0).widget()
 
         include_subfolders_checkbox = QCheckBox(
             self._t("emulator.include_subfolders")
         )
         form_layout.addWidget(include_subfolders_checkbox, len(rows), 1, 1, 2)
+        shuffle_checkbox = QCheckBox(self._t("emulator.shuffle"))
+        shuffle_checkbox.setToolTip(self._t("emulator.shuffle.tip"))
+        form_layout.addWidget(shuffle_checkbox, len(rows) + 1, 1, 1, 2)
+        include_song_lists_checkbox = QCheckBox(
+            self._t("emulator.include_song_lists")
+        )
+        include_song_lists_checkbox.setToolTip(
+            self._t("emulator.include_song_lists.tip")
+        )
+        form_layout.addWidget(
+            include_song_lists_checkbox,
+            len(rows) + 2,
+            1,
+            1,
+            2,
+        )
         retention_hint = QLabel(self._t("emulator.no_overwrite"))
         retention_hint.setWordWrap(True)
-        form_layout.addWidget(retention_hint, len(rows) + 1, 1, 1, 2)
+        form_layout.addWidget(retention_hint, len(rows) + 3, 1, 1, 2)
         layout.addLayout(form_layout)
 
         source_directory = self._emulator_image_default_source_directory()
-        suggested_name = os.path.basename(os.path.normpath(source_directory)) or "Emulator Disks"
         default_output = os.path.join(source_directory, "Emulator Images")
         source_edit.setText(source_directory)
         output_edit.setText(
             str(self.settings.value(self.SETTING_EMULATOR_IMAGE_OUTPUT, "") or "").strip()
             or default_output
         )
-        set_name_edit.setText(
-            str(self.settings.value(self.SETTING_EMULATOR_IMAGE_SET_NAME, "") or "").strip()
-            or suggested_name
+        prefix_edit.setText(
+            str(self.settings.value(self.SETTING_EMULATOR_IMAGE_PREFIX, "DSKA") or "DSKA").strip()
+        )
+        starting_number_spin.setValue(
+            int(self.settings.value(self.SETTING_EMULATOR_IMAGE_STARTING_NUMBER, 1) or 0)
+        )
+        safety_margin_spin.setValue(
+            int(self.settings.value(self.SETTING_EMULATOR_IMAGE_SAFETY_MARGIN_KIB, 32) or 0)
         )
         album_title_edit.setText(
-            str(self.settings.value(self.SETTING_EMULATOR_IMAGE_ALBUM_TITLE, "") or "").strip()
-            or set_name_edit.text()
-        )
-        catalog_number_edit.setText(
-            str(self.settings.value(self.SETTING_EMULATOR_IMAGE_CATALOG_NUMBER, "") or "").strip()
+            str(
+                self.settings.value(
+                    self.SETTING_EMULATOR_IMAGE_ALBUM_TITLE_OVERRIDE,
+                    "",
+                )
+                or ""
+            ).strip()
         )
         saved_content = str(
             self.settings.value(self.SETTING_EMULATOR_IMAGE_CONTENT, "eseq") or "eseq"
@@ -10890,18 +10944,15 @@ class MidiTitleWindow(QMainWindow):
             eseq_selected = content_combo.currentData() == "eseq"
             album_title_label.setEnabled(eseq_selected)
             album_title_edit.setEnabled(eseq_selected)
-            catalog_number_label.setEnabled(eseq_selected)
-            catalog_number_edit.setEnabled(eseq_selected)
             metadata_tip = (
                 self._t("emulator.metadata.eseq_only") if not eseq_selected else ""
             )
             album_title_edit.setToolTip(metadata_tip)
-            catalog_number_edit.setToolTip(metadata_tip)
 
         content_combo.currentIndexChanged.connect(update_content_fields)
         update_content_fields()
         saved_output_format = str(
-            self.settings.value(self.SETTING_EMULATOR_IMAGE_OUTPUT_FORMAT, "img") or "img"
+            self.settings.value(self.SETTING_EMULATOR_IMAGE_OUTPUT_FORMAT, "hfe") or "hfe"
         ).lower()
         output_format_index = output_format_combo.findData(saved_output_format)
         output_format_combo.setCurrentIndex(max(0, output_format_index))
@@ -10920,10 +10971,23 @@ class MidiTitleWindow(QMainWindow):
                 type=bool,
             )
         )
+        shuffle_checkbox.setChecked(
+            self.settings.value(
+                self.SETTING_EMULATOR_IMAGE_SHUFFLE,
+                False,
+                type=bool,
+            )
+        )
+        include_song_lists_checkbox.setChecked(
+            self.settings.value(
+                self.SETTING_EMULATOR_IMAGE_INCLUDE_SONG_LISTS,
+                False,
+                type=bool,
+            )
+        )
 
         def browse_source():
             previous_source = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
-            previous_name = os.path.basename(os.path.normpath(previous_source)) or "Emulator Disks"
             previous_output = os.path.join(previous_source, "Emulator Images")
             selected = QFileDialog.getExistingDirectory(
                 dialog,
@@ -10933,16 +10997,9 @@ class MidiTitleWindow(QMainWindow):
             if not selected:
                 return
             current_output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
-            update_name = not set_name_edit.text().strip() or set_name_edit.text().strip() == previous_name
-            update_album = not album_title_edit.text().strip() or album_title_edit.text().strip() == previous_name
             source_edit.setText(selected)
-            new_name = os.path.basename(os.path.normpath(selected)) or "Emulator Disks"
             if not output_edit.text().strip() or current_output == previous_output:
                 output_edit.setText(os.path.join(selected, "Emulator Images"))
-            if update_name:
-                set_name_edit.setText(new_name)
-            if update_album:
-                album_title_edit.setText(new_name)
 
         def browse_output():
             current_output = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
@@ -10991,7 +11048,7 @@ class MidiTitleWindow(QMainWindow):
                     self._t("emulator.invalid_output.message"),
                 )
                 return
-            if not set_name_edit.text().strip():
+            if not re.fullmatch(r"[A-Za-z0-9]{1,4}", prefix_edit.text().strip()):
                 QMessageBox.warning(
                     dialog,
                     self._t("emulator.invalid_options.title"),
@@ -11008,18 +11065,28 @@ class MidiTitleWindow(QMainWindow):
 
         source_directory = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
         output_directory = os.path.abspath(os.path.expanduser(output_edit.text().strip()))
-        set_name = set_name_edit.text().strip()
+        prefix = prefix_edit.text().strip().upper()
+        starting_number = starting_number_spin.value()
+        safety_margin_bytes = safety_margin_spin.value() * 1024
         album_title = album_title_edit.text().strip()
-        catalog_number = catalog_number_edit.text().strip()
         output_content = content_combo.currentData()
         output_ext = output_format_combo.currentData()
         disk_format = disk_format_combo.currentData()
         include_subfolders = include_subfolders_checkbox.isChecked()
+        shuffle_songs = shuffle_checkbox.isChecked()
+        include_song_lists = include_song_lists_checkbox.isChecked()
         self.settings.setValue(self.SETTING_EMULATOR_IMAGE_SOURCE, source_directory)
         self.settings.setValue(self.SETTING_EMULATOR_IMAGE_OUTPUT, output_directory)
-        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_SET_NAME, set_name)
-        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_ALBUM_TITLE, album_title)
-        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_CATALOG_NUMBER, catalog_number)
+        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_PREFIX, prefix)
+        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_STARTING_NUMBER, starting_number)
+        self.settings.setValue(
+            self.SETTING_EMULATOR_IMAGE_SAFETY_MARGIN_KIB,
+            safety_margin_spin.value(),
+        )
+        self.settings.setValue(
+            self.SETTING_EMULATOR_IMAGE_ALBUM_TITLE_OVERRIDE,
+            album_title,
+        )
         self.settings.setValue(self.SETTING_EMULATOR_IMAGE_CONTENT, output_content)
         self.settings.setValue(self.SETTING_EMULATOR_IMAGE_OUTPUT_FORMAT, output_ext)
         self.settings.setValue(self.SETTING_EMULATOR_IMAGE_DISK_FORMAT, disk_format.key)
@@ -11027,16 +11094,24 @@ class MidiTitleWindow(QMainWindow):
             self.SETTING_EMULATOR_IMAGE_INCLUDE_SUBFOLDERS,
             include_subfolders,
         )
+        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_SHUFFLE, shuffle_songs)
+        self.settings.setValue(
+            self.SETTING_EMULATOR_IMAGE_INCLUDE_SONG_LISTS,
+            include_song_lists,
+        )
         self._start_emulator_image_build(
             source_directory,
             output_directory,
-            set_name=set_name,
+            prefix=prefix,
+            starting_number=starting_number,
+            safety_margin_bytes=safety_margin_bytes,
             album_title=album_title,
-            catalog_number=catalog_number,
             output_content=output_content,
             disk_format=disk_format,
             output_ext=output_ext,
             include_subfolders=include_subfolders,
+            shuffle=shuffle_songs,
+            include_song_lists=include_song_lists,
         )
 
     def _start_emulator_image_build(
@@ -11044,13 +11119,16 @@ class MidiTitleWindow(QMainWindow):
         source_directory,
         output_directory,
         *,
-        set_name,
+        prefix,
+        starting_number,
+        safety_margin_bytes,
         album_title,
-        catalog_number,
         output_content,
         disk_format,
         output_ext,
         include_subfolders,
+        shuffle,
+        include_song_lists,
     ):
         if self._disk_worker_busy():
             QMessageBox.information(self, self._lt("Busy"), self._t("emulator.busy"))
@@ -11065,6 +11143,7 @@ class MidiTitleWindow(QMainWindow):
         )
         progress_dialog.setWindowTitle(self._t("emulator.action"))
         self._prepare_progress_dialog(progress_dialog)
+        self._stabilize_progress_dialog_width(progress_dialog)
         progress_dialog.setAutoClose(False)
         self._apply_stage_progress(
             progress_dialog,
@@ -11076,13 +11155,16 @@ class MidiTitleWindow(QMainWindow):
         worker = EmulatorImageBuildWorker(
             source_directory,
             output_directory,
-            set_name=set_name,
+            prefix=prefix,
+            starting_number=starting_number,
+            safety_margin_bytes=safety_margin_bytes,
             album_title=album_title,
-            catalog_number=catalog_number,
             output_content=output_content,
             disk_format=disk_format,
             output_ext=output_ext,
             include_subfolders=include_subfolders,
+            shuffle=shuffle,
+            include_song_lists=include_song_lists,
             language_code=self._language_code(),
             parent=self,
         )
@@ -11100,6 +11182,7 @@ class MidiTitleWindow(QMainWindow):
                 self._t("emulator.progress.cancelling")
             )
         )
+        worker.overwriteRequested.connect(self._on_emulator_overwrite_requested)
         worker.buildFinished.connect(self._on_emulator_image_success)
         worker.buildFailed.connect(self._on_emulator_image_failure)
         worker.operationCancelled.connect(self._on_emulator_image_cancelled)
@@ -11109,8 +11192,12 @@ class MidiTitleWindow(QMainWindow):
         self.emulatorImageContext = {
             "source_directory": source_directory,
             "output_directory": output_directory,
-            "set_name": set_name,
+            "prefix": prefix,
+            "starting_number": starting_number,
+            "safety_margin_bytes": safety_margin_bytes,
             "output_content": output_content,
+            "shuffle": shuffle,
+            "include_song_lists": include_song_lists,
         }
         self._set_disk_load_busy(True)
         self._log_event(
@@ -11121,10 +11208,63 @@ class MidiTitleWindow(QMainWindow):
             disk_format=disk_format.key,
             output_format=output_ext,
             output_content=output_content,
+            prefix=prefix,
+            starting_number=starting_number,
+            safety_margin_bytes=safety_margin_bytes,
             include_subfolders=include_subfolders,
+            shuffle=shuffle,
+            include_song_lists=include_song_lists,
         )
         self._show_centered_progress_dialog(progress_dialog)
         worker.start()
+
+    def _on_emulator_overwrite_requested(self, existing_paths):
+        worker = self.emulatorImageWorker
+        if worker is None:
+            return
+
+        paths = tuple(os.path.abspath(os.fspath(path)) for path in existing_paths or ())
+        if not paths:
+            worker.resolve_overwrite_request(False)
+            return
+
+        progress_dialog = self.emulatorImageProgressDialog
+        if progress_dialog is not None:
+            progress_dialog.hide()
+
+        preview_limit = 12
+        preview_lines = [f"• {os.path.basename(path)}" for path in paths[:preview_limit]]
+        if len(paths) > preview_limit:
+            preview_lines.append(
+                self._t(
+                    "emulator.overwrite.more",
+                    count=len(paths) - preview_limit,
+                )
+            )
+
+        prompt = QMessageBox(self)
+        apply_window_icon(prompt)
+        prompt.setIcon(QMessageBox.Warning)
+        prompt.setWindowTitle(self._t("emulator.overwrite.title"))
+        prompt.setText(
+            self._t(
+                "emulator.overwrite.message",
+                count=len(paths),
+            )
+        )
+        prompt.setInformativeText("\n".join(preview_lines))
+        prompt.setDetailedText("\n".join(paths))
+        prompt.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        prompt.setDefaultButton(QMessageBox.No)
+        approved = self._exec_child_dialog(prompt) == QMessageBox.Yes
+        worker.resolve_overwrite_request(approved)
+
+        if approved and progress_dialog is self.emulatorImageProgressDialog:
+            self._set_progress_dialog_message(
+                progress_dialog,
+                self._t("emulator.progress.replacing"),
+            )
+            self._show_centered_progress_dialog(progress_dialog)
 
     def _close_emulator_image_progress(self):
         if self.emulatorImageProgressDialog is not None:
@@ -11142,6 +11282,11 @@ class MidiTitleWindow(QMainWindow):
             images=result.images_created,
             path=result.output_directory,
         )
+        if result.song_list_path:
+            summary += "\n\n" + self._t(
+                "emulator.complete.song_list",
+                path=result.song_list_path,
+            )
         self.status_label.setText(summary.replace("\n", " "))
         self._log_event(
             "Utilities",
@@ -11151,8 +11296,10 @@ class MidiTitleWindow(QMainWindow):
             files=result.files_prepared,
             converted=result.converted_files,
             output_content=result.output_content,
+            shuffled=result.shuffled,
             images=result.images_created,
             outputs="; ".join(result.output_paths),
+            song_list=result.song_list_path,
         )
         QMessageBox.information(
             self,
@@ -11297,6 +11444,7 @@ class MidiTitleWindow(QMainWindow):
             ("utilitiesEseqToMidiAction", "Convert All E-SEQ to MIDI", "E"),
             ("utilitiesMidiToEseqAction", "Convert All MIDI to E-SEQ", "M"),
             ("utilitiesPedalCompatibilityAction", "Apply Pedal Compatibility...", "P"),
+            ("utilitiesStripXfAction", "Strip XF Data...", "X"),
             ("utilitiesFormatFloppyAction", "Format Floppy Disk...", "F"),
             ("helpCheckUpdatesAction", "Check for Updates...", "C"),
             ("helpCheckUpdatesAtStartupAction", "Check for Updates at Startup", "S"),
@@ -11314,6 +11462,11 @@ class MidiTitleWindow(QMainWindow):
         if pedal_compatibility_action is not None:
             pedal_compatibility_action.setToolTip(
                 self._lt("Apply optional pedal compatibility transforms to listed MIDI files.")
+            )
+        strip_xf_action = getattr(self, "utilitiesStripXfAction", None)
+        if strip_xf_action is not None:
+            strip_xf_action.setToolTip(
+                self._lt("Remove Yamaha XF metadata from one listed MIDI file or all listed MIDI files.")
             )
         emulator_images_action = getattr(self, "utilitiesEmulatorImagesAction", None)
         if emulator_images_action is not None:
@@ -11479,6 +11632,33 @@ class MidiTitleWindow(QMainWindow):
         dialog.setProperty("_aps_progress_center_updates_remaining", 4)
         self._center_child_dialog(dialog, recenter_on_content_change=True)
         return dialog
+
+    def _stabilize_progress_dialog_width(self, dialog, width=640):
+        initial_message = dialog.labelText()
+        target_width = self._scaled_int(width, minimum=520)
+        dialog.setFixedWidth(target_width)
+        label = QLabel(dialog)
+        label.setMinimumWidth(0)
+        label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        dialog.setLabel(label)
+        dialog._aps_stable_progress_label = label
+        self._set_progress_dialog_message(dialog, initial_message)
+        return dialog
+
+    def _set_progress_dialog_message(self, dialog, message):
+        full_message = str(message or "")
+        label = getattr(dialog, "_aps_stable_progress_label", None)
+        if label is None:
+            dialog.setLabelText(full_message)
+            return
+        available_width = max(160, dialog.width() - self._scaled_int(64, minimum=48))
+        display_message = QFontMetrics(label.font()).elidedText(
+            full_message,
+            Qt.ElideMiddle,
+            available_width,
+        )
+        dialog.setLabelText(display_message)
+        label.setToolTip(full_message if display_message != full_message else "")
 
     def _show_centered_progress_dialog(self, dialog):
         if dialog is None:
@@ -11686,7 +11866,7 @@ class MidiTitleWindow(QMainWindow):
             if dialog.maximum() <= dialog.minimum():
                 dialog.setRange(0, 1)
                 dialog.setValue(0)
-        dialog.setLabelText(message)
+        self._set_progress_dialog_message(dialog, message)
         QApplication.processEvents()
         remaining_centers = int(dialog.property("_aps_progress_center_updates_remaining") or 0)
         if remaining_centers > 0:
@@ -15607,6 +15787,128 @@ class MidiTitleWindow(QMainWindow):
         else:
             self._apply_pedal_compatibility_to_regular_rows(rows, options)
 
+    def _midi_rows_for_xf_stripping(self):
+        return self._midi_rows_for_pedal_compatibility()
+
+    def _set_xf_stripping_enabled(self, enabled, disabled_tooltip=""):
+        action = getattr(self, "utilitiesStripXfAction", None)
+        if action is None:
+            return
+        if enabled:
+            tooltip = "Remove Yamaha XF metadata from one listed MIDI file or all listed MIDI files."
+        else:
+            tooltip = disabled_tooltip or "Add MIDI files before using the XF stripping tool."
+        action.setEnabled(bool(enabled))
+        action.setToolTip(self._lt(tooltip))
+        action.setStatusTip(self._lt(tooltip))
+
+    def _xf_stripping_options_dialog(self, rows):
+        rows = list(rows or [])
+        file_count = len(rows)
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle(self._lt("Strip Yamaha XF Data"))
+        dialog.setMinimumWidth(590)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 14, 16, 12)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            self._lt(
+                "Remove Yamaha XF metadata while preserving notes, timing, tempo, SysEx, track structure, and continuous pedal data."
+            )
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        target_group = QGroupBox(self._lt("Apply To"))
+        target_layout = QHBoxLayout(target_group)
+        target_layout.setContentsMargins(12, 10, 12, 10)
+        target_combo = QComboBox(target_group)
+        target_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        target_combo.addItem(
+            self._lt("All listed MIDI songs ({count})").format(count=file_count),
+            -1,
+        )
+        current_row = self.table.currentRow()
+        current_target_index = 0
+        for target_index, (row, path) in enumerate(rows):
+            target_combo.addItem(
+                self._pedal_compatibility_target_label(row, path),
+                target_index,
+            )
+            if row == current_row:
+                current_target_index = target_index + 1
+        target_combo.setCurrentIndex(current_target_index)
+        target_combo.setToolTip(
+            self._lt("Strip XF data from one song or from every listed MIDI song as a batch.")
+        )
+        target_layout.addWidget(target_combo, stretch=1)
+        layout.addWidget(target_group)
+
+        count_note = QLabel()
+        count_note.setWordWrap(True)
+        layout.addWidget(count_note)
+
+        def update_count_note():
+            target_count = file_count if target_combo.currentData() == -1 else 1
+            count_note.setText(
+                self._lt(
+                    "XF removal will be staged for {count} listed MIDI file(s); nothing is written until you save."
+                ).format(count=target_count)
+            )
+
+        target_combo.currentIndexChanged.connect(update_count_note)
+        update_count_note()
+
+        details = QLabel(
+            self._lt(
+                "The utility removes sequencer-specific FF 7F metadata and appended non-standard XF chunks, then rebuilds each MIDI track with a valid end marker."
+            )
+        )
+        details.setWordWrap(True)
+        layout.addWidget(details)
+
+        buttons = self._make_dialog_button_box(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            dialog,
+        )
+        strip_button = buttons.button(QDialogButtonBox.Ok)
+        if strip_button is not None:
+            strip_button.setText(self._lt("Strip XF Data"))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+            return None
+        return int(target_combo.currentData())
+
+    def show_xf_stripping_utility(self):
+        if not self.choose_button.isEnabled():
+            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+            return
+
+        rows = self._midi_rows_for_xf_stripping()
+        if not rows:
+            QMessageBox.information(self, "No MIDI Files", "No MIDI files are currently listed.")
+            return
+
+        target_index = self._xf_stripping_options_dialog(rows)
+        if target_index is None:
+            return
+        if target_index >= 0:
+            if target_index >= len(rows):
+                return
+            rows = [rows[target_index]]
+
+        if self.is_image_mode():
+            self._strip_xf_from_image_rows(rows)
+        else:
+            self._strip_xf_from_regular_rows(rows)
+
     def toggle_auto_write_protect_on_load(self, enabled):
         self.settings.setValue(self.SETTING_AUTO_WRITE_PROTECT_ON_LOAD, bool(enabled))
 
@@ -16017,6 +16319,19 @@ class MidiTitleWindow(QMainWindow):
                 self._set_pedal_compatibility_enabled(
                     False,
                     "Please wait for the current operation to finish before using pedal compatibility tools.",
+                )
+
+        if hasattr(self, "utilitiesStripXfAction"):
+            if self.choose_button.isEnabled():
+                xf_rows = self._midi_rows_for_xf_stripping()
+                self._set_xf_stripping_enabled(
+                    bool(xf_rows),
+                    "Add MIDI files before using the XF stripping tool.",
+                )
+            else:
+                self._set_xf_stripping_enabled(
+                    False,
+                    "Please wait for the current operation to finish before stripping XF data.",
                 )
 
         if hasattr(self, "utilitiesFormatFloppyAction"):
@@ -23049,7 +23364,7 @@ class MidiTitleWindow(QMainWindow):
                 guidance="The original files were not changed; remove or replace the listed files and try again",
             )
 
-    def _regular_pedal_source_material_path(self, full_path, scratch_dir):
+    def _regular_midi_utility_source_material_path(self, full_path, scratch_dir):
         source_material_path = self._regular_source_material_path(full_path)
         pending_title = self.pendingEdits.get(full_path)
         if pending_title is None:
@@ -23063,6 +23378,9 @@ class MidiTitleWindow(QMainWindow):
         if error:
             raise EseqConversionError(error)
         return titled_source_path
+
+    def _regular_pedal_source_material_path(self, full_path, scratch_dir):
+        return self._regular_midi_utility_source_material_path(full_path, scratch_dir)
 
     def _apply_pedal_compatibility_to_regular_rows(self, rows, options):
         softening_requested = bool(options.get("soften_sustain_pedal"))
@@ -23153,7 +23471,7 @@ class MidiTitleWindow(QMainWindow):
                 guidance="The original files were not changed; remove or replace the listed files and try again",
             )
 
-    def _image_pedal_source_material_path(self, source_path):
+    def _image_midi_utility_source_material_path(self, source_path):
         source_host_path = self._pending_or_extracted_image_path(source_path)
         if not source_host_path or not os.path.isfile(source_host_path):
             raise EseqConversionError(f"Source file could not be found: {os.path.basename(source_path)}")
@@ -23170,6 +23488,9 @@ class MidiTitleWindow(QMainWindow):
         if error:
             raise EseqConversionError(error)
         return titled_source_path
+
+    def _image_pedal_source_material_path(self, source_path):
+        return self._image_midi_utility_source_material_path(source_path)
 
     def _apply_pedal_compatibility_to_image_rows(self, rows, options):
         if self.image_session is None:
@@ -23269,6 +23590,187 @@ class MidiTitleWindow(QMainWindow):
             self._show_error_list(
                 "Pedal Compatibility Issues",
                 "Some MIDI files could not be updated",
+                errors,
+                warning=True,
+                guidance="Nothing has been written yet; remove or replace the listed files and try again",
+            )
+
+    def _strip_xf_from_regular_rows(self, rows):
+        progress_dialog = QProgressDialog(
+            "Stripping Yamaha XF data...",
+            "Cancel",
+            0,
+            len(rows),
+            self,
+        )
+        self._prepare_progress_dialog(progress_dialog)
+
+        changed_count = 0
+        unchanged_count = 0
+        errors = []
+        scratch_dir = self._ensure_midi_scratch_dir()
+        for index, (_initial_row, full_path) in enumerate(rows, start=1):
+            if progress_dialog.wasCanceled():
+                break
+
+            row = None
+            for candidate_row in range(self.table.rowCount()):
+                item = self.table.item(candidate_row, 1)
+                if item is not None and item.text() == full_path:
+                    row = candidate_row
+                    break
+            if row is None:
+                continue
+
+            target_filename = self._regular_row_output_filename(row)
+            output_temp_path = os.path.join(
+                scratch_dir,
+                f"{uuid.uuid4().hex}_{target_filename}",
+            )
+            try:
+                source_material_path = self._regular_midi_utility_source_material_path(
+                    full_path,
+                    scratch_dir,
+                )
+                changed = strip_xf_from_midi_path(
+                    source_material_path,
+                    output_temp_path,
+                )
+                if not changed:
+                    unchanged_count += 1
+                    continue
+                self._apply_regular_row_pending_conversion(
+                    row,
+                    full_path,
+                    target_filename,
+                    output_temp_path,
+                    "midi",
+                    overwrite_original=True,
+                )
+                changed_count += 1
+            except Exception as exc:
+                errors.append(f"{os.path.basename(full_path)}: {exc}")
+            finally:
+                progress_dialog.setValue(index)
+                QApplication.processEvents()
+        progress_dialog.close()
+
+        status_parts = [f"Staged XF removal for {changed_count} MIDI file(s)."]
+        if unchanged_count:
+            status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+        if changed_count:
+            status_parts.append(
+                "Sequencer-specific metadata and appended non-standard chunks were removed. "
+                "Use Save to overwrite the originals, or Save As to write copies."
+            )
+        if errors:
+            status_parts.append(f"{len(errors)} file(s) failed.")
+        self.status_label.setText("\n".join(status_parts))
+        self.refresh_midi_type_indicators()
+        self._refresh_regular_mode_action_state()
+
+        if errors:
+            self._show_error_list(
+                "XF Stripping Issues",
+                "Some MIDI files could not be stripped",
+                errors,
+                warning=True,
+                guidance="The original files were not changed; remove or replace the listed files and try again",
+            )
+
+    def _strip_xf_from_image_rows(self, rows):
+        if self.image_session is None:
+            QMessageBox.information(
+                self,
+                "Image Mode Only",
+                "This utility is available while editing a MIDI folder, floppy image, or floppy session.",
+            )
+            return
+
+        progress_dialog = QProgressDialog(
+            "Stripping Yamaha XF data...",
+            "Cancel",
+            0,
+            len(rows),
+            self,
+        )
+        self._prepare_progress_dialog(progress_dialog)
+
+        changed_count = 0
+        unchanged_count = 0
+        errors = []
+        for index, (row, source_path) in enumerate(rows, start=1):
+            if progress_dialog.wasCanceled():
+                break
+
+            try:
+                current_path = self._row_final_image_path(row)
+                source_host_path = self._image_midi_utility_source_material_path(source_path)
+                output_host_path = os.path.join(
+                    self.image_session.patched_dir,
+                    f"{uuid.uuid4().hex}_{os.path.basename(current_path)}",
+                )
+                changed = strip_xf_from_midi_path(
+                    source_host_path,
+                    output_host_path,
+                )
+                if not changed:
+                    unchanged_count += 1
+                    continue
+
+                size = os.path.getsize(output_host_path)
+                is_midi, title, midi_type, title_mode, order_key = self._probe_image_file(
+                    current_path,
+                    size,
+                    output_host_path,
+                )
+                self._apply_image_row_conversion(
+                    row,
+                    source_path,
+                    current_path,
+                    output_host_path,
+                    title=title,
+                    midi_type=midi_type,
+                    is_midi=is_midi,
+                    title_mode=title_mode,
+                    size=size,
+                    order_key=order_key,
+                )
+                changed_count += 1
+            except Exception as exc:
+                filename_item = self.table.item(row, 3)
+                label = (
+                    filename_item.text()
+                    if filename_item is not None
+                    else os.path.basename(source_path)
+                )
+                errors.append(f"{label}: {exc}")
+            finally:
+                progress_dialog.setValue(index)
+                QApplication.processEvents()
+        progress_dialog.close()
+
+        status_parts = [f"Queued XF removal for {changed_count} MIDI file(s)."]
+        if unchanged_count:
+            status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+        if changed_count:
+            status_parts.append(
+                "Sequencer-specific metadata and appended non-standard chunks were removed."
+            )
+        if self.image_session is not None:
+            remaining = self._pending_image_space_remaining()
+            status_parts.append(
+                f"Estimated free space after pending changes: {display_bytes(max(0, remaining))}."
+            )
+        if errors:
+            status_parts.append(f"{len(errors)} file(s) failed.")
+        self.status_label.setText("\n".join(status_parts))
+        self._refresh_image_mode_action_state()
+
+        if errors:
+            self._show_error_list(
+                "XF Stripping Issues",
+                "Some MIDI files could not be stripped",
                 errors,
                 warning=True,
                 guidance="Nothing has been written yet; remove or replace the listed files and try again",

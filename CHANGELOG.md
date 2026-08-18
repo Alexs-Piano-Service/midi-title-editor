@@ -7,6 +7,36 @@ with release sections grouped by version and date.
 
 ## [Unreleased]
 
+### Added
+
+- A staged `Utilities > Strip XF Data...` workflow removes Yamaha XF
+  sequencer-specific metadata and appended chunks from one selected MIDI song
+  or every listed MIDI song, including songs in image and floppy sessions,
+  while preserving musical events, tempo, track structure, SysEx, and
+  continuous pedal data.
+- Build Emulator Disk Set now offers a remembered `Include Song Lists` option
+  that writes one UTF-8 overview file naming every resulting image and listing
+  its songs in packed playback order, with per-image E-SEQ album and catalog
+  metadata when applicable.
+- Build Emulator Disk Set now writes Nalbantov-ready sequential slot names such
+  as `DSKA0001.hfe`, with a configurable one-to-four-character prefix and
+  starting number. HFE is the default output, and a configurable 32 KiB
+  free-space safety margin is enforced on every packed FAT12 disk while the
+  existing E-SEQ conversion, directory-file, and 60-song rules remain in force.
+  Batch E-SEQ disks derive unique internal catalog IDs such as `DSKA-0001`
+  directly from their slots instead of asking for one repeated catalog number;
+  album titles default to the same per-disk IDs with an optional shared-title
+  override. An optional remembered shuffle setting randomizes the discovered
+  song order before conversion, naming, disk packing, and E-SEQ directory
+  generation.
+
+### Changed
+
+- Build Emulator Disk Set now asks before replacing exact image or song-list
+  output collisions, with the existing files restored if the replacement
+  commit fails. Its progress window also keeps a stable width and elides long
+  paths in the middle while retaining the full text in a tooltip.
+
 ## [0.8.0] - 2026-08-15
 
 ### Added
@@ -37,6 +67,8 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Tooltip-delay styling now filters Qt internal layout items before forwarding
+  style hints to PySide, preventing `QProxyStyle.styleHint` type errors.
 - Post-import file-list column fitting now expands the Title column to consume
   unused viewport width instead of leaving a blank area after the Type column.
 

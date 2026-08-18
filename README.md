@@ -52,6 +52,9 @@ before you write anything back.
 - Softens binary sustain-pedal CC64 into continuous S-curve motion for one
   selected song or every listed MIDI song as a batch, while preserving existing
   continuous pedal streams.
+- Strips Yamaha XF data from one selected song or every listed MIDI song,
+  removing sequencer-specific metadata and appended XF chunks while preserving
+  musical events, timing, tempo, SysEx, tracks, and continuous pedal data.
 - Converts Yamaha E-SEQ `.FIL` files to standard MIDI, optionally naming folder
   outputs from track order and song title.
 - Extracts Akai MPC `.SEQ` files and embedded sequences in MPC `.ALL` files,
@@ -184,21 +187,41 @@ decoded MIDI songs; they do not need the optional E-SEQ conversion setting.
    output folder. Subfolders are included by default.
 3. Choose the disk contents: `Yamaha E-SEQ (with PIANODIR.FIL)` or `Standard
    MIDI (MIDI files only)`.
-4. Enter the image-set name. For E-SEQ, optionally enter the Yamaha album title
-   and catalog number used in each directory file.
-5. Choose raw IMG or HFE output and the virtual floppy size. The default is the
-   common Yamaha 720K DD format.
-6. Choose `Build Disk Set`.
+4. Choose the image filename prefix and starting disk number. The defaults
+   produce `DSKA0001.hfe`, `DSKA0002.hfe`, and so on; slot 0000 is also
+   available when needed.
+5. Set the free-space safety margin. The 32 KiB default is reserved on every
+   disk after its songs and any E-SEQ directory file are packed.
+6. For E-SEQ, leave the album-title override blank to use the same generated
+   value as the disk's internal catalog ID, such as `DSKA-0001`. Enter an
+   override only when the whole batch has a more useful shared title.
+7. Optionally select `Shuffle song order randomly` to randomize the discovered
+   songs before conversion and disk packing.
+8. Optionally select `Include Song Lists` to write one UTF-8 text file showing
+   every resulting image and its songs in playback order.
+9. Choose HFE or raw IMG output and the virtual floppy size. HFE is the default
+   for Nalbantov workflows, and the default disk size is the common Yamaha 720K
+   DD format.
+10. Choose `Build Disk Set`.
 
 The utility converts each song only when necessary, assigns unique DOS 8.3
 names, and fills as many images as needed. E-SEQ output contains `.FIL` songs
 and a `PIANODIR.FIL` built only from the songs on that image; source MIDI files
 are not included. E-SEQ disks enforce the 60-song limit as well as FAT12
 capacity. MIDI output contains only `.MID` songs, converts E-SEQ sources when
-needed, and does not add a Yamaha directory file. Every image's file list is
-verified before output is committed. One image uses the set name directly;
-multi-image output is numbered `_01`, `_02`, and so on. Existing image files
-are never overwritten.
+needed, and does not add a Yamaha directory file. The configured safety margin
+is enforced using FAT12 allocated sizes, not just the source files' byte totals.
+Every image's file list is verified before output is committed. All images use
+the selected prefix plus a four-digit sequential number, and E-SEQ directory
+metadata uses the matching prefix and number as its per-disk catalog ID.
+Unless overridden, the album title uses that same per-disk ID. If an exact
+image or song-list output name already exists, the utility lists the affected
+files and asks before replacing them. Songs use stable natural filename order
+unless shuffle is selected; when selected, the randomized order also becomes
+the track order recorded in each E-SEQ directory file. When song lists are
+enabled, the output folder receives one aggregate text file with a section for
+every image, including its album and catalog metadata when applicable and its
+numbered song order.
 
 Raw IMG is the most broadly useful emulator interchange format. HFE output uses
 Greaseweazle conversion support and is suitable for HxC/Nalbantov-style
@@ -291,6 +314,14 @@ original tick. Intermediate values form smooth S-curves around those events,
 which retains standard switch-pedal timing while adding gradual motion for
 continuous and half-pedal-capable playback systems. Pedal softening supports
 Standard MIDI File Types 0, 1, and 2, PPQN tempo maps, and SMPTE divisions.
+
+### Strip Yamaha XF Data
+
+Choose `Utilities > Strip XF Data...`, then select one song or all listed MIDI
+songs. The utility removes internal `FF 7F` sequencer-specific events and
+appended non-standard XF chunks, rebuilds each declared MIDI track with a valid
+end marker, and preserves the musical performance data. Changes remain staged
+until you use `Save`, `Save As`, or save the current image/floppy session.
 
 ### Convert Between MIDI And E-SEQ
 
