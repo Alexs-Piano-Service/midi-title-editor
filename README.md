@@ -209,8 +209,11 @@ names, and fills as many images as needed. E-SEQ output contains `.FIL` songs
 and a `PIANODIR.FIL` built only from the songs on that image; source MIDI files
 are not included. E-SEQ disks enforce the 60-song limit as well as FAT12
 capacity. MIDI output contains only `.MID` songs, converts E-SEQ sources when
-needed, and does not add a Yamaha directory file. The configured safety margin
-is enforced using FAT12 allocated sizes, not just the source files' byte totals.
+needed, and does not add a Yamaha directory file. Native MIDI track-name titles
+are copied in full and may exceed 32 characters. A title converted from E-SEQ
+can contain only the 32 characters stored by the source E-SEQ format; conversion
+cannot reconstruct a missing remainder. The configured safety margin is
+enforced using FAT12 allocated sizes, not just the source files' byte totals.
 Every image's file list is verified before output is committed. All images use
 the selected prefix plus a four-digit sequential number, and E-SEQ directory
 metadata uses the matching prefix and number as its per-disk catalog ID.

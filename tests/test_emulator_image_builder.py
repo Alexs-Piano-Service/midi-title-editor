@@ -30,6 +30,7 @@ from aps_midi_prep_tool_app.floppy_image import (
     read_image_listing,
 )
 from aps_midi_prep_tool_app.midi_metadata import (
+    extract_eseq_title_from_file,
     extract_first_title_from_midi,
     is_midi_file,
 )
@@ -242,6 +243,79 @@ def test_builds_midi_only_images_and_converts_eseq_only_when_needed(
         assert all(is_midi_file(session.extract_file(name)) for name in names)
     finally:
         session.cleanup()
+
+
+def test_midi_images_preserve_titles_beyond_the_eseq_limit(tmp_path):
+    source = tmp_path / "songs"
+    output = tmp_path / "images"
+    source.mkdir()
+    long_title = "Mussorgsky - Bydlo (from Pictures at an Exhibition)"
+    assert len(long_title) > 32
+    source_path = source / "Bydlo.mid"
+    source_path.write_bytes(_midi_bytes(long_title))
+
+    result = build_emulator_disk_images(
+        source,
+        output,
+        prefix="LONG",
+        disk_format=_disk_format(),
+        output_content="midi",
+        output_ext="img",
+        include_song_lists=True,
+    )
+
+    session = FloppyImageSession.load(result.output_paths[0])
+    try:
+        midi_entries = [
+            entry
+            for entry in session.list_entries().entries
+            if entry.name.upper().endswith(".MID")
+        ]
+        assert len(midi_entries) == 1
+        extracted_path = session.extract_file(midi_entries[0].path)
+        assert Path(extracted_path).read_bytes() == source_path.read_bytes()
+        assert extract_first_title_from_midi(extracted_path) == long_title
+    finally:
+        session.cleanup()
+
+    assert long_title in Path(result.song_list_path).read_text(encoding="utf-8")
+
+
+def test_eseq_images_and_song_lists_use_the_on_disk_32_byte_title(tmp_path):
+    source = tmp_path / "songs"
+    output = tmp_path / "images"
+    source.mkdir()
+    long_title = "Mussorgsky - Bydlo (from Pictures at an Exhibition)"
+    expected_title = long_title[:32]
+    (source / "Bydlo.mid").write_bytes(_midi_bytes(long_title))
+
+    result = build_emulator_disk_images(
+        source,
+        output,
+        prefix="ESEQ",
+        disk_format=_disk_format(),
+        output_content="eseq",
+        output_ext="img",
+        include_song_lists=True,
+    )
+
+    session = FloppyImageSession.load(result.output_paths[0])
+    try:
+        eseq_entries = [
+            entry
+            for entry in session.list_entries().entries
+            if entry.name.upper().endswith(".FIL")
+            and entry.name.upper() != PIANODIR_FILENAME
+        ]
+        assert len(eseq_entries) == 1
+        extracted_path = session.extract_file(eseq_entries[0].path)
+        assert extract_eseq_title_from_file(extracted_path) == expected_title
+    finally:
+        session.cleanup()
+
+    song_list = Path(result.song_list_path).read_text(encoding="utf-8")
+    assert f"1. {expected_title}\n" in song_list
+    assert long_title not in song_list
 
 
 def test_builds_eseq_only_images_without_including_source_midi(tmp_path):

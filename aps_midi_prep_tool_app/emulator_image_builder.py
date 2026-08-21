@@ -301,10 +301,13 @@ def _prepare_song_files(
                 f"Preparation did not produce a valid {output_label} file for '{source_name}'."
             )
 
+        # Describe what was actually written, not the source metadata. Native
+        # MIDI titles remain full-length, while an E-SEQ output title reflects
+        # the format's physical 32-byte field.
         title = (
-            extract_first_title_from_midi(source_path)
-            if source_is_midi
-            else extract_eseq_title_from_file(source_path)
+            extract_first_title_from_midi(local_path)
+            if output_content == "midi"
+            else extract_eseq_title_from_file(local_path)
         )
         if title.startswith("Error"):
             title = ""

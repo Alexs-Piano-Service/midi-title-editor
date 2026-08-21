@@ -231,8 +231,9 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 local MIDI or E-SEQ titles.</p>
                 <ul>
                   <li>Click the <strong>Title</strong> column to edit a song title.</li>
-                  <li>Use <strong>View &gt; Format for Disklavier screen</strong> for two 16-character E-SEQ rows.</li>
-                  <li>Use <strong>View &gt; Long title warning</strong> to show or hide the legacy title-length warning.</li>
+                  <li>Native MIDI titles may exceed 32 characters and are saved in full; E-SEQ titles are physically limited to 32 characters.</li>
+                  <li>Use <strong>View &gt; Format for Disklavier screen</strong> when you intentionally want two 16-character legacy display rows.</li>
+                  <li>Use <strong>View &gt; Long title warning</strong> to show or hide the legacy title-length warning; it does not truncate MIDI titles.</li>
                   <li>Use <strong>Save</strong> for the current files, or <strong>Save As</strong> for copies.</li>
                 </ul>
                 """,
