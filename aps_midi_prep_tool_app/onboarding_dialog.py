@@ -158,6 +158,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                   <li>Choose either E-SEQ-only disks or Standard-MIDI-only disks; source songs are converted only when necessary.</li>
                   <li>E-SEQ disks receive DOS 8.3 <strong>.FIL</strong> names and a <strong>PIANODIR.FIL</strong> containing only that image's songs and album metadata.</li>
                   <li>MIDI disks contain only <strong>.MID</strong> files and do not receive a Yamaha directory file.</li>
+                  <li>When the source folder has an <strong>INDEX.csv</strong>, matching values from its <strong>title</strong> column replace embedded titles; MIDI keeps the full value and E-SEQ uses its 32-character limit.</li>
                   <li><strong>Include Song Lists</strong> writes one text overview of every generated image and its songs in playback order.</li>
                   <li>The usual Disklavier choice is 720K DD; disk capacity and the E-SEQ-only 60-song limit are enforced.</li>
                   <li>Generated images are verified; if an exact output name exists, the utility lists the affected files and asks before replacing them.</li>

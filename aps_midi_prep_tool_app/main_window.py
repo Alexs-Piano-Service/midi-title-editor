@@ -116,6 +116,7 @@ from .midi_type0_converter import (
     apply_pedal_compatibility_to_midi_path,
     convert_midi_file_to_type0_path,
 )
+from .midi_channel_merger import merge_midi_channels_to_channel0_path
 from .xf_stripper import strip_xf_from_midi_path
 from .ui_utils import (
     center_dialog_on_parent,
@@ -9406,6 +9407,15 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesPedalCompatibilityAction.triggered.connect(self.show_pedal_compatibility_utility)
         self.utilitiesMenu.addAction(self.utilitiesPedalCompatibilityAction)
 
+        self.utilitiesMergeChannelsAction = QAction("Merge Instruments to Channel 0...", self)
+        self.utilitiesMergeChannelsAction.setToolTip(
+            self._lt(
+                "Route all channel events to zero-based MIDI channel 0 for one listed MIDI file or all listed MIDI files."
+            )
+        )
+        self.utilitiesMergeChannelsAction.triggered.connect(self.show_channel_merging_utility)
+        self.utilitiesMenu.addAction(self.utilitiesMergeChannelsAction)
+
         self.utilitiesStripXfAction = QAction("Strip XF Data...", self)
         self.utilitiesStripXfAction.setToolTip(
             self._lt("Remove Yamaha XF metadata from one listed MIDI file or all listed MIDI files.")
@@ -10070,6 +10080,7 @@ class MidiTitleWindow(QMainWindow):
             {"id": "utilities.eseq_to_midi", "category": "Utilities", "label": "Convert All E-SEQ to MIDI", "action": "utilitiesEseqToMidiAction", "default": "Ctrl+Shift+M"},
             {"id": "utilities.midi_to_eseq", "category": "Utilities", "label": "Convert All MIDI to E-SEQ", "action": "utilitiesMidiToEseqAction", "default": "Ctrl+Shift+E"},
             {"id": "utilities.pedal_compatibility", "category": "Utilities", "label": "Apply Pedal Compatibility...", "action": "utilitiesPedalCompatibilityAction", "default": ""},
+            {"id": "utilities.merge_channels", "category": "Utilities", "label": "Merge Instruments to Channel 0...", "action": "utilitiesMergeChannelsAction", "default": ""},
             {"id": "utilities.strip_xf", "category": "Utilities", "label": "Strip XF Data...", "action": "utilitiesStripXfAction", "default": ""},
             {"id": "utilities.recover_image", "category": "Disk", "label": "Recover Damaged Image...", "action": "utilitiesRecoverImageAction", "default": "Ctrl+Shift+D"},
             {"id": "utilities.format_floppy", "category": "Disk", "label": "Format Floppy Disk...", "action": "utilitiesFormatFloppyAction", "default": "F6"},
@@ -11444,6 +11455,7 @@ class MidiTitleWindow(QMainWindow):
             ("utilitiesEseqToMidiAction", "Convert All E-SEQ to MIDI", "E"),
             ("utilitiesMidiToEseqAction", "Convert All MIDI to E-SEQ", "M"),
             ("utilitiesPedalCompatibilityAction", "Apply Pedal Compatibility...", "P"),
+            ("utilitiesMergeChannelsAction", "Merge Instruments to Channel 0...", "C"),
             ("utilitiesStripXfAction", "Strip XF Data...", "X"),
             ("utilitiesFormatFloppyAction", "Format Floppy Disk...", "F"),
             ("helpCheckUpdatesAction", "Check for Updates...", "C"),
@@ -11462,6 +11474,13 @@ class MidiTitleWindow(QMainWindow):
         if pedal_compatibility_action is not None:
             pedal_compatibility_action.setToolTip(
                 self._lt("Apply optional pedal compatibility transforms to listed MIDI files.")
+            )
+        merge_channels_action = getattr(self, "utilitiesMergeChannelsAction", None)
+        if merge_channels_action is not None:
+            merge_channels_action.setToolTip(
+                self._lt(
+                    "Route all channel events to zero-based MIDI channel 0 for one listed MIDI file or all listed MIDI files."
+                )
             )
         strip_xf_action = getattr(self, "utilitiesStripXfAction", None)
         if strip_xf_action is not None:
@@ -15787,6 +15806,131 @@ class MidiTitleWindow(QMainWindow):
         else:
             self._apply_pedal_compatibility_to_regular_rows(rows, options)
 
+    def _midi_rows_for_channel_merging(self):
+        return self._midi_rows_for_pedal_compatibility()
+
+    def _set_channel_merging_enabled(self, enabled, disabled_tooltip=""):
+        action = getattr(self, "utilitiesMergeChannelsAction", None)
+        if action is None:
+            return
+        if enabled:
+            tooltip = (
+                "Route all channel events to zero-based MIDI channel 0 for one listed "
+                "MIDI file or all listed MIDI files."
+            )
+        else:
+            tooltip = disabled_tooltip or "Add MIDI files before using the channel merge tool."
+        action.setEnabled(bool(enabled))
+        action.setToolTip(self._lt(tooltip))
+        action.setStatusTip(self._lt(tooltip))
+
+    def _channel_merging_options_dialog(self, rows):
+        rows = list(rows or [])
+        file_count = len(rows)
+        dialog = QDialog(self)
+        apply_window_icon(dialog)
+        dialog.setWindowTitle(self._lt("Merge Instruments to Channel 0"))
+        dialog.setMinimumWidth(590)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(16, 14, 16, 12)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            self._lt(
+                "Route every MIDI channel-voice event to zero-based channel 0, which standard 1-16 MIDI interfaces show as channel 1."
+            )
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        target_group = QGroupBox(self._lt("Apply To"))
+        target_layout = QHBoxLayout(target_group)
+        target_layout.setContentsMargins(12, 10, 12, 10)
+        target_combo = QComboBox(target_group)
+        target_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        target_combo.addItem(
+            self._lt("All listed MIDI songs ({count})").format(count=file_count),
+            -1,
+        )
+        current_row = self.table.currentRow()
+        current_target_index = 0
+        for target_index, (row, path) in enumerate(rows):
+            target_combo.addItem(
+                self._pedal_compatibility_target_label(row, path),
+                target_index,
+            )
+            if row == current_row:
+                current_target_index = target_index + 1
+        target_combo.setCurrentIndex(current_target_index)
+        target_combo.setToolTip(
+            self._lt("Merge channels in one song or in every listed MIDI song as a batch.")
+        )
+        target_layout.addWidget(target_combo, stretch=1)
+        layout.addWidget(target_group)
+
+        count_note = QLabel()
+        count_note.setWordWrap(True)
+        layout.addWidget(count_note)
+
+        def update_count_note():
+            target_count = file_count if target_combo.currentData() == -1 else 1
+            count_note.setText(
+                self._lt(
+                    "Channel merging will be staged for {count} listed MIDI file(s); nothing is written until you save."
+                ).format(count=target_count)
+            )
+
+        target_combo.currentIndexChanged.connect(update_count_note)
+        update_count_note()
+
+        details = QLabel(
+            self._lt(
+                "Source program and bank changes are replaced with Acoustic Grand Piano, and channel-mode commands are removed so one former part cannot reset or silence all merged parts. Other controllers, timing, tracks, metadata, and SysEx are preserved."
+            )
+        )
+        details.setWordWrap(True)
+        layout.addWidget(details)
+
+        buttons = self._make_dialog_button_box(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            dialog,
+        )
+        merge_button = buttons.button(QDialogButtonBox.Ok)
+        if merge_button is not None:
+            merge_button.setText(self._lt("Merge Channels"))
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+            return None
+        return int(target_combo.currentData())
+
+    def show_channel_merging_utility(self):
+        if not self.choose_button.isEnabled():
+            QMessageBox.information(self, "Busy", "Please wait for MIDI processing to finish.")
+            return
+
+        rows = self._midi_rows_for_channel_merging()
+        if not rows:
+            QMessageBox.information(self, "No MIDI Files", "No MIDI files are currently listed.")
+            return
+
+        target_index = self._channel_merging_options_dialog(rows)
+        if target_index is None:
+            return
+        if target_index >= 0:
+            if target_index >= len(rows):
+                return
+            rows = [rows[target_index]]
+
+        if self.is_image_mode():
+            self._merge_channels_in_image_rows(rows)
+        else:
+            self._merge_channels_in_regular_rows(rows)
+
     def _midi_rows_for_xf_stripping(self):
         return self._midi_rows_for_pedal_compatibility()
 
@@ -16319,6 +16463,19 @@ class MidiTitleWindow(QMainWindow):
                 self._set_pedal_compatibility_enabled(
                     False,
                     "Please wait for the current operation to finish before using pedal compatibility tools.",
+                )
+
+        if hasattr(self, "utilitiesMergeChannelsAction"):
+            if self.choose_button.isEnabled():
+                channel_rows = self._midi_rows_for_channel_merging()
+                self._set_channel_merging_enabled(
+                    bool(channel_rows),
+                    "Add MIDI files before using the channel merge tool.",
+                )
+            else:
+                self._set_channel_merging_enabled(
+                    False,
+                    "Please wait for the current operation to finish before merging MIDI channels.",
                 )
 
         if hasattr(self, "utilitiesStripXfAction"):
@@ -23382,6 +23539,89 @@ class MidiTitleWindow(QMainWindow):
     def _regular_pedal_source_material_path(self, full_path, scratch_dir):
         return self._regular_midi_utility_source_material_path(full_path, scratch_dir)
 
+    def _merge_channels_in_regular_rows(self, rows):
+        progress_dialog = QProgressDialog(
+            "Merging MIDI channels...",
+            "Cancel",
+            0,
+            len(rows),
+            self,
+        )
+        self._prepare_progress_dialog(progress_dialog)
+
+        changed_count = 0
+        unchanged_count = 0
+        errors = []
+        scratch_dir = self._ensure_midi_scratch_dir()
+        for index, (_initial_row, full_path) in enumerate(rows, start=1):
+            if progress_dialog.wasCanceled():
+                break
+
+            row = None
+            for candidate_row in range(self.table.rowCount()):
+                item = self.table.item(candidate_row, 1)
+                if item is not None and item.text() == full_path:
+                    row = candidate_row
+                    break
+            if row is None:
+                continue
+
+            target_filename = self._regular_row_output_filename(row)
+            output_temp_path = os.path.join(
+                scratch_dir,
+                f"{uuid.uuid4().hex}_{target_filename}",
+            )
+            try:
+                source_material_path = self._regular_midi_utility_source_material_path(
+                    full_path,
+                    scratch_dir,
+                )
+                changed = merge_midi_channels_to_channel0_path(
+                    source_material_path,
+                    output_temp_path,
+                )
+                if not changed:
+                    unchanged_count += 1
+                    continue
+                self._apply_regular_row_pending_conversion(
+                    row,
+                    full_path,
+                    target_filename,
+                    output_temp_path,
+                    "midi",
+                    overwrite_original=True,
+                )
+                changed_count += 1
+            except Exception as exc:
+                errors.append(f"{os.path.basename(full_path)}: {exc}")
+            finally:
+                progress_dialog.setValue(index)
+                QApplication.processEvents()
+        progress_dialog.close()
+
+        status_parts = [f"Staged channel merging for {changed_count} MIDI file(s)."]
+        if unchanged_count:
+            status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+        if changed_count:
+            status_parts.append(
+                "Channel events now use zero-based channel 0 with Acoustic Grand Piano. "
+                "Use Save to overwrite the originals, or Save As to write copies."
+            )
+        if errors:
+            status_parts.append(f"{len(errors)} file(s) failed.")
+        self.status_label.setText("\n".join(status_parts))
+        self.refresh_midi_type_indicators()
+        self._refresh_regular_mode_action_state()
+
+        if errors:
+            self._show_error_list(
+                "MIDI Channel Merge Issues",
+                "Some MIDI files could not be merged",
+                errors,
+                warning=True,
+                guidance="The original files were not changed; remove or replace the listed files and try again",
+            )
+
     def _apply_pedal_compatibility_to_regular_rows(self, rows, options):
         softening_requested = bool(options.get("soften_sustain_pedal"))
         progressDialog = QProgressDialog(
@@ -23491,6 +23731,104 @@ class MidiTitleWindow(QMainWindow):
 
     def _image_pedal_source_material_path(self, source_path):
         return self._image_midi_utility_source_material_path(source_path)
+
+    def _merge_channels_in_image_rows(self, rows):
+        if self.image_session is None:
+            QMessageBox.information(
+                self,
+                "Image Mode Only",
+                "This utility is available while editing a MIDI folder, floppy image, or floppy session.",
+            )
+            return
+
+        progress_dialog = QProgressDialog(
+            "Merging MIDI channels...",
+            "Cancel",
+            0,
+            len(rows),
+            self,
+        )
+        self._prepare_progress_dialog(progress_dialog)
+
+        changed_count = 0
+        unchanged_count = 0
+        errors = []
+        for index, (row, source_path) in enumerate(rows, start=1):
+            if progress_dialog.wasCanceled():
+                break
+
+            try:
+                current_path = self._row_final_image_path(row)
+                source_host_path = self._image_midi_utility_source_material_path(source_path)
+                output_host_path = os.path.join(
+                    self.image_session.patched_dir,
+                    f"{uuid.uuid4().hex}_{os.path.basename(current_path)}",
+                )
+                changed = merge_midi_channels_to_channel0_path(
+                    source_host_path,
+                    output_host_path,
+                )
+                if not changed:
+                    unchanged_count += 1
+                    continue
+
+                size = os.path.getsize(output_host_path)
+                is_midi, title, midi_type, title_mode, order_key = self._probe_image_file(
+                    current_path,
+                    size,
+                    output_host_path,
+                )
+                self._apply_image_row_conversion(
+                    row,
+                    source_path,
+                    current_path,
+                    output_host_path,
+                    title=title,
+                    midi_type=midi_type,
+                    is_midi=is_midi,
+                    title_mode=title_mode,
+                    size=size,
+                    order_key=order_key,
+                )
+                changed_count += 1
+            except Exception as exc:
+                filename_item = self.table.item(row, 3)
+                label = (
+                    filename_item.text()
+                    if filename_item is not None
+                    else os.path.basename(source_path)
+                )
+                errors.append(f"{label}: {exc}")
+            finally:
+                progress_dialog.setValue(index)
+                QApplication.processEvents()
+        progress_dialog.close()
+
+        status_parts = [f"Queued channel merging for {changed_count} MIDI file(s)."]
+        if unchanged_count:
+            status_parts.append(f"{unchanged_count} MIDI file(s) did not need changes.")
+        if changed_count:
+            status_parts.append(
+                "Channel events now use zero-based channel 0 with Acoustic Grand Piano."
+            )
+        if self.image_session is not None:
+            remaining = self._pending_image_space_remaining()
+            status_parts.append(
+                f"Estimated free space after pending changes: {display_bytes(max(0, remaining))}."
+            )
+        if errors:
+            status_parts.append(f"{len(errors)} file(s) failed.")
+        self.status_label.setText("\n".join(status_parts))
+        self._refresh_image_mode_action_state()
+
+        if errors:
+            self._show_error_list(
+                "MIDI Channel Merge Issues",
+                "Some MIDI files could not be merged",
+                errors,
+                warning=True,
+                guidance="Nothing has been written yet; remove or replace the listed files and try again",
+            )
 
     def _apply_pedal_compatibility_to_image_rows(self, rows, options):
         if self.image_session is None:

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+import hashlib
 import os
+import posixpath
 import random
 import re
 import shutil
@@ -12,6 +15,7 @@ from dataclasses import dataclass
 
 from .dos83_renamer import build_dos83_filename
 from .eseq_converter import (
+    ESEQ_TITLE_LENGTH,
     convert_eseq_file_to_midi_path,
     convert_midi_file_to_eseq_path,
     is_eseq_file,
@@ -43,6 +47,8 @@ from .midi_metadata import (
     extract_eseq_title_from_file,
     extract_first_title_from_midi,
     is_midi_file,
+    update_eseq_title_to_path,
+    update_midi_title_to_path,
 )
 from .message_catalog import tr
 
@@ -199,6 +205,161 @@ def _notify(progress_callback, step, total, message):
         progress_callback(int(step or 0), max(1, int(total or 1)), str(message or ""))
 
 
+def _normalize_index_path(value):
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return ""
+    text = re.sub(r"/+", "/", text)
+    normalized = posixpath.normpath(text)
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return "" if normalized == "." else normalized.casefold()
+
+
+def _read_index_rows(index_path):
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            with open(index_path, "r", encoding=encoding, newline="") as handle:
+                return list(csv.DictReader(handle))
+        except UnicodeDecodeError:
+            continue
+        except (OSError, csv.Error):
+            return []
+    return []
+
+
+def _set_unique_title(mapping, key, title):
+    if not key:
+        return
+    if key not in mapping:
+        mapping[key] = title
+    elif mapping[key] != title:
+        mapping[key] = None
+
+
+def _sha256_file(path, cancel_callback=None):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            _raise_if_cancelled(cancel_callback)
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_index_title_overrides(
+    source_directory,
+    song_paths,
+    *,
+    cancel_callback=None,
+):
+    """Match nonblank INDEX.csv titles to songs without guessing ambiguously."""
+    try:
+        index_candidates = [
+            entry.path
+            for entry in os.scandir(source_directory)
+            if entry.is_file() and entry.name.casefold() == "index.csv"
+        ]
+    except OSError:
+        return {}
+    if not index_candidates:
+        return {}
+
+    index_candidates.sort(
+        key=lambda path: (
+            os.path.basename(path) != "INDEX.csv",
+            os.path.basename(path).casefold(),
+        )
+    )
+    rows = _read_index_rows(index_candidates[0])
+    exact_titles = {}
+    basename_titles = {}
+    hash_titles = {}
+
+    for raw_row in rows:
+        row = {
+            str(key or "").strip().casefold(): str(value or "")
+            for key, value in (raw_row or {}).items()
+            if key is not None
+        }
+        title = row.get("title", "").replace("\x00", " ").strip()
+        if not title:
+            continue
+
+        references = []
+        output_file = row.get("output_file", "").strip()
+        output_folder = row.get("output_folder", "").strip()
+        if output_file:
+            references.append(output_file)
+            if output_folder and _normalize_index_path(output_folder):
+                references.append(posixpath.join(output_folder, output_file))
+        for column in ("source_path", "path", "filename", "file"):
+            if row.get(column, "").strip():
+                references.append(row[column])
+
+        for reference in references:
+            key = _normalize_index_path(reference)
+            _set_unique_title(exact_titles, key, title)
+            _set_unique_title(
+                basename_titles,
+                posixpath.basename(key),
+                title,
+            )
+
+        sha256 = row.get("sha256", "").strip().casefold()
+        if re.fullmatch(r"[0-9a-f]{64}", sha256):
+            _set_unique_title(hash_titles, sha256, title)
+
+    basename_counts = {}
+    for song_path in song_paths:
+        basename = os.path.basename(song_path).casefold()
+        basename_counts[basename] = basename_counts.get(basename, 0) + 1
+
+    overrides = {}
+    unmatched = []
+    for song_path in song_paths:
+        _raise_if_cancelled(cancel_callback)
+        relative_key = _normalize_index_path(
+            os.path.relpath(song_path, source_directory)
+        )
+        absolute_key = _normalize_index_path(os.path.abspath(song_path))
+        title = exact_titles.get(relative_key)
+        if title is None:
+            title = exact_titles.get(absolute_key)
+        if title is None:
+            basename = os.path.basename(song_path).casefold()
+            if basename_counts.get(basename) == 1:
+                title = basename_titles.get(basename)
+        if title:
+            overrides[song_path] = title
+        elif hash_titles:
+            unmatched.append(song_path)
+
+    for song_path in unmatched:
+        _raise_if_cancelled(cancel_callback)
+        try:
+            title = hash_titles.get(
+                _sha256_file(song_path, cancel_callback=cancel_callback)
+            )
+        except OSError:
+            continue
+        if title:
+            overrides[song_path] = title
+    return overrides
+
+
+def _index_title_for_output(title, output_content):
+    text = str(title or "").replace("\x00", " ").strip()
+    if not text:
+        return None
+    encoded = text.encode("latin1", errors="replace")
+    if output_content == "eseq":
+        encoded = encoded[:ESEQ_TITLE_LENGTH]
+    return encoded.decode("latin1")
+
+
 def _prepared_song_name(source_path, index, output_content):
     return build_dos83_filename(
         os.path.basename(source_path),
@@ -212,6 +373,7 @@ def _prepare_song_files(
     temp_directory,
     *,
     output_content,
+    title_overrides=None,
     progress_callback=None,
     cancel_callback=None,
     midi_to_eseq_converter=None,
@@ -223,12 +385,17 @@ def _prepare_song_files(
     prepared = []
     converted_count = 0
     total = len(song_paths)
+    title_overrides = dict(title_overrides or {})
 
     for index, source_path in enumerate(song_paths, start=1):
         _raise_if_cancelled(cancel_callback)
         source_name = os.path.basename(source_path)
         source_is_midi = is_midi_file(source_path)
         source_is_eseq = is_eseq_file(source_path)
+        title_override = _index_title_for_output(
+            title_overrides.get(source_path),
+            output_content,
+        )
         if not source_is_midi and not source_is_eseq:
             raise FloppyImageError(
                 f"'{source_name}' is not a valid Standard MIDI or Yamaha E-SEQ file."
@@ -256,11 +423,10 @@ def _prepare_song_files(
         )
         try:
             if output_content == "eseq" and source_is_midi:
-                midi_to_eseq_converter(
-                    source_path,
-                    local_path,
-                    filename_hint=image_path,
-                )
+                converter_options = {"filename_hint": image_path}
+                if title_override is not None:
+                    converter_options["title_override"] = title_override
+                midi_to_eseq_converter(source_path, local_path, **converter_options)
                 converted_count += 1
             elif output_content == "eseq" and is_clavinova_mda_file(source_path):
                 intermediate_midi = os.path.join(
@@ -268,10 +434,13 @@ def _prepare_song_files(
                     f"{index:05d}_{uuid.uuid4().hex}.mid",
                 )
                 eseq_to_midi_converter(source_path, intermediate_midi)
+                converter_options = {"filename_hint": image_path}
+                if title_override is not None:
+                    converter_options["title_override"] = title_override
                 midi_to_eseq_converter(
                     intermediate_midi,
                     local_path,
-                    filename_hint=image_path,
+                    **converter_options,
                 )
                 converted_count += 1
             elif output_content == "eseq":
@@ -282,9 +451,32 @@ def _prepare_song_files(
                 )
                 if update_error:
                     raise FloppyImageError(update_error)
+                if title_override is not None:
+                    update_error = update_eseq_title_to_path(
+                        local_path,
+                        title_override,
+                        local_path,
+                    )
+                    if update_error:
+                        raise FloppyImageError(update_error)
             elif source_is_eseq:
-                eseq_to_midi_converter(source_path, local_path)
+                converter_options = {}
+                if title_override is not None:
+                    converter_options["title_override"] = title_override
+                eseq_to_midi_converter(
+                    source_path,
+                    local_path,
+                    **converter_options,
+                )
                 converted_count += 1
+            elif title_override is not None:
+                update_error = update_midi_title_to_path(
+                    source_path,
+                    title_override,
+                    local_path,
+                )
+                if update_error:
+                    raise FloppyImageError(update_error)
             else:
                 shutil.copy2(source_path, local_path)
         except Exception as exc:
@@ -711,6 +903,11 @@ def build_emulator_disk_images(
         raise FloppyImageError(
             "The selected folder does not contain any MIDI or Yamaha E-SEQ song files."
         )
+    title_overrides = _load_index_title_overrides(
+        source_directory,
+        song_paths,
+        cancel_callback=cancel_callback,
+    )
     shuffle = bool(shuffle)
     include_song_lists = bool(include_song_lists)
     if shuffle:
@@ -738,6 +935,7 @@ def build_emulator_disk_images(
             song_paths,
             temp_directory,
             output_content=output_content,
+            title_overrides=title_overrides,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
             midi_to_eseq_converter=midi_to_eseq_converter,

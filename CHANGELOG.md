@@ -9,6 +9,12 @@ with release sections grouped by version and date.
 
 ### Added
 
+- A staged `Utilities > Merge Instruments to Channel 0...` workflow routes all
+  channel-voice events in one selected MIDI song or every listed MIDI song to
+  zero-based channel 0, replaces conflicting program and bank changes with
+  Acoustic Grand Piano, and removes channel-mode commands. It works in folder,
+  image, and floppy sessions while preserving the source SMF type, track
+  structure, timing, metadata, SysEx, and pending title edits.
 - A staged `Utilities > Strip XF Data...` workflow removes Yamaha XF
   sequencer-specific metadata and appended chunks from one selected MIDI song
   or every listed MIDI song, including songs in image and floppy sessions,
@@ -32,6 +38,11 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- Build Emulator Disk Set now uses nonblank titles from a source-folder
+  `INDEX.csv` when rows can be matched by path, unambiguous filename, or
+  SHA-256. Full titles are embedded in MIDI output, while E-SEQ output applies
+  its 32-byte title limit; generated song lists reflect the title actually
+  stored in each output file.
 - Build Emulator Disk Set now asks before replacing exact image or song-list
   output collisions, with the existing files restored if the replacement
   commit fails. Its progress window also keeps a stable width and elides long

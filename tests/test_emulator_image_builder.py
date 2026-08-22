@@ -1,3 +1,4 @@
+import csv
 import hashlib
 from pathlib import Path
 
@@ -93,6 +94,25 @@ def _large_midi_bytes(title, payload_size):
 
 def _disk_format(key="ibm.720"):
     return next(item for item in DISK_FORMATS if item.key == key)
+
+
+def _write_index_csv(directory, rows):
+    fieldnames = (
+        "number",
+        "output_folder",
+        "output_file",
+        "title",
+        "source_path",
+        "sha256",
+    )
+    with (directory / "INDEX.csv").open(
+        "w",
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def test_discovers_midi_files_recursively_in_natural_order(tmp_path):
@@ -281,13 +301,173 @@ def test_midi_images_preserve_titles_beyond_the_eseq_limit(tmp_path):
     assert long_title in Path(result.song_list_path).read_text(encoding="utf-8")
 
 
+def test_index_csv_title_replaces_native_midi_title_without_truncation(tmp_path):
+    source = tmp_path / "songs"
+    output = tmp_path / "images"
+    source.mkdir()
+    source_path = source / "001 - Bydlo.mid"
+    source_path.write_bytes(_midi_bytes("Embedded short title"))
+    index_title = "Mussorgsky - Bydlo (from Pictures at an Exhibition)"
+    _write_index_csv(
+        source,
+        [
+            {
+                "number": 1,
+                "output_folder": ".",
+                "output_file": source_path.name,
+                "title": index_title,
+            }
+        ],
+    )
+
+    result = build_emulator_disk_images(
+        source,
+        output,
+        prefix="INDX",
+        disk_format=_disk_format(),
+        output_content="midi",
+        output_ext="img",
+        include_song_lists=True,
+    )
+
+    session = FloppyImageSession.load(result.output_paths[0])
+    try:
+        midi_entry = next(
+            entry
+            for entry in session.list_entries().entries
+            if entry.name.upper().endswith(".MID")
+        )
+        assert extract_first_title_from_midi(
+            session.extract_file(midi_entry.path)
+        ) == index_title
+    finally:
+        session.cleanup()
+
+    assert index_title in Path(result.song_list_path).read_text(encoding="utf-8")
+
+
+def test_index_csv_output_folder_disambiguates_duplicate_filenames(tmp_path):
+    source = tmp_path / "songs"
+    output = tmp_path / "images"
+    first_folder = source / "first"
+    second_folder = source / "second"
+    first_folder.mkdir(parents=True)
+    second_folder.mkdir()
+    (first_folder / "Song.mid").write_bytes(_midi_bytes("Embedded first"))
+    (second_folder / "Song.mid").write_bytes(_midi_bytes("Embedded second"))
+    first_title = "First indexed title"
+    second_title = "Second indexed title"
+    _write_index_csv(
+        source,
+        [
+            {
+                "number": 1,
+                "output_folder": "first",
+                "output_file": "Song.mid",
+                "title": first_title,
+            },
+            {
+                "number": 2,
+                "output_folder": "second",
+                "output_file": "Song.mid",
+                "title": second_title,
+            },
+        ],
+    )
+
+    result = build_emulator_disk_images(
+        source,
+        output,
+        prefix="PATH",
+        disk_format=_disk_format(),
+        output_content="midi",
+        output_ext="img",
+    )
+
+    session = FloppyImageSession.load(result.output_paths[0])
+    try:
+        titles = {
+            extract_first_title_from_midi(session.extract_file(entry.path))
+            for entry in session.list_entries().entries
+            if entry.name.upper().endswith(".MID")
+        }
+    finally:
+        session.cleanup()
+
+    assert titles == {first_title, second_title}
+
+
+def test_index_csv_hash_match_restores_full_title_when_converting_eseq_to_midi(
+    tmp_path,
+):
+    source = tmp_path / "songs"
+    output = tmp_path / "images"
+    source.mkdir()
+    midi_path = source / "seed.mid"
+    midi_path.write_bytes(_midi_bytes("Original title that reaches 32!!"))
+    eseq_path = source / "LEGACY.FIL"
+    convert_midi_file_to_eseq_path(midi_path, eseq_path)
+    midi_path.unlink()
+    index_title = "Mussorgsky - Ballet of the Unhatched Chickens (Pictures)"
+    _write_index_csv(
+        source,
+        [
+            {
+                "number": 1,
+                "output_folder": ".",
+                "output_file": "A different filename.mid",
+                "title": index_title,
+                "source_path": "Archive/Another filename.fil",
+                "sha256": hashlib.sha256(eseq_path.read_bytes()).hexdigest(),
+            }
+        ],
+    )
+
+    result = build_emulator_disk_images(
+        source,
+        output,
+        prefix="HASH",
+        disk_format=_disk_format(),
+        output_content="midi",
+        output_ext="img",
+        include_song_lists=True,
+    )
+
+    session = FloppyImageSession.load(result.output_paths[0])
+    try:
+        midi_entry = next(
+            entry
+            for entry in session.list_entries().entries
+            if entry.name.upper().endswith(".MID")
+        )
+        assert extract_first_title_from_midi(
+            session.extract_file(midi_entry.path)
+        ) == index_title
+    finally:
+        session.cleanup()
+
+    assert index_title in Path(result.song_list_path).read_text(encoding="utf-8")
+
+
 def test_eseq_images_and_song_lists_use_the_on_disk_32_byte_title(tmp_path):
     source = tmp_path / "songs"
     output = tmp_path / "images"
     source.mkdir()
-    long_title = "Mussorgsky - Bydlo (from Pictures at an Exhibition)"
-    expected_title = long_title[:32]
-    (source / "Bydlo.mid").write_bytes(_midi_bytes(long_title))
+    source_path = source / "Bydlo.mid"
+    source_path.write_bytes(_midi_bytes("Embedded short title"))
+    index_title = "Mussorgsky - Bydlo (from Pictures at an Exhibition)"
+    expected_title = index_title[:32]
+    _write_index_csv(
+        source,
+        [
+            {
+                "number": 1,
+                "output_folder": ".",
+                "output_file": source_path.name,
+                "title": index_title,
+            }
+        ],
+    )
 
     result = build_emulator_disk_images(
         source,
@@ -315,7 +495,60 @@ def test_eseq_images_and_song_lists_use_the_on_disk_32_byte_title(tmp_path):
 
     song_list = Path(result.song_list_path).read_text(encoding="utf-8")
     assert f"1. {expected_title}\n" in song_list
-    assert long_title not in song_list
+    assert index_title not in song_list
+
+
+def test_index_csv_updates_an_existing_eseq_title_with_the_32_byte_limit(
+    tmp_path,
+):
+    source = tmp_path / "songs"
+    output = tmp_path / "images"
+    source.mkdir()
+    seed_path = tmp_path / "seed.mid"
+    seed_path.write_bytes(_midi_bytes("Embedded E-SEQ title"))
+    eseq_path = source / "LEGACY.FIL"
+    convert_midi_file_to_eseq_path(seed_path, eseq_path)
+    index_title = "Rubinstein - Romance in E flat major, complete title"
+    expected_title = index_title[:32]
+    _write_index_csv(
+        source,
+        [
+            {
+                "number": 1,
+                "output_folder": ".",
+                "output_file": eseq_path.name,
+                "title": index_title,
+            }
+        ],
+    )
+
+    result = build_emulator_disk_images(
+        source,
+        output,
+        prefix="COPY",
+        disk_format=_disk_format(),
+        output_content="eseq",
+        output_ext="img",
+        include_song_lists=True,
+    )
+
+    session = FloppyImageSession.load(result.output_paths[0])
+    try:
+        eseq_entry = next(
+            entry
+            for entry in session.list_entries().entries
+            if entry.name.upper().endswith(".FIL")
+            and entry.name.upper() != PIANODIR_FILENAME
+        )
+        assert extract_eseq_title_from_file(
+            session.extract_file(eseq_entry.path)
+        ) == expected_title
+    finally:
+        session.cleanup()
+
+    song_list = Path(result.song_list_path).read_text(encoding="utf-8")
+    assert f"1. {expected_title}\n" in song_list
+    assert index_title not in song_list
 
 
 def test_builds_eseq_only_images_without_including_source_midi(tmp_path):

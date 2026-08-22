@@ -185,35 +185,42 @@ decoded MIDI songs; they do not need the optional E-SEQ conversion setting.
 1. Choose `Utilities > Build Emulator Disk Set...`.
 2. Select any folder containing MIDI or Yamaha E-SEQ song files and choose the
    output folder. Subfolders are included by default.
-3. Choose the disk contents: `Yamaha E-SEQ (with PIANODIR.FIL)` or `Standard
+3. If the source folder contains `INDEX.csv`, its nonblank `title` values are
+   used for matching songs when possible.
+4. Choose the disk contents: `Yamaha E-SEQ (with PIANODIR.FIL)` or `Standard
    MIDI (MIDI files only)`.
-4. Choose the image filename prefix and starting disk number. The defaults
+5. Choose the image filename prefix and starting disk number. The defaults
    produce `DSKA0001.hfe`, `DSKA0002.hfe`, and so on; slot 0000 is also
    available when needed.
-5. Set the free-space safety margin. The 32 KiB default is reserved on every
+6. Set the free-space safety margin. The 32 KiB default is reserved on every
    disk after its songs and any E-SEQ directory file are packed.
-6. For E-SEQ, leave the album-title override blank to use the same generated
+7. For E-SEQ, leave the album-title override blank to use the same generated
    value as the disk's internal catalog ID, such as `DSKA-0001`. Enter an
    override only when the whole batch has a more useful shared title.
-7. Optionally select `Shuffle song order randomly` to randomize the discovered
+8. Optionally select `Shuffle song order randomly` to randomize the discovered
    songs before conversion and disk packing.
-8. Optionally select `Include Song Lists` to write one UTF-8 text file showing
+9. Optionally select `Include Song Lists` to write one UTF-8 text file showing
    every resulting image and its songs in playback order.
-9. Choose HFE or raw IMG output and the virtual floppy size. HFE is the default
+10. Choose HFE or raw IMG output and the virtual floppy size. HFE is the default
    for Nalbantov workflows, and the default disk size is the common Yamaha 720K
    DD format.
-10. Choose `Build Disk Set`.
+11. Choose `Build Disk Set`.
 
 The utility converts each song only when necessary, assigns unique DOS 8.3
 names, and fills as many images as needed. E-SEQ output contains `.FIL` songs
 and a `PIANODIR.FIL` built only from the songs on that image; source MIDI files
 are not included. E-SEQ disks enforce the 60-song limit as well as FAT12
 capacity. MIDI output contains only `.MID` songs, converts E-SEQ sources when
-needed, and does not add a Yamaha directory file. Native MIDI track-name titles
-are copied in full and may exceed 32 characters. A title converted from E-SEQ
-can contain only the 32 characters stored by the source E-SEQ format; conversion
-cannot reconstruct a missing remainder. The configured safety margin is
-enforced using FAT12 allocated sizes, not just the source files' byte totals.
+needed, and does not add a Yamaha directory file. `INDEX.csv` rows are matched
+by their output path or source path first, then by an unambiguous filename, and
+finally by SHA-256 when the column is available. Native MIDI track-name titles
+from the index are stored in full and may exceed 32 characters. E-SEQ output
+accepts the same index titles but stores only the first 32 Latin-1 bytes allowed
+by that format. When E-SEQ is converted to MIDI, a matching index row can supply
+the longer title that the E-SEQ file itself could not retain. Without an index,
+conversion cannot reconstruct a missing remainder. The configured safety
+margin is enforced using FAT12 allocated sizes, not just the source files' byte
+totals.
 Every image's file list is verified before output is committed. All images use
 the selected prefix plus a four-digit sequential number, and E-SEQ directory
 metadata uses the matching prefix and number as its per-disk catalog ID.
@@ -287,6 +294,24 @@ IBM PC header metadata for better emulator compatibility.
 
 The conversion is staged first. Original files are not modified until you save.
 Pedal channels are preserved by default.
+
+Use the standalone channel merge utility below when the channels should be
+combined without changing the source SMF type or track structure, including for
+files that are already Type 0.
+
+### Merge MIDI Instruments To Channel 0
+
+Choose `Utilities > Merge Instruments to Channel 0...`, then select one song or
+all listed MIDI songs. The utility routes every channel-voice event to zero-based
+channel 0 (shown as channel 1 by conventional 1-16 MIDI interfaces). It supports
+SMF Types 0, 1, and 2 without changing the file type, track structure, timing,
+metadata, or SysEx data.
+
+Because one MIDI channel can have only one active program, source program and
+bank changes are replaced with Acoustic Grand Piano. Channel-mode commands that
+could reset or silence all merged parts are removed; other controllers are
+preserved. Changes remain staged until you use `Save`, `Save As`, or save the
+current image/floppy session.
 
 ### Apply Pedal Compatibility To MIDI Files
 
