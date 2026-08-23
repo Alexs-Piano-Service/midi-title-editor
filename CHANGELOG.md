@@ -51,6 +51,14 @@ with release sections grouped by version and date.
   commit fails. Its progress window also keeps a stable width and elides long
   paths in the middle while retaining the full text in a tooltip.
 
+### Fixed
+
+- Normal image opening now recognizes protected FAT12 disks whose signed boot
+  sector or unsigned geometry-only BPB stub is stored over the second FAT. The
+  editable working copy restores or synthesizes a signed boot sector and mirrors
+  the intact first FAT, preserving all original files without requiring Image
+  Recovery.
+
 ## [0.8.0] - 2026-08-15
 
 ### Added

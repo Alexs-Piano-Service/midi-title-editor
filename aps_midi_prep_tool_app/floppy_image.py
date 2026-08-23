@@ -3877,9 +3877,18 @@ def _detect_protected_fat12_layout(data):
         root_offset = _layout_root_offset(layout)
         root_dir_sectors = _layout_root_dir_sectors(layout)
         media_descriptor = layout["media_descriptor"]
+        bytes_per_sector = int(layout["bytes_per_sector"])
+        primary_boot = data[:bytes_per_sector]
+        relocated_boot = data[fat2_offset:fat2_offset + bytes_per_sector]
+        primary_boot_is_valid = _geometry_from_boot_sector(primary_boot) is not None
+        fat_tails_match = (
+            data[fat1_offset + bytes_per_sector:fat1_offset + fat_size]
+            == data[fat2_offset + bytes_per_sector:fat2_offset + fat_size]
+        )
 
         if (
             size == total_size
+            and not primary_boot_is_valid
             and _fat_signature_at(data, fat1_offset, media_descriptor)
             and _fat_signature_at(data, fat2_offset, media_descriptor)
             and _root_dir_looks_plausible(data, root_offset, root_dir_sectors)
@@ -3892,6 +3901,50 @@ def _detect_protected_fat12_layout(data):
                 "root_dir_sectors": root_dir_sectors,
                 "notes": f"sector 0 appears blank/corrupt; {layout['label']} FATs and root directory are intact",
             }
+
+        relocated_layout = _protected_layout_hint_from_boot_sector(relocated_boot)
+        relocated_boot_is_signed = relocated_boot[510:512] == _YAMAHA_BOOT_SIGNATURE
+        primary_boot_is_blank = (
+            primary_boot
+            and primary_boot[0] in {0x00, 0xF6}
+            and primary_boot == bytes([primary_boot[0]]) * len(primary_boot)
+        )
+        relocated_bpb_is_unsigned_stub = (
+            not relocated_boot_is_signed
+            and primary_boot_is_blank
+            and fat_tails_match
+            and not any(relocated_boot[28:])
+        )
+        if (
+            size == total_size
+            and not primary_boot_is_valid
+            and _fat_signature_at(data, fat1_offset, media_descriptor)
+            and relocated_layout == layout
+            and (relocated_boot_is_signed or relocated_bpb_is_unsigned_stub)
+            and fat_tails_match
+            and _root_dir_looks_plausible(data, root_offset, root_dir_sectors)
+        ):
+            detection = {
+                "mode": "replace_sector0",
+                "layout": layout,
+                "fat1_offset": fat1_offset,
+                "fat_size": fat_size,
+                "root_offset": root_offset,
+                "root_dir_sectors": root_dir_sectors,
+                "repair_fat_mirrors": True,
+            }
+            if relocated_boot_is_signed:
+                detection["boot_sector"] = relocated_boot
+                detection["notes"] = (
+                    f"sector 0 appears blank/corrupt; a valid {layout['label']} boot sector was stored "
+                    "over the second FAT while the first FAT and root directory remain intact"
+                )
+            else:
+                detection["notes"] = (
+                    f"sector 0 appears blank/corrupt; an unsigned {layout['label']} BPB stub was stored "
+                    "over the second FAT while the first FAT, matching FAT tails, and root directory remain intact"
+                )
+            return detection
 
         if (
             size == total_size - int(layout["bytes_per_sector"])
@@ -3920,13 +3973,14 @@ def _detect_yamaha_layout(data):
     fat1_offset = _YAMAHA_BYTES_PER_SECTOR
     fat2_offset = (1 + _YAMAHA_SECTORS_PER_FAT) * _YAMAHA_BYTES_PER_SECTOR
     root_offset = (1 + _YAMAHA_NUM_FATS * _YAMAHA_SECTORS_PER_FAT) * _YAMAHA_BYTES_PER_SECTOR
+    primary_boot = data[:_YAMAHA_BYTES_PER_SECTOR]
 
-    if size == _YAMAHA_TOTAL_SIZE and _looks_like_valid_yamaha_boot_sector(data[:_YAMAHA_BYTES_PER_SECTOR]):
+    if size == _YAMAHA_TOTAL_SIZE and _geometry_from_boot_sector(primary_boot) is not None:
         return {
             "mode": "already_valid",
             "fat1_offset": fat1_offset,
             "root_offset": root_offset,
-            "notes": "valid 720 KB FAT12 boot sector already present",
+            "notes": "valid 720 KB FAT boot sector already present",
         }
 
     if (
@@ -4966,13 +5020,15 @@ def prepare_yamaha_bytes(data, output_path):
         root_dir = data[
             int(detection["root_offset"]): int(detection["root_offset"]) + root_dir_sectors * bytes_per_sector
         ]
+    stored_boot = detection.get("boot_sector")
     serial = zlib.crc32(data[int(detection["fat1_offset"]):]) & 0xFFFFFFFF
-    if layout:
+    expected_size = _layout_total_size(layout) if layout else _YAMAHA_TOTAL_SIZE
+    if stored_boot is not None:
+        boot = bytes(stored_boot)
+    elif layout:
         boot = _build_standard_fat12_boot_sector(layout, serial, _find_volume_label(root_dir))
-        expected_size = _layout_total_size(layout)
     else:
         boot = _build_standard_yamaha_boot_sector(serial, _find_volume_label(root_dir))
-        expected_size = _YAMAHA_TOTAL_SIZE
 
     if detection["mode"] == "prepend_sector0":
         repaired = boot + data
@@ -4984,6 +5040,16 @@ def prepare_yamaha_bytes(data, output_path):
             "FAT12 repair produced an unexpected image size. "
             "The source may not match a supported Yamaha/IBM floppy layout."
         )
+
+    if detection.get("repair_fat_mirrors"):
+        repaired_data = bytearray(repaired)
+        fat1_offset = int(detection["fat1_offset"])
+        fat_size = int(detection.get("fat_size") or _layout_fat_size(layout))
+        fat1 = bytes(repaired_data[fat1_offset:fat1_offset + fat_size])
+        for fat_index in range(1, int(layout["num_fats"])):
+            mirror_offset = fat1_offset + fat_index * fat_size
+            repaired_data[mirror_offset:mirror_offset + fat_size] = fat1
+        repaired = bytes(repaired_data)
 
     if detection.get("root_dir") is not None:
         root_offset = int(detection["root_offset"])
