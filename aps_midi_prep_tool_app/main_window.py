@@ -10898,6 +10898,12 @@ class MidiTitleWindow(QMainWindow):
         include_subfolders_checkbox = QCheckBox(
             self._t("emulator.include_subfolders")
         )
+        include_subfolders_checkbox.setObjectName(
+            "emulatorIncludeSubfoldersCheckbox"
+        )
+        include_subfolders_checkbox.setToolTip(
+            self._t("emulator.include_subfolders.tip")
+        )
         form_layout.addWidget(include_subfolders_checkbox, len(rows), 1, 1, 2)
         shuffle_checkbox = QCheckBox(self._t("emulator.shuffle"))
         shuffle_checkbox.setToolTip(self._t("emulator.shuffle.tip"))

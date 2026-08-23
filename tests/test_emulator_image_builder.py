@@ -117,33 +117,43 @@ def _write_index_csv(directory, rows):
 
 def test_discovers_midi_files_recursively_in_natural_order(tmp_path):
     source = tmp_path / "source"
-    nested = source / "nested"
-    nested.mkdir(parents=True)
+    folder_2 = source / "Folder 2"
+    folder_10 = source / "Folder 10"
+    grandchild = folder_2 / "grandchild"
+    grandchild.mkdir(parents=True)
+    folder_10.mkdir()
     (source / "Song 10.mid").write_bytes(_midi_bytes("Ten"))
     (source / "Song 2.MIDI").write_bytes(_midi_bytes("Two"))
-    (nested / "Song 3.mid").write_bytes(_midi_bytes("Three"))
-    (nested / "ignore.txt").write_text("not MIDI", encoding="utf-8")
-    (nested / "PIANODIR.FIL").write_bytes(b"directory metadata")
+    (folder_2 / "Song 3.mid").write_bytes(_midi_bytes("Three"))
+    (folder_10 / "Song 1.mid").write_bytes(_midi_bytes("Folder ten"))
+    (grandchild / "Song 4.mid").write_bytes(_midi_bytes("Four"))
+    (grandchild / "ignore.txt").write_text("not MIDI", encoding="utf-8")
+    (grandchild / "PIANODIR.FIL").write_bytes(b"directory metadata")
 
     discovered = discover_midi_files(source)
 
-    assert [Path(path).name for path in discovered] == [
+    assert [Path(path).relative_to(source).as_posix() for path in discovered] == [
         "Song 2.MIDI",
         "Song 10.mid",
-        "Song 3.mid",
+        "Folder 2/Song 3.mid",
+        "Folder 10/Song 1.mid",
+        "Folder 2/grandchild/Song 4.mid",
     ]
     assert [Path(path).name for path in discover_midi_files(
         source,
         include_subfolders=False,
     )] == ["Song 2.MIDI", "Song 10.mid"]
 
-    eseq_path = nested / "Song 4.fil"
+    eseq_path = folder_2 / "Song 5.fil"
     convert_midi_file_to_eseq_path(source / "Song 2.MIDI", eseq_path)
-    assert [Path(path).name for path in discover_song_files(source)] == [
+    discovered_songs = discover_song_files(source)
+    assert [Path(path).relative_to(source).as_posix() for path in discovered_songs] == [
         "Song 2.MIDI",
         "Song 10.mid",
-        "Song 3.mid",
-        "Song 4.fil",
+        "Folder 2/Song 3.mid",
+        "Folder 2/Song 5.fil",
+        "Folder 10/Song 1.mid",
+        "Folder 2/grandchild/Song 4.mid",
     ]
 
 

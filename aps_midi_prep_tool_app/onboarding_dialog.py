@@ -154,7 +154,7 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 <p>Use <strong>Utilities &gt; Build Emulator Disk Set...</strong> to turn a whole
                 folder of MIDI and Yamaha E-SEQ songs into numbered emulator-ready disks.</p>
                 <ul>
-                  <li>Subfolders can be included, and the utility fills as many raw IMG or HFE images as needed.</li>
+                  <li><strong>Explore source folders recursively</strong> includes songs at every nested level; turn it off to use only the selected folder. The utility fills as many raw IMG or HFE images as needed.</li>
                   <li>Choose either E-SEQ-only disks or Standard-MIDI-only disks; source songs are converted only when necessary.</li>
                   <li>E-SEQ disks receive DOS 8.3 <strong>.FIL</strong> names and a <strong>PIANODIR.FIL</strong> containing only that image's songs and album metadata.</li>
                   <li>MIDI disks contain only <strong>.MID</strong> files and do not receive a Yamaha directory file.</li>

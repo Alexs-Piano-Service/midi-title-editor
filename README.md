@@ -184,7 +184,9 @@ decoded MIDI songs; they do not need the optional E-SEQ conversion setting.
 
 1. Choose `Utilities > Build Emulator Disk Set...`.
 2. Select any folder containing MIDI or Yamaha E-SEQ song files and choose the
-   output folder. Subfolders are included by default.
+   output folder. Leave `Explore source folders recursively` enabled to include
+   songs at every nested level, or clear it to use only songs directly in the
+   selected source folder. The choice is remembered.
 3. If the source folder contains `INDEX.csv`, its nonblank `title` values are
    used for matching songs when possible.
 4. Choose the disk contents: `Yamaha E-SEQ (with PIANODIR.FIL)` or `Standard

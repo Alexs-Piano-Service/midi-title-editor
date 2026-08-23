@@ -38,6 +38,9 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- Build Emulator Disk Set now presents its remembered subfolder scan as
+  `Explore source folders recursively` and explains that clearing it limits
+  discovery to songs directly in the selected source folder.
 - Build Emulator Disk Set now uses nonblank titles from a source-folder
   `INDEX.csv` when rows can be matched by path, unambiguous filename, or
   SHA-256. Full titles are embedded in MIDI output, while E-SEQ output applies
