@@ -7,13 +7,13 @@
 
 **Revision:** 1.3
 
-**Date:** 2026-07-07
+**Date:** 2026-08-23
 
-**Current app review:** Checked against `eseq_converter.py`, `eseq_pianodir.py`, `floppy_image.py`, `midi_type0_converter.py`, and the image/floppy workflows in `main_window.py` for APS MIDI Prep Tool v0.6.12 release preparation.
+**Current app review:** Checked against `eseq_converter.py`, `eseq_pianodir.py`, `floppy_image.py`, `midi_type0_converter.py`, and the image/floppy workflows in `main_window.py` for APS MIDI Prep Tool v0.8.1 release preparation.
 
 > This document is intentionally written as an engineering reference. It distinguishes proven behavior from inferred or compatibility-oriented behavior. It does not contain proprietary Yamaha source code or third-party program code; it specifies file behavior derived from personal recordings, supplied disk images, static binary inspection, and public format references. Third-party names are used only to identify compatibility targets; APS MIDI Prep Tool is independent and is not affiliated with, sponsored by, or endorsed by Yamaha or other product owners mentioned here.
 
-Review notes for v0.6.12 release preparation:
+Review notes for v0.8.1 release preparation:
 
 - The app stages MIDI-to-E-SEQ, E-SEQ-to-MIDI, and SMF1-to-SMF0 conversions before writing them to disk.
 - In E-SEQ modes, dropped MIDI files are converted through Type 0 before E-SEQ output.

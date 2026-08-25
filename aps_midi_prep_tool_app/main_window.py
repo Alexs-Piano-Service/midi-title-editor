@@ -9157,6 +9157,14 @@ class MidiTitleWindow(QMainWindow):
         self.fileOpenImageAction = QAction("Open Image...", self)
         self.fileOpenImageAction.triggered.connect(self.open_image_dialog)
 
+        self.fileRecoverImageAction = QAction("Recover Damaged Image...", self)
+        self.fileRecoverImageAction.setToolTip(
+            self._lt(
+                "Recover song data from a damaged floppy image and open the result as a new editable image copy."
+            )
+        )
+        self.fileRecoverImageAction.triggered.connect(self.recover_damaged_image_dialog)
+
         self.fileReadFloppyAction = QAction("Read Floppy...", self)
         self.fileReadFloppyAction.triggered.connect(self.load_floppy_drive)
 
@@ -9261,6 +9269,8 @@ class MidiTitleWindow(QMainWindow):
         self.fileOpenMenu = self.fileMenu.addMenu(self._lt("Open"))
         self.fileOpenMenu.addAction(self.fileOpenFolderAction)
         self.fileOpenMenu.addAction(self.fileOpenImageAction)
+        self.fileOpenMenu.addSeparator()
+        self.fileOpenMenu.addAction(self.fileRecoverImageAction)
         self.fileMenu.addSeparator()
         self.fileMenu.addAction(self.fileSaveAction)
         self.fileMenu.addAction(self.fileSaveAsAction)
@@ -9374,13 +9384,6 @@ class MidiTitleWindow(QMainWindow):
         self.utilitiesMenu.addAction(self.utilitiesEmulatorImagesAction)
 
         self.utilitiesMenu.addSeparator()
-
-        self.utilitiesRecoverImageAction = QAction("Recover Damaged Image...", self)
-        self.utilitiesRecoverImageAction.setToolTip(
-            "Recover song data from a damaged floppy image and open the result as a new editable image copy."
-        )
-        self.utilitiesRecoverImageAction.triggered.connect(self.recover_damaged_image_dialog)
-        self.diskMenu.addAction(self.utilitiesRecoverImageAction)
 
         self.utilitiesRenameAction = QAction("Rename All to DOS 8.3", self)
         self.utilitiesRenameAction.triggered.connect(self.rename_all_for_disk)
@@ -10082,7 +10085,7 @@ class MidiTitleWindow(QMainWindow):
             {"id": "utilities.pedal_compatibility", "category": "Utilities", "label": "Apply Pedal Compatibility...", "action": "utilitiesPedalCompatibilityAction", "default": ""},
             {"id": "utilities.merge_channels", "category": "Utilities", "label": "Merge Instruments to Channel 0...", "action": "utilitiesMergeChannelsAction", "default": ""},
             {"id": "utilities.strip_xf", "category": "Utilities", "label": "Strip XF Data...", "action": "utilitiesStripXfAction", "default": ""},
-            {"id": "utilities.recover_image", "category": "Disk", "label": "Recover Damaged Image...", "action": "utilitiesRecoverImageAction", "default": "Ctrl+Shift+D"},
+            {"id": "utilities.recover_image", "category": "File", "label": "Recover Damaged Image...", "action": "fileRecoverImageAction", "default": "Ctrl+Shift+D"},
             {"id": "utilities.format_floppy", "category": "Disk", "label": "Format Floppy Disk...", "action": "utilitiesFormatFloppyAction", "default": "F6"},
             {"id": "settings.reset_hidden_dialogs", "category": "Settings", "label": "Reset Hidden Dialogs...", "action": "settingsResetHiddenDialogsAction", "default": "Ctrl+Shift+H"},
             {"id": "help.welcome", "category": "Help", "label": "Show Welcome Screen", "action": "helpWelcomeAction", "default": "F1"},
@@ -11453,7 +11456,7 @@ class MidiTitleWindow(QMainWindow):
             ("utilitiesFileInspectionAction", "File Inspection...", "I"),
             ("utilitiesRenderAudioAction", "Render Audio...", "A"),
             ("utilitiesBulkExtractionAction", "Bulk Extraction...", "B"),
-            ("utilitiesRecoverImageAction", "Recover Damaged Image...", "D"),
+            ("fileRecoverImageAction", "Recover Damaged Image...", "D"),
             ("utilitiesRenameAction", "Rename All to DOS 8.3", "R"),
             ("utilitiesLongFilenamesAction", "Name MIDI Files from Song Titles", "L"),
             ("utilitiesTrimTitleSpacesAction", "Trim Title Spaces", "T"),
@@ -16505,13 +16508,15 @@ class MidiTitleWindow(QMainWindow):
                 if enabled else
                 "Please wait for the current operation to finish before formatting a floppy disk."
             )
-        if hasattr(self, "utilitiesRecoverImageAction"):
+        if hasattr(self, "fileRecoverImageAction"):
             enabled = self.choose_button.isEnabled()
-            self.utilitiesRecoverImageAction.setEnabled(enabled)
-            self.utilitiesRecoverImageAction.setStatusTip(
-                "Recover song data from a damaged floppy image."
-                if enabled else
-                "Please wait for the current operation to finish before recovering a damaged image."
+            self.fileRecoverImageAction.setEnabled(enabled)
+            self.fileRecoverImageAction.setStatusTip(
+                self._lt(
+                    "Recover song data from a damaged floppy image."
+                    if enabled
+                    else "Please wait for the current operation to finish before recovering a damaged image."
+                )
             )
         if hasattr(self, "fileCreateTagSidecarsAction"):
             enabled = self.choose_button.isEnabled()

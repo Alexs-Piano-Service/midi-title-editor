@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .bulgarian_translations import (
+    BULGARIAN_MESSAGE_TRANSLATIONS,
+    BULGARIAN_TEXT_TRANSLATIONS,
+)
+from .file_inspection_translations import FILE_INSPECTION_TEXT_TRANSLATIONS
 from .translation_supplements import COMMON_TEXT_TRANSLATION_SUPPLEMENTS
+from .workflow_translations import WORKFLOW_TEXT_TRANSLATIONS
 
 
 DEFAULT_LANGUAGE = "en"
@@ -2789,6 +2795,9 @@ for source, supplemental_translations in COMMON_TEXT_TRANSLATION_SUPPLEMENTS.ite
     for language_code, translated_text in supplemental_translations.items():
         translations.setdefault(language_code, translated_text)
 
+COMMON_TEXT_TRANSLATIONS.update(FILE_INSPECTION_TEXT_TRANSLATIONS)
+COMMON_TEXT_TRANSLATIONS.update(WORKFLOW_TEXT_TRANSLATIONS)
+
 
 MESSAGES.update({
     "update.available.title": {"en": "Update Available", "es": "Actualización disponible", "fr": "Mise à jour disponible", "de": "Update verfügbar", "it": "Aggiornamento disponibile", "pt-BR": "Atualização disponível", "bg": "Налично е обновление", "nl": "Update beschikbaar", "pl": "Dostępna aktualizacja", "ja": "更新があります", "ko": "업데이트 사용 가능", "zh-Hans": "有可用更新"},
@@ -2909,16 +2918,12 @@ def _apply_language_overrides(language, message_overrides, text_overrides):
         COMMON_TEXT_TRANSLATIONS.setdefault(source, {})[language] = translation
 
 
-def _ensure_language_coverage(language):
-    for translations in MESSAGES.values():
-        if language not in translations:
-            translations[language] = translations.get(DEFAULT_LANGUAGE) or next(iter(translations.values()), "")
-    for source, translations in COMMON_TEXT_TRANSLATIONS.items():
-        translations.setdefault(language, translations.get(DEFAULT_LANGUAGE) or source)
-
-
 _apply_language_overrides("bg", _BULGARIAN_MESSAGE_OVERRIDES, _BULGARIAN_TEXT_OVERRIDES)
-_ensure_language_coverage("bg")
+_apply_language_overrides(
+    "bg",
+    BULGARIAN_MESSAGE_TRANSLATIONS,
+    BULGARIAN_TEXT_TRANSLATIONS,
+)
 
 
 def tr(message_id, language_code=None, **kwargs):

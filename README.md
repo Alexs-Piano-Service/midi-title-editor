@@ -1,533 +1,112 @@
 # APS MIDI Prep Tool
 
-APS MIDI Prep Tool is a modern Disklavier preservation and preparation
-workstation for MIDI files, Yamaha E-SEQ files, floppy images, and physical
-floppy disks.
-
-Current version: `0.8.0`
-
-Author: Alexander Peppe
-
-Company: Alex's Piano Service LLC
-
-Address: 432 Elm St., Biddeford, ME 04005
-
-License: Apache License 2.0
-
-The tool is built around practical Disklavier workflows: preserving old Yamaha
-floppies, preparing Nalbantov emulator images, correcting song titles, converting
-between MIDI and E-SEQ, making SMF0-compatible files, and inspecting songs
-before you write anything back.
-
-## What It Does
-
-- Opens MIDI folders, Yamaha E-SEQ folders, floppy images, and physical floppies.
-- Reads common floppy-image formats supported through Greaseweazle conversion,
-  including IMG/BIN-style raw images and HFE workflows.
-- Uses Yamaha Smart PianoSoft `PSONG.MNG` catalogs as the authoritative source
-  for song titles and playback order when opening compatible images or
-  floppies. Editing a catalog-backed title updates `PSONG.MNG` while leaving
-  the MIDI track-name event unchanged.
-- Recognizes PianoDisc System 3 IMG/BIN-style and HFE floppy images and decodes
-  their non-FAT song catalog and performance streams to piano SMF0 files. The
-  outputs use DOS 8.3 filenames by default, with an optional remembered choice
-  for track-number/title names, and the source image stays unchanged.
-- Reads and writes physical floppies using a normal floppy drive or Greaseweazle.
-- Shows Greaseweazle sector-map previews after reads, writes, and image conversions
-  so good and bad sector positions can be reviewed visually.
-- Images physical floppies directly to IMG or SCP files without opening or
-  scanning the disk contents afterward.
-- Recognizes Macintosh 800K GCR/HFS Greaseweazle SCP captures as non-Yamaha
-  disks and can save decoded IMG copies without opening them for editing.
-- Creates fresh floppy images, including default PianoSoft-style 720K E-SEQ images.
-- Formats Yamaha Disklavier floppies as MIDI or E-SEQ disks.
-- Recovers damaged floppy images and physical floppies with repair and raw-carving paths.
-- Edits MIDI titles, E-SEQ titles, folder and image filenames, and Disklavier
-  album metadata. Long filenames are allowed by default; `Settings > Use 8.3
-  filenames` enables legacy short-name restrictions when needed.
-- Trims Disklavier-spaced title text into regular MIDI titles during floppy reads
-  or as a batch utility.
-- Converts MIDI Type 1 / SMF1 files to MIDI Type 0 / SMF0, with an optional
-  one-piano mode that combines instruments on MIDI channel 1.
-- Softens binary sustain-pedal CC64 into continuous S-curve motion for one
-  selected song or every listed MIDI song as a batch, while preserving existing
-  continuous pedal streams.
-- Strips Yamaha XF data from one selected song or every listed MIDI song,
-  removing sequencer-specific metadata and appended XF chunks while preserving
-  musical events, timing, tempo, SysEx, tracks, and continuous pedal data.
-- Converts Yamaha E-SEQ `.FIL` files to standard MIDI, optionally naming folder
-  outputs from track order and song title.
-- Extracts Akai MPC `.SEQ` files and embedded sequences in MPC `.ALL` files,
-  converting them to standard MIDI.
-- Extracts Yamaha V50/SY77 NSEQ sequences when the V50/SY77 signature is
-  present, converting them to standard MIDI.
-- Recognizes Yamaha PSR-600 `.BLK` Page Memory files on disks or as standalone
-  files and converts each BLK to one multitrack Type 1 MIDI, with recorded
-  Melody banks on separate zero-aligned tracks and approximate General MIDI
-  instruments. When a Melody setup contains a second voice descriptor with
-  the recurring `0x7F` setup flag, the converter adds a clearly questioned
-  layer track for auditioning and preserves both raw descriptors in MIDI
-  metadata. The flag's meaning is not yet confirmed; proprietary
-  accompaniment and Page Memory data remain in the original `.BLK` files.
-  Each apparent layer needs another MIDI channel to carry its second
-  instrument, so five primary banks can yield as many as ten audition
-  channels; this does not imply that the undecoded Conductor played every
-  bank simultaneously.
-- Reads Yamaha Electone MDR floppy images, including some images with blank or
-  nonstandard boot sectors, and converts `.EVT` performance files to standard
-  MIDI while preserving millisecond timing and SysEx events.
-- Converts MIDI to Yamaha E-SEQ, converting Type 1 MIDI to Type 0 first when needed.
-- Generates and refreshes `PIANODIR.FIL` for Yamaha E-SEQ disks and folders.
-- Builds a numbered emulator disk set from MIDI and Yamaha E-SEQ songs. Each
-  disk set contains either only Standard MIDI or only E-SEQ; E-SEQ sets receive
-  a disk-specific `PIANODIR.FIL` on every image.
-- Stages destructive or format-changing work until you choose `File > Save`,
-  `File > Save As...`, `File > Save As ZIP...`, `File > Save As Image...`, or
-  `Disk > Write Current Image to Floppy...`.
-- `File > Save As Image...` asks for output image type and disk size each time,
-  including from Image Mode, and can split or repack files into numbered images
-  when the selected disk size is too small.
-- Can write a `metadata_summary.txt` file on save with each saved MIDI file and
-  its detected MIDI metadata.
-- Keeps save behavior in `File > Save Options`, including album subfolders,
-  backups, tag sidecars, and metadata summaries.
-- Protects original images and floppies with
-  `File > Write Protection > Write-Protect Original`.
-- Shows song lists, file inspection metadata, piano-roll previews, channels, and
-  playback previews, with a SoundFont picker and manager for optional
-  downloadable SoundFonts. File Inspection includes per-channel
-  instrument and level controls, adjustable preview tempo, and Space to start
-  or stop playback, plus selected-song WAV/MP3 rendering with those settings.
-- Renders all currently listed MIDI or E-SEQ files to WAV or MP3 from
-  `Utilities > Render Audio...` using a selected SoundFont.
-- Bulk-extracts every file from every supported floppy image directly inside a
-  selected folder. Output subfolders use image filenames by default, or album
-  titles from `PIANODIR.FIL` when requested and available. E-SEQ songs can also
-  be converted to MIDI during extraction while retaining the original files.
-  The complete utility workflow is localized in every language supported by
-  the app.
-- Provides a `View` menu for title-warning display, Disklavier title formatting,
-  status visibility, quick-panel visibility, album-info visibility, and realtime
-  console logs.
-- Shows an empty-list drop target and highlights the file list during supported
-  file drags so MIDI, E-SEQ, and disk-image files are easier to add.
-- Provides `Help > Send Feedback...` and `Help > Report a Bug...` for sending
-  feedback or support reports with app details and optional recent, timestamped
-  console logs.
-- Provides `Settings > Font Size` choices for regular, small, and compact UI
-  text.
-- Provides customizable keyboard shortcuts for current File, Disk, View,
-  Utilities, Settings, and Help commands.
-- Includes localized UI support for English, Spanish, French, German, Italian,
-  Brazilian Portuguese, Bulgarian, Dutch, Polish, Japanese, Korean, and
-  Simplified Chinese.
-- Optionally writes `.tags.txt` ID3 sidecar files for local folder exports.
-
-## Common Workflows
-
-### Preserve A Yamaha Floppy
-
-1. Insert the disk. If your operating system asks to format it, cancel.
-2. Choose `Disk > Read Floppy...`.
-3. Select `Floppy Drive` or `Greaseweazle`.
-4. Optionally enable `Trim title spaces after reading` to clean centered
-   Disklavier-screen titles into regular MIDI titles.
-5. To convert E-SEQ songs for PC or mobile playback, enable `Convert E-SEQ
-   files to MIDI after reading`; optionally enable `Name MIDI files by track
-   number and song title` beneath it.
-6. Review the files, titles, types, and free space.
-7. Use `File > Save As Image...` to create an archival image, or
-   `File > Save As...` to extract files.
-
-For difficult disks, choose `Disk > Read Floppy...` and enable
-`Start in recovery mode`. Recovery asks for the disk size, defaults to the
-common Yamaha 720K DD format, copies a full image first, then tries filesystem
-repair and raw MIDI/E-SEQ carving.
-
-To make a preservation copy without opening the disk contents in the app, choose
-`Disk > Image Floppy...` and save an IMG sector image or Greaseweazle SCP flux
-capture.
-
-### Bulk-Extract A Folder Of Images
-
-1. Choose `Utilities > Bulk Extraction...`.
-2. Select the folder containing the images and an output folder.
-3. Choose whether each output subfolder should use the image filename or the
-   album title stored in `PIANODIR.FIL` when one is available.
-4. Choose whether MIDI files should be named by track number and song title.
-   This applies both to MIDI already stored in an image and to MIDI created by
-   E-SEQ conversion.
-5. Optionally enable MIDI-only E-SEQ conversion. Its dependent options remove
-   excess title spacing (enabled by default) and retain the original
-   E-SEQ/Yamaha directory files.
-6. Choose `Extract`.
-
-Every supported image directly inside the selected folder gets a separate
-output subfolder. Internal image paths are preserved. Existing output folders
-are not overwritten. With conversion enabled, detected E-SEQ songs are replaced
-by MIDI files; original E-SEQ, `PIANODIR.FIL`, and `MUSIC.DIR` files are not
-written by default. Descriptive MIDI filenames use names such as `01 - Moon
-River.mid`, numbered independently within each image. For Yamaha Smart
-PianoSoft images, `PSONG.MNG` catalog titles are preferred over blank or generic
-embedded MIDI track names. The same catalog-first behavior is used when an
-image or floppy is opened normally. E-SEQ title cleanup removes leading,
-trailing, and repeated spaces before embedding the title in MIDI and before
-building a descriptive filename. Enable `Also include original E-SEQ and Yamaha
-directory files` when those source files should accompany the converted MIDI.
-Other files from each image are still extracted. A stable progress window shows
-overall image progress and progress within the current image.
-
-PianoDisc System 3 images are read-only sources and are always extracted as
-decoded MIDI songs; they do not need the optional E-SEQ conversion setting.
-
-### Build Emulator Disk Sets
-
-1. Choose `Utilities > Build Emulator Disk Set...`.
-2. Select any folder containing MIDI or Yamaha E-SEQ song files and choose the
-   output folder. Leave `Explore source folders recursively` enabled to include
-   songs at every nested level, or clear it to use only songs directly in the
-   selected source folder. The choice is remembered.
-3. If the source folder contains `INDEX.csv`, its nonblank `title` values are
-   used for matching songs when possible.
-4. Choose the disk contents: `Yamaha E-SEQ (with PIANODIR.FIL)` or `Standard
-   MIDI (MIDI files only)`.
-5. Choose the image filename prefix and starting disk number. The defaults
-   produce `DSKA0001.hfe`, `DSKA0002.hfe`, and so on; slot 0000 is also
-   available when needed.
-6. Set the free-space safety margin. The 32 KiB default is reserved on every
-   disk after its songs and any E-SEQ directory file are packed.
-7. For E-SEQ, leave the album-title override blank to use the same generated
-   value as the disk's internal catalog ID, such as `DSKA-0001`. Enter an
-   override only when the whole batch has a more useful shared title.
-8. Optionally select `Shuffle song order randomly` to randomize the discovered
-   songs before conversion and disk packing.
-9. Optionally select `Include Song Lists` to write one UTF-8 text file showing
-   every resulting image and its songs in playback order.
-10. Choose HFE or raw IMG output and the virtual floppy size. HFE is the default
-   for Nalbantov workflows, and the default disk size is the common Yamaha 720K
-   DD format.
-11. Choose `Build Disk Set`.
-
-The utility converts each song only when necessary, assigns unique DOS 8.3
-names, and fills as many images as needed. E-SEQ output contains `.FIL` songs
-and a `PIANODIR.FIL` built only from the songs on that image; source MIDI files
-are not included. E-SEQ disks enforce the 60-song limit as well as FAT12
-capacity. MIDI output contains only `.MID` songs, converts E-SEQ sources when
-needed, and does not add a Yamaha directory file. `INDEX.csv` rows are matched
-by their output path or source path first, then by an unambiguous filename, and
-finally by SHA-256 when the column is available. Native MIDI track-name titles
-from the index are stored in full and may exceed 32 characters. E-SEQ output
-accepts the same index titles but stores only the first 32 Latin-1 bytes allowed
-by that format. When E-SEQ is converted to MIDI, a matching index row can supply
-the longer title that the E-SEQ file itself could not retain. Without an index,
-conversion cannot reconstruct a missing remainder. The configured safety
-margin is enforced using FAT12 allocated sizes, not just the source files' byte
-totals.
-Every image's file list is verified before output is committed. All images use
-the selected prefix plus a four-digit sequential number, and E-SEQ directory
-metadata uses the matching prefix and number as its per-disk catalog ID.
-Unless overridden, the album title uses that same per-disk ID. If an exact
-image or song-list output name already exists, the utility lists the affected
-files and asks before replacing them. Songs use stable natural filename order
-unless shuffle is selected; when selected, the randomized order also becomes
-the track order recorded in each E-SEQ directory file. When song lists are
-enabled, the output folder receives one aggregate text file with a section for
-every image, including its album and catalog metadata when applicable and its
-numbered song order.
-
-Raw IMG is the most broadly useful emulator interchange format. HFE output uses
-Greaseweazle conversion support and is suitable for HxC/Nalbantov-style
-workflows. Vendor-specific slot names and USB-stick setup files are outside the
-disk image, so copy or rename the finished images as required by the emulator.
-
-### Save Safely
-
-`File > Write Protection > Write-Protect Original` keeps `File > Save` from
-overwriting the current image or floppy until you explicitly turn that
-protection off. `File > Save As...` and `File > Save As Image...` remain
-available for copy-based work. Use `File > Save As ZIP...` when you want the
-current listed files packaged into one archive without overwriting originals.
-
-Enable `File > Save Options > Back up before Saving` when you want APS MIDI
-Prep Tool to create a backup before overwriting local files or disk images.
-
-Enable `File > Save Options > Create Album Subfolder` when exporting Yamaha
-E-SEQ files with `File > Save As...` and you want the destination folder
-grouped by the current album title and catalog number. Save As confirms whether
-it used an album subfolder or saved directly in the selected folder.
-
-`File > Save Options > Create Album Subfolder for Save As Image` provides the
-same catalog-number-and-album-title grouping for `File > Save As Image...`.
-This niche option is off by default, applies to every image produced when files
-spill across multiple images, and does not affect floppy writes.
-
-### Prepare A Nalbantov USB Stick Image
-
-For a whole folder of songs, use `Utilities > Build Emulator Disk Set...` and
-choose E-SEQ disk contents with HFE image output. For one image that you want
-to edit manually:
-
-1. Open an existing HFE image with `File > Open > Open Image...`, or use `File
-   > New Image...`.
-2. Use the default 720K E-SEQ image settings for PianoSoft-style disks.
-3. Drag MIDI or E-SEQ files into the table.
-4. In E-SEQ image mode, dropped MIDI files are staged as E-SEQ conversions.
-5. Edit titles and order as needed.
-6. Use `File > Save As Image...` and choose HFE output and the intended disk
-   size.
-
-Copy the finished HFE file to the USB stick prepared for the Nalbantov
-emulator. If you are preparing replacement USB media, keep the setup and
-configuration files from the original Nalbantov USB stick and use Nalbantov's
-instructions or software; formatting a blank stick by itself is not enough.
-HFE exports for IBM/Yamaha disk formats are written with Nalbantov/HxC-style
-IBM PC header metadata for better emulator compatibility.
-
-### Convert MIDI Type 1 To Type 0
-
-1. Open a MIDI folder or drag MIDI files into the window.
-2. Check the `Type` column.
-3. Choose `Utilities > Convert > Convert All SMF1 to SMF0`.
-4. Optionally enable `Combine all instruments on MIDI channel 1 and use
-   Acoustic Grand Piano` for ordinary multitrack arrangements that should play
-   as one piano part.
-5. Review the staged changes.
-6. Use `Save` to overwrite originals, or `Save As` to write copies.
-
-The conversion is staged first. Original files are not modified until you save.
-Pedal channels are preserved by default.
-
-Use the standalone channel merge utility below when the channels should be
-combined without changing the source SMF type or track structure, including for
-files that are already Type 0.
-
-### Merge MIDI Instruments To Channel 0
-
-Choose `Utilities > Merge Instruments to Channel 0...`, then select one song or
-all listed MIDI songs. The utility routes every channel-voice event to zero-based
-channel 0 (shown as channel 1 by conventional 1-16 MIDI interfaces). It supports
-SMF Types 0, 1, and 2 without changing the file type, track structure, timing,
-metadata, or SysEx data.
-
-Because one MIDI channel can have only one active program, source program and
-bank changes are replaced with Acoustic Grand Piano. Channel-mode commands that
-could reset or silence all merged parts are removed; other controllers are
-preserved. Changes remain staged until you use `Save`, `Save As`, or save the
-current image/floppy session.
-
-### Apply Pedal Compatibility To MIDI Files
-
-Choose `Utilities > Apply Pedal Compatibility...` when you need an explicit
-compatibility transform on listed MIDI files. Choose one song in the `Apply To`
-list, or choose all listed MIDI songs to run a batch. The utility stages changes
-for save, so originals are not modified until you use `Save`, `Save As`, or save
-the current image/floppy session.
-
-Available transforms include remapping controller-only legacy Disklavier pedal
-data from channel 3 to channel 1, converting pedal controllers to on/off values,
-cleaning duplicate or stuck pedal events, adding Piano Roll Vector note-18 sustain
-markers, and softening binary CC64 sustain. All options start unchecked because
-compatibility transforms can alter half-pedal or archival detail.
-
-Pedal softening offers four motion choices:
-
-- **Quick:** 55 ms pedal down / 85 ms release.
-- **Natural:** 100 ms pedal down / 180 ms release.
-- **Slow:** 180 ms pedal down / 320 ms release.
-- **Custom:** independent pedal-down and release timing from 20 to 2000 ms.
-
-Only binary sustain streams are softened. Existing continuous streams in mixed
-files, static CC64 data, and files without useful sustain transitions are left
-unchanged. Each original binary transition remains the threshold event: pedal
-down writes value 64 at the original tick, while release writes value 63 at the
-original tick. Intermediate values form smooth S-curves around those events,
-which retains standard switch-pedal timing while adding gradual motion for
-continuous and half-pedal-capable playback systems. Pedal softening supports
-Standard MIDI File Types 0, 1, and 2, PPQN tempo maps, and SMPTE divisions.
-
-### Strip Yamaha XF Data
-
-Choose `Utilities > Strip XF Data...`, then select one song or all listed MIDI
-songs. The utility removes internal `FF 7F` sequencer-specific events and
-appended non-standard XF chunks, rebuilds each declared MIDI track with a valid
-end marker, and preserves the musical performance data. Changes remain staged
-until you use `Save`, `Save As`, or save the current image/floppy session.
-
-### Convert Between MIDI And E-SEQ
-
-- In MIDI mode, dropped E-SEQ files are staged as MIDI conversions.
-- In E-SEQ mode, dropped MIDI files are staged as E-SEQ conversions.
-- In E-SEQ image or floppy modes, dropped MIDI files are staged as E-SEQ and
-  converted through Type 0 first when necessary.
-- E-SEQ to MIDI exports include a short APS conversion text marker, but omit
-  the large APS archival round-trip header metadata by default so the Standard
-  MIDI files stay compatible with Yamaha hardware. The converter still reads
-  older APS metadata when present.
-- E-SEQ to MIDI exports preserve pedal channels and controller values by
-  default. Optional pedal compatibility transforms are a separate MIDI utility
-  under `Utilities > Apply Pedal Compatibility...`.
-- Enable `Name MIDI files by track number and song title` during E-SEQ to MIDI
-  conversion or Read Floppy to create names such as
-  `01 - Moon River.mid`. The choice is remembered for future conversions and
-  floppy reads. `Utilities > Name MIDI Files from Song Titles` can stage the
-  same naming independently for already-converted MIDI files. In floppy/image
-  mode, these descriptive names are queued inside the image too. The remembered
-  conversion choice and `Settings > Use 8.3 filenames` are inverse preferences:
-  enabling 8.3 naming defaults descriptive conversion names off, while choosing
-  track-number/title names turns 8.3 naming off. The 8.3 option is also
-  available in filename rename dialogs.
-- E-SEQ song filenames are always restricted to DOS 8.3 for Yamaha
-  compatibility, even when `Use 8.3 filenames` is off. The app shortens
-  converted, imported, renamed, and externally supplied E-SEQ names before
-  writing or exporting them; the setting only relaxes naming for MIDI and
-  other ordinary files.
-- `PIANODIR.FIL` is generated or refreshed on save when needed.
-- `File > Save Options > Create Album Subfolder` controls whether folder
-  exports use the current album title and catalog number for a subfolder.
-- The separate `Create Album Subfolder for Save As Image` option puts image
-  exports in the same kind of catalog/album subfolder. It is off by default.
-- Floppy writes always use the device you choose.
-
-### Inspect A Song
-
-Use `Utilities > File Inspection...`, or double-click a song's `Type` field.
-The inspection window shows a piano roll, metadata, tracks, channels, controller
-notes, selectable channels, position control, and playback preview. Channel
-selectors use the same colors as their piano-roll notes, forming a compact
-legend. For readability, repeated and edge spaces are collapsed in titles in
-the left-hand file list only; source title metadata is not changed. Tempo can
-be changed from 5%-400% while a preview is playing.
-The details panel classifies CC64 sustain-pedal data as binary, mixed,
-continuous, static, or not detected; binary streams are eligible for the Pedal
-Compatibility softening transform.
-Instrument choices are grouped by General MIDI family and can be found by
-typing part of a name; changes do not edit the source and take effect without
-returning to the beginning. Channel checkboxes likewise mute and restore
-realtime SoundFont or direct MIDI channels without restarting the song.
-When FluidSynth and a SoundFont are available, these controls are sent directly
-to the realtime synth instead of rebuilding or swapping the preview audio.
-Choose `Render Song...` to export the selected song or every loaded song using
-the current channel selection, channel levels, instruments, tempo, SoundFont,
-and preview volume. This does not change the source files.
-
-### Make A Copyable Song List
-
-Use `Utilities > Song List...` to create a clean copyable list of the current
-album and songs. Extra spaces in Disklavier-centered titles are collapsed for
-readable reference lists.
-
-Use `Utilities > Trim Title Spaces` to stage that same cleanup for the listed
-MIDI or E-SEQ titles before saving.
-
-### Create Tag Sidecar Files
-
-Enable `File > Save Options > Create Tag Sidecars When Saving` before saving
-local folder files. When enabled, APS MIDI Prep Tool writes one UTF-8
-`.tags.txt` file next to each saved MIDI or E-SEQ file. These sidecars use
-four-letter ID3 tag keys such as `TIT2` for title and `TALB` for album.
-
-Tag sidecar files are not written when saving in Image Mode or Floppy Mode.
-
-### View Logs And Shortcuts
-
-`View > Hide Status` is checked by default and hides the status text beneath the
-file list. `View > Hide Quick Panel` hides the Options, Utilities, and File
-Actions panel when you want more table space. `View > Hide Album Info` hides
-the Album Info panel, including Album Title, Catalog Number, and Create Album
-Subfolder. When visible, these fields stay available so Save As and
-album-folder options can use the current disk metadata.
-
-Use `View > View Logs...` to open a live console-output window for the current
-session. It is useful when checking Greaseweazle, mtools, format, or conversion
-output while the app is still running. The log now includes readable app events
-for major actions such as opening folders and images, reading floppies,
-saving, drag-and-drop imports, feedback, bug reports, warnings, and failures.
-
-Use `Help > Report a Bug...` to send a bug report. The dialog can include an
-optional sender email and a recent section of the live console log along with
-app and operating-system details. Unexpected operation-failure dialogs may also
-offer `Report This Bug...`, which opens the same report form with the error
-details already filled in.
-
-Use `Help > Send Feedback...` to send suggestions, workflow notes, or other
-general feedback through the same signed support channel.
-
-Use `Settings > Keyboard Shortcuts...` to review or customize the default
-hotkeys for all current File, Disk, View, Utilities, Settings, and Help menu
-commands.
-
-### SoundFonts And Audio Rendering
-
-Use `Utilities > File Inspection...` to inspect a file, preview it, choose the
-SoundFont used for FluidSynth previews, and open `Download SoundFonts...` when
-you want additional SoundFonts. Its `Render Song...` menu exports the selected
-song or all loaded songs with the current inspection settings. Use
-`Utilities > Render Audio...` to batch-render every currently listed MIDI or
-E-SEQ file through a selected SoundFont.
-
-SoundFont preview and WAV rendering require FluidSynth installed on the system
-or supplied through `APS_MIDI_PREP_FLUIDSYNTH`. MP3 rendering first creates a
-temporary WAV and then uses LAME for the final encoded file. Release packages
-bundle LAME when available; source runs can use LAME on `PATH` or a path supplied
-through `APS_MIDI_PREP_LAME`.
-
-The online SoundFont manager reads this JSON manifest by default:
-
-```text
-https://www.alexanderpeppe.com/aps-midi-prep-tool-data/soundfonts.json
-```
-
-The manifest uses `schema_version`, `updated`, and a `soundfonts` list. Entries
-can include `name`, `subtitle`, `category`, `format`, `recommended`,
-`default_for`, `download_url`, `homepage_url`, `license`, `license_url`,
-`approx_size`, `attribution`, and `notes`. Direct `.sf2` and `.sf3` downloads
-install directly; common `zip` and `tar.*` archives are unpacked automatically.
-Set `APS_MIDI_PREP_SOUNDFONT_CATALOG_URL` to test a different manifest.
-
-## Modes
-
-### MIDI Mode
-
-Use this for normal `.mid` or `.midi` folders. You can edit titles, rename files
-to DOS 8.3, convert SMF1 to SMF0, and save in place or to a new folder.
-
-### E-SEQ Mode
-
-Use this for local Yamaha `.FIL` files and local `PIANODIR.FIL` workflows. The
-tool manages the special PIANODIR row separately and can preserve or refresh
-album metadata.
-
-### Image Mode
-
-Use this for floppy images. You can stage adds, removals, renames, title edits,
-MIDI/E-SEQ conversions, and image exports without modifying the original image
-until you save.
-
-### Floppy Mode
-
-Use this after reading or formatting a physical floppy. Save operations can write
-back to the same device when explicitly allowed, or you can export to a folder or
-image first.
+Preserve, convert, and organize music for Yamaha Disklavier and other
+player-piano systems.
+
+APS MIDI Prep Tool is a desktop app for reading old PianoSoft and E-SEQ
+floppies, recovering songs, correcting titles, converting between Yamaha E-SEQ
+and Standard MIDI, and preparing virtual disks for floppy emulators such as
+Nalbantov. It brings these jobs together in one visual workflow so you can
+review changes before exporting the result.
+
+Current version: `0.8.1`
+
+[Download the latest packaged release](https://github.com/Alexs-Piano-Service/aps-midi-prep-tool/releases/latest)
+· [Read the guides](#guides-and-support) · [See what changed](CHANGELOG.md)
+
+## What it helps you do
+
+- **Preserve old piano disks.** Read physical floppies or disk images, attempt
+  to recover songs from damaged media, and make IMG or SCP archives of physical
+  disks before making changes.
+- **Move music between systems.** Convert Yamaha E-SEQ to standard MIDI, MIDI
+  back to E-SEQ, and MIDI Type 1 (SMF1) to the Type 0 (SMF0) format expected by
+  many player pianos.
+- **Prepare floppy-emulator libraries.** Turn a folder of songs into numbered
+  IMG or HFE disks, with compatible filenames, song order, and Yamaha directory
+  data created for each disk.
+- **Clean up a music collection.** Correct song titles and filenames, remove
+  Yamaha XF data, improve pedal compatibility, merge instruments for piano
+  playback, or process a whole folder at once.
+- **Check the result before saving.** Review metadata and piano-roll previews,
+  audition songs with a SoundFont or USB MIDI device, and render WAV or MP3
+  reference audio.
+
+## How it works
+
+1. Open a MIDI or E-SEQ folder, open a floppy image, or read a physical disk.
+2. Review the songs and make any title, order, conversion, or compatibility
+   changes you need.
+3. Export the result to a folder, ZIP archive, new disk image, or physical
+   floppy.
+
+Edits and conversions made in the main file list are staged until you save.
+Formatting and disk-writing commands run only after a separate confirmation,
+and you can keep original images and floppies write-protected while exporting
+clean copies.
+
+## Popular workflows
+
+| If you want to... | Start here |
+| --- | --- |
+| Back up a Yamaha floppy | Choose `Disk > Image Floppy...` for a direct IMG or SCP archive. To inspect the songs first, use `Disk > Read Floppy...`, then save the prepared working image or extract its files. If your operating system offers to format the disk, cancel. |
+| Extract a collection of disk images | Choose `Utilities > Bulk Extraction...` to create a separate output folder for every supported image, with optional E-SEQ-to-MIDI conversion. |
+| Build disks for a floppy emulator | Choose `Utilities > Build Emulator Disk Set...`, select a folder of songs, then create as many numbered HFE or IMG disks as needed. |
+| Prepare MIDI for older hardware | Open the files, use the conversion and compatibility tools under `Utilities`, review the staged results, then save copies. |
+
+The emulator-disk builder creates the disk image files themselves. Keep the
+setup files from an existing Nalbantov USB stick and follow the emulator
+manufacturer's instructions when preparing replacement USB media.
+
+## Supported media and formats
+
+| Source | What APS MIDI Prep Tool can do |
+| --- | --- |
+| Standard MIDI (`.mid`, `.midi`) | Edit, inspect, preview, batch-process, render, and convert to SMF0 or Yamaha E-SEQ. |
+| Yamaha E-SEQ (`.FIL`/`.MDA` songs with `PIANODIR.FIL`/`MUSIC.DIR` catalogs) | Preserve album and song information, edit titles and order, convert to MIDI, and build compatible disks. |
+| Physical 3.5-inch floppies | Read, image, format, recover, and write through a compatible floppy drive or Greaseweazle. |
+| Floppy images | Open and create common IMG/BIN-style raw images and HFE images; create SCP flux captures from physical media. |
+| Other legacy music formats | Extract or convert supported PianoDisc System 3, Akai MPC, Yamaha V50/SY77, Yamaha PSR-600, and Electone MDR data. |
+| Exports | Save songs to a folder or ZIP, create IMG/HFE disk images, and render MIDI or E-SEQ to WAV or MP3. |
+
+The main editing workflow is designed for Standard MIDI, Yamaha E-SEQ, and
+Yamaha-compatible floppy media. Some additional legacy formats are import-only
+or read-only conversion sources. Disklavier E-SEQ media uses DOS 8.3 filenames,
+titles of up to 32 characters, and no more than 60 cataloged songs per disk.
+
+## Designed for careful preservation
+
+- Save an image of an irreplaceable floppy before editing or converting its
+  contents. Recovery mode can retry difficult media, while Greaseweazle can
+  show weak or unreadable disk areas and create a low-level SCP archive.
+- Use `File > Write Protection > Write-Protect Original` to prevent an open
+  image or floppy from being overwritten. `Save As`, `Save As Image`, and ZIP
+  export remain available for copy-based work.
+- Optional backups can be enabled under `File > Save Options`. Always test a
+  newly written disk or image before relying on it.
 
 ## Requirements
 
-For normal source runs:
+Packaged releases are available for Windows and Linux. Source runs require
+Python 3.10 or newer and PySide6. Depending on the workflow, you may also need:
 
-- Python 3.10+
-- PySide6
-- `mtools` for image authoring and FAT image operations
-- Greaseweazle CLI (`gw`) for Greaseweazle reads, writes, and conversions
-- FluidSynth for SoundFont-based File Inspection previews and WAV rendering
-- A redistributable GM/piano SoundFont for SoundFont previews and audio rendering
-- LAME for MP3 audio rendering
-- Device permissions for direct floppy drive reads and writes
+- `mtools` for FAT floppy-image operations and the Greaseweazle CLI (`gw`) for
+  Greaseweazle hardware, HFE conversion, and flux-image workflows.
+- FluidSynth plus a compatible SoundFont for SoundFont-based previews and audio
+  rendering, LAME for MP3 encoding, and `python-rtmidi` for direct MIDI-device
+  playback. Basic piano preview does not require FluidSynth.
+- Operating-system permission to access a physical floppy drive.
 
-Release AppImages bundle the needed `mtools` commands, Greaseweazle CLI, 7-Zip,
-and LAME when available, but do not bundle FluidSynth by default. Windows
-release builds bundle LAME for MP3 export. Physical floppy access still depends
-on operating-system device permissions.
+Availability of these optional tools varies by release package. FluidSynth and
+a SoundFont are not bundled by default.
 
-## Run Locally
+The interface is available in English, Spanish, French, German, Italian,
+Brazilian Portuguese, Bulgarian, Dutch, Polish, Japanese, Korean, and
+Simplified Chinese.
+
+## Run from source
+
+On Linux:
 
 ```bash
 python3 -m venv .venv
@@ -536,94 +115,31 @@ pip install PySide6
 python3 aps_midi_prep_tool.py
 ```
 
-## Build the Linux AppImage
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and test guidance.
 
-Run the default `Build AppImage` build task in VS Code, or run the equivalent
-command from a terminal:
+## Guides and support
 
-```bash
-make appimage
-```
+- [Extract MIDI files from a Yamaha floppy disk](https://www.alexanderpeppe.com/extracting-midi-files-from-a-yamaha-floppy-disk-with-aps-midi-prep-tool/)
+- [Change MIDI titles on your computer](https://www.alexanderpeppe.com/change-midi-titles-aps-midi-prep-tool/)
+- [Copy a Yamaha PianoSoft floppy to a Nalbantov USB stick](https://www.alexanderpeppe.com/copying-a-yamaha-pianosoft-floppy-disk-to-a-nalbantov-usb-stick/)
+- [Convert MIDI files from Type 1 to Type 0](https://www.alexanderpeppe.com/converting-midi-files-type-1-to-type-0-aps-midi-prep-tool/)
+- [Edit titles and songs in Nalbantov virtual disks](https://www.alexanderpeppe.com/adding-removing-or-changing-titles-in-nalbantov-usb-stick-virtual-disks/)
 
-The build writes the versioned AppImage and a matching `.sha256` checksum to
-`release/`. It bundles the APS icon for Qt to use in the window title bar and
-installs the same artwork as the AppImage desktop, launcher, and directory
-icon.
+Use `Help > Send Feedback...` or `Help > Report a Bug...` inside the app for
+support. See [CHANGELOG.md](CHANGELOG.md) for release history and
+[SECURITY.md](SECURITY.md) for responsible reporting guidance.
 
-## Prepare a Release
+## License and responsible use
 
-Keep the version in `aps_midi_prep_tool_app/app_info.py`, the current version
-near the top of this README, and the newest dated section in `CHANGELOG.md`
-in sync. Then run the local release gate:
-
-```bash
-make release-check
-```
-
-This checks Python syntax, the full test suite, release-version consistency,
-translation coverage and placeholders, patch whitespace, and the AppImage build
-script's shell syntax. Build the distributable afterward with `make appimage`.
-
-## Update Checks
-
-`Help -> Check for Updates...` reads this public JSON URL:
-
-```text
-https://www.alexanderpeppe.com/aps-midi-prep-tool-data/update.json
-```
-
-Startup update checks are enabled by default and can be disabled from the Help
-menu or from the startup update notice.
-
-The update manifest supplies version and destination URLs only. Alert wording is
-bundled with the application and follows the language selected in Settings.
-
-## USB MIDI Playback
-
-The File Inspection player can send playback directly to a connected USB MIDI
-adapter. Choose the adapter under **Playback output**, then use the normal Play,
-Stop, channel, and seek controls. **Refresh** rescans MIDI ports connected after
-the player was opened. Choosing **Audio preview** keeps the SoundFont-based local
-playback path.
-
-## Project Files
-
-- `LICENSE`: Apache License 2.0.
-- `NOTICE`: copyright and attribution notice.
-- `CHANGELOG.md`: release history and upcoming changes.
-- `SECURITY.md`: how to report bugs, suspicious behavior, and false positives.
-- `CONTRIBUTING.md`: contribution and test-copy guidance.
-- `aps_midi_prep_tool_app/eseq_reference.md`: E-SEQ and PIANODIR engineering notes.
-
-## Related Guides
-
-- [Extracting MIDI Files from a Yamaha Floppy Disk with APS MIDI Prep Tool](https://www.alexanderpeppe.com/extracting-midi-files-from-a-yamaha-floppy-disk-with-aps-midi-prep-tool/)
-- [How to Change MIDI Titles on Your Computer Using APS MIDI Prep Tool](https://www.alexanderpeppe.com/change-midi-titles-aps-midi-prep-tool/)
-- [Copying a Yamaha PianoSoft Floppy Disk to a Nalbantov USB Stick](https://www.alexanderpeppe.com/copying-a-yamaha-pianosoft-floppy-disk-to-a-nalbantov-usb-stick/)
-- [Converting MIDI Files From Type 1 to Type 0 Using APS MIDI Prep Tool](https://www.alexanderpeppe.com/converting-midi-files-type-1-to-type-0-aps-midi-prep-tool/)
-- [Adding, Removing, or Changing Titles in Nalbantov USB Stick Virtual Disks](https://www.alexanderpeppe.com/adding-removing-or-changing-titles-in-nalbantov-usb-stick-virtual-disks/)
-
-## Disclaimer
-
-APS MIDI Prep Tool is an independent utility for lawful preservation, repair,
-and compatibility work. Use copies whenever possible, keep backups, and test
-outputs before relying on them. You are responsible for any data loss, disk
-damage, instrument behavior, or other results from using the software.
+Copyright © 2026 Alex's Piano Service LLC. APS MIDI Prep Tool is released under
+the [Apache License 2.0](LICENSE).
 
 Use the tool only with disks and files you own or are authorized to preserve,
-convert, or modify. Do not use it to distribute copyrighted music, commercial
-player-piano libraries, proprietary software, or other material you do not have
-the right to share.
+convert, or modify. Keep backups and test outputs before relying on them. The
+project is an independent compatibility utility and is not affiliated with or
+endorsed by Yamaha, Disklavier, PianoSoft, PianoDisc, Nalbantov, Greaseweazle,
+Akai, or other companies and products named for compatibility purposes.
 
-This project is not affiliated with, sponsored by, or endorsed by Yamaha,
-Disklavier, PianoSoft, Electone, Clavinova, PianoDisc, Nalbantov,
-Greaseweazle, Akai, MPC, or other companies and products mentioned.
-Third-party names are used only to identify compatible formats, media,
-instruments, and workflows. Trademarks and product names belong to their
-respective owners.
-
-Related Alex's Piano Service LLC policies:
-
-- [Disclaimer](https://www.alexanderpeppe.com/disclaimer/)
-- [Privacy Policy](https://www.alexanderpeppe.com/privacy-policy/)
-- [DMCA Policy](https://www.alexanderpeppe.com/dmca-policy/)
+[Disclaimer](https://www.alexanderpeppe.com/disclaimer/) ·
+[Privacy Policy](https://www.alexanderpeppe.com/privacy-policy/) ·
+[DMCA Policy](https://www.alexanderpeppe.com/dmca-policy/)

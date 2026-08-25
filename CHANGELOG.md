@@ -5,7 +5,7 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
-## [Unreleased]
+## [0.8.1] - 2026-08-23
 
 ### Added
 
@@ -38,6 +38,9 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- `Recover Damaged Image...` now appears under `File > Open`, alongside the
+  other commands that open existing files, instead of under the physical-disk
+  commands in `Disk`.
 - Build Emulator Disk Set now presents its remembered subfolder scan as
   `Explore source folders recursively` and explains that clearing it limits
   discovery to songs directly in the selected source folder.
@@ -53,6 +56,12 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Every literal UI string routed through the translation layer now has catalog
+  coverage in all 12 supported languages, including File Inspection/audio
+  rendering, pedal and XF workflows, mode actions, image recovery guidance,
+  and the emulator-set onboarding title. Bulgarian now uses explicit
+  translations instead of silently backfilling missing entries from English,
+  and release checks scan translation call sites for future omissions.
 - Normal image opening now recognizes protected FAT12 disks whose signed boot
   sector or unsigned geometry-only BPB stub is stored over the second FAT. The
   editable working copy restores or synthesizes a signed boot sector and mirrors
