@@ -5,6 +5,24 @@ All notable changes to APS MIDI Prep Tool will be recorded here.
 This project follows a practical changelog format inspired by Keep a Changelog,
 with release sections grouped by version and date.
 
+## [Unreleased]
+
+### Added
+
+- Physical USB-floppy recovery now records sector-level read coverage, fallback
+  results, unreadable and unresolved ranges, timing, trusted geometry evidence,
+  FAT/root-directory checks, recognizable raw signatures, and an image SHA-256.
+  Bug reports can include these diagnostics independently of console logs and
+  offer optional disk, drive-compatibility, media-marking, and instrument context.
+
+### Changed
+
+- Direct USB-floppy recovery now uses smaller bulk reads with one sector-level
+  fallback pass, a five-minute soft deadline, progress and poor-media cutoffs,
+  and automatic clamping when a reliable smaller FAT12 geometry is detected.
+  Failure messages distinguish low read coverage, geometry mismatch, genuinely
+  blank media, and fully readable but unsupported data.
+
 ## [0.8.1] - 2026-08-23
 
 ### Added

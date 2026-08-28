@@ -399,6 +399,22 @@ class DiskSessionRecoveryWorker(_CancellableDiskWorker):
         self.source = source
         self.final_total = int(final_total or 100)
         self.final_message = final_message or ""
+        self.recovery_diagnostics = {}
+
+    @staticmethod
+    def _diagnostics_payload(value):
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return dict(value)
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            try:
+                payload = to_dict()
+            except Exception:
+                return {}
+            return dict(payload) if isinstance(payload, dict) else {}
+        return {}
 
     def run(self):
         session = None
@@ -408,6 +424,9 @@ class DiskSessionRecoveryWorker(_CancellableDiskWorker):
                 self.source,
                 progress_callback=self._emit_progress,
                 cancel_callback=self._cancel_requested,
+            )
+            self.recovery_diagnostics = self._diagnostics_payload(
+                getattr(session, "recovery_diagnostics", None)
             )
             if self.final_message:
                 self._emit_progress(self.final_total, self.final_total, self.final_message)
@@ -419,10 +438,20 @@ class DiskSessionRecoveryWorker(_CancellableDiskWorker):
         except FloppyOperationCancelled as exc:
             if session is not None:
                 session.cleanup()
+            cancellation_diagnostics = self._diagnostics_payload(
+                getattr(exc, "diagnostics", None)
+            )
+            if cancellation_diagnostics:
+                self.recovery_diagnostics = cancellation_diagnostics
             self._emit_cancelled(exc)
         except Exception as exc:
             if session is not None:
                 session.cleanup()
+            failure_diagnostics = self._diagnostics_payload(
+                getattr(exc, "diagnostics", None)
+            )
+            if failure_diagnostics:
+                self.recovery_diagnostics = failure_diagnostics
             if self._should_treat_as_cancelled(exc):
                 self._emit_cancelled(exc)
                 return

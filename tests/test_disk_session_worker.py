@@ -32,3 +32,105 @@ def test_emulator_build_worker_forwards_include_subfolders_false(monkeypatch):
 
     assert calls[0][1]["include_subfolders"] is False
     assert finished == [result]
+
+
+class _RecoveredSession:
+    def __init__(self, diagnostics, listing):
+        self.recovery_diagnostics = diagnostics
+        self._listing = listing
+
+    def list_entries(self):
+        return self._listing
+
+
+def test_recovery_worker_retains_successful_session_diagnostics(monkeypatch):
+    listing = object()
+    session = _RecoveredSession(
+        {"readable_sectors": 1439},
+        listing,
+    )
+    monkeypatch.setattr(
+        disk_session_worker.FloppyImageSession,
+        "recover",
+        lambda *_args, **_kwargs: session,
+    )
+    worker = disk_session_worker.DiskSessionRecoveryWorker(
+        "floppy_usb",
+        object(),
+    )
+    recovered = []
+    worker.sessionRecovered.connect(
+        lambda value, value_listing: recovered.append((value, value_listing))
+    )
+
+    worker.run()
+
+    assert recovered == [(session, listing)]
+    assert worker.recovery_diagnostics == {"readable_sectors": 1439}
+
+
+def test_recovery_worker_retains_exception_diagnostics(monkeypatch):
+    class RecoveryFailure(Exception):
+        def __init__(self):
+            super().__init__("Recovery stopped after the time limit.")
+            self.diagnostics = {
+                "attempted_sectors": 24,
+                "unattempted_sectors": 1416,
+                "stop_reason": "soft_deadline",
+            }
+
+    def fail_recovery(*_args, **_kwargs):
+        raise RecoveryFailure()
+
+    monkeypatch.setattr(
+        disk_session_worker.FloppyImageSession,
+        "recover",
+        fail_recovery,
+    )
+    worker = disk_session_worker.DiskSessionRecoveryWorker(
+        "floppy_usb",
+        object(),
+    )
+    failures = []
+    worker.recoveryFailed.connect(failures.append)
+
+    worker.run()
+
+    assert failures == ["Recovery stopped after the time limit."]
+    assert worker.recovery_diagnostics == {
+        "attempted_sectors": 24,
+        "unattempted_sectors": 1416,
+        "stop_reason": "soft_deadline",
+    }
+
+
+def test_recovery_worker_retains_cancellation_diagnostics(monkeypatch):
+    def cancel_recovery(*_args, **_kwargs):
+        error = disk_session_worker.FloppyOperationCancelled("Operation cancelled.")
+        error.diagnostics = {
+            "attempted_sectors": 32,
+            "unresolved_sectors": 4,
+            "stop_reason": "cancelled",
+        }
+        raise error
+
+    monkeypatch.setattr(
+        disk_session_worker.FloppyImageSession,
+        "recover",
+        cancel_recovery,
+    )
+    worker = disk_session_worker.DiskSessionRecoveryWorker(
+        "floppy_usb",
+        object(),
+    )
+    cancellations = []
+    worker.operationCancelled.connect(cancellations.append)
+
+    worker.run()
+
+    assert cancellations == ["Operation cancelled."]
+    assert worker.recovery_diagnostics == {
+        "attempted_sectors": 32,
+        "unresolved_sectors": 4,
+        "stop_reason": "cancelled",
+    }

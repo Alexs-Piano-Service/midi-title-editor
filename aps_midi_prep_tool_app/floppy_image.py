@@ -1,5 +1,6 @@
 import datetime
 import errno
+import hashlib
 import json
 import math
 import ntpath
@@ -107,6 +108,18 @@ class FastFloppyReadError(FloppyImageError):
     def __init__(self, message, *, fallback_allowed=False):
         super().__init__(message)
         self.fallback_allowed = bool(fallback_allowed)
+
+
+class FloppyRecoveryError(FloppyImageError):
+    """Raised when recovery fails with structured disk-level diagnostics."""
+
+    def __init__(self, message, *, diagnostics=None):
+        super().__init__(message)
+        self.diagnostics = dict(diagnostics or {})
+
+
+class _RecoveryReadDeadlineExceeded(FloppyImageError):
+    """Raised when a bounded physical-floppy read reaches its deadline."""
 
 
 def _raise_if_cancelled(cancel_callback=None):
@@ -497,6 +510,21 @@ _YAMAHA_TOTAL_SIZE = _YAMAHA_TOTAL_SECTORS * _YAMAHA_BYTES_PER_SECTOR
 _YAMAHA_ROOT_DIR_SECTORS = 7
 _YAMAHA_BOOT_SIGNATURE = b"\x55\xAA"
 _YAMAHA_FAT_SIGNATURE = b"\xF9\xFF\xFF"
+
+# POSIX recovery reads use synchronous pread calls. Windows recovery reads use
+# overlapped I/O that can be cancelled at the deadline, although opening a
+# device, submitting a read, or a driver that never completes cancellation can
+# still overrun it. Keep the public limit described as a soft deadline.
+USB_FLOPPY_RECOVERY_SECTOR_SIZE = _YAMAHA_BYTES_PER_SECTOR
+USB_FLOPPY_RECOVERY_CHUNK_SIZE = 8 * 1024
+USB_FLOPPY_RECOVERY_SOFT_DEADLINE_SECONDS = 5 * 60
+USB_FLOPPY_RECOVERY_ALL_BAD_SAMPLE_SECTORS = 128
+USB_FLOPPY_RECOVERY_MOSTLY_BAD_SAMPLE_SECTORS = 256
+USB_FLOPPY_RECOVERY_MOSTLY_BAD_RATIO = 0.90
+USB_FLOPPY_RECOVERY_CONSECUTIVE_BAD_SECTORS = 128
+USB_FLOPPY_RECOVERY_BAD_MEDIA_MINIMUM_COVERAGE = 0.10
+BLANK_FLOPPY_FILL_VALUES = frozenset({0x00, 0xE5, 0xF6, 0xFF})
+
 _PROTECTED_FAT12_LAYOUTS = (
     {
         "label": "IBM 720K DD",
@@ -554,6 +582,293 @@ def display_bytes(size):
     if size >= 1024:
         return f"{size / 1024:.0f} KB"
     return f"{size} B"
+
+
+def _diagnostic_bool(value):
+    if value is None:
+        return "unknown"
+    return "yes" if bool(value) else "no"
+
+
+def _diagnostic_count(value):
+    if value is None:
+        return "unknown"
+    try:
+        return str(max(0, int(value)))
+    except (TypeError, ValueError):
+        return "unknown"
+
+
+def _diagnostic_percent(numerator, denominator):
+    try:
+        numerator = max(0, int(numerator or 0))
+        denominator = max(0, int(denominator or 0))
+    except (TypeError, ValueError):
+        return "unknown"
+    if denominator <= 0:
+        return "unknown"
+    return f"{(numerator / denominator) * 100:.1f}%"
+
+
+def _format_diagnostic_sector_ranges(ranges, *, limit=12):
+    labels = []
+    for start, end in list(ranges or ())[:limit]:
+        start = int(start)
+        end = int(end)
+        labels.append(str(start) if start == end else f"{start}-{end}")
+    if len(ranges or ()) > limit:
+        labels.append(f"+{len(ranges) - limit} more ranges")
+    return ", ".join(labels) or "none"
+
+
+def format_floppy_recovery_diagnostics(diagnostics):
+    """Return a compact human-readable report for a JSON-safe diagnostic dict."""
+
+    details = dict(diagnostics or {})
+    selected_label = str(details.get("selected_format_label") or "Unknown")
+    detected_label = str(details.get("detected_format_label") or "Unknown")
+    drive_path = str(details.get("drive_path") or "Unknown")
+    drive_model = str(details.get("drive_model") or "").strip()
+    drive_transport = str(details.get("drive_transport") or "").strip().upper()
+    drive_bits = [drive_path]
+    if drive_transport:
+        drive_bits.append(drive_transport)
+    if drive_model:
+        drive_bits.append(drive_model)
+
+    expected = int(details.get("expected_sectors") or 0)
+    attempted = int(details.get("attempted_sectors") or 0)
+    readable = int(details.get("readable_sectors") or 0)
+    unresolved = int(details.get("unresolved_sectors") or 0)
+    duration = float(details.get("duration_seconds") or 0.0)
+    deadline = float(details.get("soft_deadline_seconds") or 0.0)
+    stop_reason = str(details.get("stop_reason") or "completed")
+    lines = [
+        "Floppy diagnostics",
+        "------------------",
+        f"Drive: {' | '.join(drive_bits)}",
+        f"Drive-reported size: {display_bytes(int(details.get('drive_reported_bytes') or 0))}",
+        f"Selected format: {selected_label} ({display_bytes(int(details.get('selected_bytes') or 0))})",
+        f"Detected format: {detected_label}",
+        f"Detection basis: {details.get('detection_basis') or 'none'}",
+        f"Boot-sector geometry claim: {details.get('boot_claimed_format_label') or 'none'}",
+        f"Geometry mismatch: {_diagnostic_bool(details.get('geometry_mismatch'))}",
+        "Raw read:",
+        f"  Expected sectors: {expected}",
+        f"  Attempted sectors: {attempted}",
+        f"  Good in chunk reads: {int(details.get('good_sectors') or 0)}",
+        f"  Recovered after sector fallback: {int(details.get('recovered_after_fallback_sectors') or 0)}",
+        f"  Readable sectors: {readable} ({_diagnostic_percent(readable, expected)})",
+        f"  Bad sectors: {int(details.get('bad_sectors') or 0)}",
+        f"  Attempted but unresolved sectors: {unresolved}",
+        f"  Unattempted sectors: {int(details.get('unattempted_sectors') or 0)}",
+        "  Bad sector ranges (zero-based): "
+        f"{_format_diagnostic_sector_ranges(details.get('bad_sector_ranges'))}",
+        "  Fallback-recovered ranges (zero-based): "
+        f"{_format_diagnostic_sector_ranges(details.get('fallback_recovered_sector_ranges'))}",
+        "  Attempted-but-unresolved ranges (zero-based): "
+        f"{_format_diagnostic_sector_ranges(details.get('unresolved_sector_ranges'))}",
+        "  Unattempted ranges (zero-based): "
+        f"{_format_diagnostic_sector_ranges(details.get('unattempted_sector_ranges'))}",
+        f"  Bytes recovered: {int(details.get('bytes_recovered') or 0):,}",
+        f"  Partial-sector bytes retained: {int(details.get('partial_bytes_recovered') or 0):,} "
+        f"across {int(details.get('partially_readable_sectors') or 0)} sector(s)",
+        f"  Missing-sector fill: {details.get('fill_value') or '0x00'}",
+        f"  Read calls: {int(details.get('read_calls') or 0)} "
+        f"({int(details.get('fallback_read_calls') or 0)} sector fallback)",
+        f"  Read passes used: {int(details.get('read_passes') or 0)}",
+        "  Retry policy: one bulk attempt plus at most one per-sector fallback attempt",
+        f"  Duration: {duration:.1f} seconds",
+        f"  Stop reason: {stop_reason}",
+        f"  Poor-media cutoff begins after: "
+        f"{float(details.get('bad_media_minimum_coverage') or 0.0) * 100:.0f}% resolved coverage",
+    ]
+    if deadline > 0:
+        if details.get("read_deadline_mode") == "windows_overlapped_cancel":
+            lines.append(
+                f"  Read deadline: {deadline:.0f} seconds "
+                "(cancellation is requested for a pending Windows read at the deadline)"
+            )
+        else:
+            lines.append(
+                f"  Soft deadline: {deadline:.0f} seconds "
+                "(checked between synchronous device reads)"
+            )
+    if details.get("windows_cancel_drain_incomplete"):
+        lines.append(
+            "  Windows cancellation warning: the driver did not confirm completion within the drain grace period"
+        )
+
+    read_errors = details.get("read_errors")
+    if isinstance(read_errors, dict) and read_errors:
+        lines.append("  Read errors:")
+        for message, count in list(read_errors.items())[:8]:
+            lines.append(f"    {int(count or 0)}x {message}")
+        if len(read_errors) > 8:
+            lines.append(f"    +{len(read_errors) - 8} more distinct error(s)")
+
+    lines.extend(
+        [
+            "Filesystem:",
+            f"  Boot sector readable: {_diagnostic_bool(details.get('boot_sector_readable'))}",
+            f"  0x55AA signature: {_diagnostic_bool(details.get('boot_signature_present'))}",
+            f"  Valid FAT copies: {int(details.get('fat_copies_valid') or 0)}/"
+            f"{int(details.get('fat_copies_expected') or 0)}",
+            f"  FAT area fully readable: {_diagnostic_bool(details.get('fat_area_readable'))}",
+            f"  FAT copies consistent: {_diagnostic_bool(details.get('fat_copies_consistent'))}",
+            f"  FAT allocated data clusters: "
+            f"{_diagnostic_count(details.get('fat_allocated_data_clusters'))}",
+            f"  FAT allocation empty: {_diagnostic_bool(details.get('fat_allocation_empty'))}",
+            f"  Root directory fully readable: {_diagnostic_bool(details.get('root_directory_readable'))}",
+            f"  Root directory structurally valid: "
+            f"{_diagnostic_bool(details.get('root_directory_structurally_valid'))}",
+            f"  Root directory plausible: {_diagnostic_bool(details.get('root_directory_plausible'))}",
+            f"  Active root entries: {_diagnostic_count(details.get('root_directory_entries'))}",
+            f"  PIANODIR.FIL directory entry: {_diagnostic_bool(details.get('pianodir_directory_entry_found'))}",
+            "Raw scan:",
+            f"  MIDI MThd signatures: {int(details.get('midi_header_signatures') or 0)}",
+            f"  E-SEQ signatures: {int(details.get('eseq_signatures') or 0)}",
+            f"  PIANODIR signatures: {int(details.get('pianodir_signatures') or 0)}",
+            f"  Recognizable signatures: {int(details.get('recognizable_signatures') or 0)}",
+            f"  Non-zero sectors: {int(details.get('nonzero_sectors') or 0)}",
+            f"  Fill-only data: {_diagnostic_bool(details.get('blank_fill_only'))}",
+            f"  Uniform fill byte: {details.get('blank_fill_value') or 'not detected'}",
+            f"  Recovered files: {int(details.get('recovered_files') or 0)}",
+            "Captured image:",
+            f"  Bytes: {int(details.get('image_bytes') or 0):,}",
+            f"  SHA256: {details.get('sha256') or 'not calculated'}",
+        ]
+    )
+
+    geometry_scans = list(details.get("geometry_scans") or ())
+    if geometry_scans:
+        lines.append("Geometry scans:")
+        for scan in geometry_scans:
+            scan = dict(scan or {})
+            label = str(scan.get("format_label") or scan.get("format_key") or "Unknown")
+            scan_parts = [label]
+            if scan.get("selected_hint"):
+                scan_parts.append("selected")
+            if scan.get("boot_hint"):
+                scan_parts.append("boot-detected")
+            if scan.get("attempted"):
+                scan_parts.append("file recovery attempted")
+            valid_fats = int(scan.get("fat_copies_valid") or 0)
+            expected_fats = int(scan.get("fat_copies_expected") or 0)
+            scan_parts.append(f"FAT {valid_fats}/{expected_fats}")
+            if (
+                scan.get("root_directory_structurally_valid")
+                and scan.get("root_directory_entries") == 0
+            ):
+                scan_parts.append("root valid and empty")
+            elif scan.get("root_directory_plausible"):
+                scan_parts.append("root plausible")
+            elif not scan.get("root_directory_readable"):
+                scan_parts.append("root unreadable")
+            else:
+                scan_parts.append("root not recognized")
+            recovered = int(scan.get("recovered_files") or 0)
+            if recovered:
+                scan_parts.append(f"{recovered} recovered file(s)")
+            error = str(scan.get("error") or "").strip()
+            if error:
+                scan_parts.append(f"error: {error}")
+            lines.append("  " + "; ".join(scan_parts))
+
+    return "\n".join(lines)
+
+
+def _new_usb_floppy_recovery_diagnostics(
+    drive_info,
+    disk_format,
+    expected_bytes,
+    *,
+    sector_size,
+    soft_deadline_seconds,
+):
+    expected_bytes = max(0, int(expected_bytes or 0))
+    sector_size = max(1, int(sector_size or USB_FLOPPY_RECOVERY_SECTOR_SIZE))
+    selected_format = disk_format if isinstance(disk_format, DiskFormat) else DISK_FORMAT_BY_SIZE.get(expected_bytes)
+    details = {
+        "schema_version": 1,
+        "source_kind": "floppy_usb",
+        "drive_path": str(getattr(drive_info, "path", "") or ""),
+        "drive_model": str(getattr(drive_info, "model", "") or ""),
+        "drive_transport": str(getattr(drive_info, "transport", "") or ""),
+        "drive_reported_bytes": int(getattr(drive_info, "size_bytes", 0) or 0),
+        "selected_format_key": str(getattr(selected_format, "key", "") or ""),
+        "selected_format_label": str(getattr(selected_format, "label", "") or "Unknown"),
+        "selected_bytes": expected_bytes,
+        "detected_format_key": "",
+        "detected_format_label": "",
+        "detected_bytes": 0,
+        "detection_basis": "",
+        "geometry_mismatch": None,
+        "boot_claimed_format_key": "",
+        "boot_claimed_format_label": "",
+        "boot_claimed_bytes": 0,
+        "sector_size": sector_size,
+        "expected_sectors": int(math.ceil(expected_bytes / sector_size)) if expected_bytes else 0,
+        "attempted_sectors": 0,
+        "good_sectors": 0,
+        "recovered_after_fallback_sectors": 0,
+        "readable_sectors": 0,
+        "bad_sectors": 0,
+        "unresolved_sectors": 0,
+        "unattempted_sectors": int(math.ceil(expected_bytes / sector_size)) if expected_bytes else 0,
+        "bad_sector_ranges": [],
+        "fallback_recovered_sector_ranges": [],
+        "unresolved_sector_ranges": [],
+        "unattempted_sector_ranges": [],
+        "sector_ranges_truncated": {},
+        "bytes_recovered": 0,
+        "partial_bytes_recovered": 0,
+        "partially_readable_sectors": 0,
+        "fill_value": "0x00",
+        "read_calls": 0,
+        "fallback_read_calls": 0,
+        "read_passes": 0,
+        "duration_seconds": 0.0,
+        "soft_deadline_seconds": float(soft_deadline_seconds or 0.0),
+        "read_deadline_mode": "",
+        "windows_cancel_drain_incomplete": False,
+        "bad_media_minimum_coverage": float(
+            USB_FLOPPY_RECOVERY_BAD_MEDIA_MINIMUM_COVERAGE
+        ),
+        "stopped_early": False,
+        "stop_reason": "",
+        "read_errors": {},
+        "boot_sector_readable": None,
+        "boot_signature_present": None,
+        "fat_copies_expected": 0,
+        "fat_copies_valid": 0,
+        "fat_area_readable": None,
+        "fat_copies_consistent": None,
+        "fat_allocated_data_clusters": None,
+        "fat_allocation_empty": None,
+        "root_directory_readable": None,
+        "root_directory_structurally_valid": None,
+        "root_directory_plausible": None,
+        "root_directory_entries": None,
+        "pianodir_directory_entry_found": None,
+        "midi_header_signatures": 0,
+        "eseq_signatures": 0,
+        "pianodir_signatures": 0,
+        "recognizable_signatures": 0,
+        "nonzero_sectors": 0,
+        "blank_fill_only": None,
+        "blank_fill_value": "",
+        "image_bytes": 0,
+        "sha256": "",
+        "geometry_scans": [],
+        "recovered_files": 0,
+        "recovered_midi_files": 0,
+        "recovered_eseq_files": 0,
+        "recovered_pianodir_files": 0,
+        "human_report": "",
+    }
+    details["human_report"] = format_floppy_recovery_diagnostics(details)
+    return details
 
 
 def usb_floppy_format_capacity_error(drive_info, disk_format):
@@ -2627,6 +2942,7 @@ class _WindowsVolumeHandle:
     FILE_SHARE_WRITE = 0x00000002
     OPEN_EXISTING = 3
     FILE_ATTRIBUTE_NORMAL = 0x00000080
+    FILE_FLAG_OVERLAPPED = 0x40000000
     FILE_BEGIN = 0
     FSCTL_LOCK_VOLUME = 0x00090018
     FSCTL_UNLOCK_VOLUME = 0x0009001C
@@ -2648,11 +2964,14 @@ class _WindowsVolumeHandle:
             self.FILE_SHARE_READ | self.FILE_SHARE_WRITE,
             None,
             self.OPEN_EXISTING,
-            self.FILE_ATTRIBUTE_NORMAL,
+            self._creation_flags(),
             None,
         )
         if self.handle == self._ctypes.c_void_p(-1).value:
             raise FloppyImageError(_windows_last_error_message(f"Could not open floppy device {self.path}"))
+
+    def _creation_flags(self):
+        return self.FILE_ATTRIBUTE_NORMAL
 
     def _configure_api(self):
         self._kernel32.CreateFileW.argtypes = [
@@ -2809,6 +3128,338 @@ class _WindowsVolumeHandle:
             progress_callback(100, 100, "Writing floppy complete.")
 
 
+class _WindowsRecoveryVolumeHandle(_WindowsVolumeHandle):
+    """Windows raw-volume handle whose recovery reads can be cancelled."""
+
+    ERROR_HANDLE_EOF = 38
+    ERROR_OPERATION_ABORTED = 995
+    ERROR_IO_INCOMPLETE = 996
+    ERROR_IO_PENDING = 997
+    ERROR_NOT_FOUND = 1168
+    WAIT_OBJECT_0 = 0
+    WAIT_TIMEOUT = 0x00000102
+    WAIT_FAILED = 0xFFFFFFFF
+    RECOVERY_WAIT_SLICE_MS = 100
+    CANCEL_DRAIN_GRACE_SECONDS = 2.0
+    _overlapped_type = None
+    _retained_pending_reads = []
+    _retained_pending_reads_lock = threading.Lock()
+
+    def _creation_flags(self):
+        return self.FILE_ATTRIBUTE_NORMAL | self.FILE_FLAG_OVERLAPPED
+
+    def _configure_api(self):
+        super()._configure_api()
+        ctypes = self._ctypes
+        wintypes = self._wintypes
+
+        if type(self)._overlapped_type is None:
+            class _OverlappedOffset(ctypes.Structure):
+                _fields_ = [
+                    ("Offset", wintypes.DWORD),
+                    ("OffsetHigh", wintypes.DWORD),
+                ]
+
+            class _OverlappedPosition(ctypes.Union):
+                _anonymous_ = ("parts",)
+                _fields_ = [
+                    ("parts", _OverlappedOffset),
+                    ("Pointer", wintypes.LPVOID),
+                ]
+
+            class _Overlapped(ctypes.Structure):
+                _anonymous_ = ("position",)
+                _fields_ = [
+                    ("Internal", ctypes.c_size_t),
+                    ("InternalHigh", ctypes.c_size_t),
+                    ("position", _OverlappedPosition),
+                    ("hEvent", wintypes.HANDLE),
+                ]
+
+            type(self)._overlapped_type = _Overlapped
+
+        overlapped_pointer = ctypes.POINTER(type(self)._overlapped_type)
+        self._kernel32.CreateEventW.argtypes = [
+            wintypes.LPVOID,
+            wintypes.BOOL,
+            wintypes.BOOL,
+            wintypes.LPCWSTR,
+        ]
+        self._kernel32.CreateEventW.restype = wintypes.HANDLE
+        self._kernel32.WaitForSingleObject.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+        ]
+        self._kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        self._kernel32.GetOverlappedResult.argtypes = [
+            wintypes.HANDLE,
+            overlapped_pointer,
+            ctypes.POINTER(wintypes.DWORD),
+            wintypes.BOOL,
+        ]
+        self._kernel32.GetOverlappedResult.restype = wintypes.BOOL
+        self._kernel32.CancelIoEx.argtypes = [
+            wintypes.HANDLE,
+            overlapped_pointer,
+        ]
+        self._kernel32.CancelIoEx.restype = wintypes.BOOL
+
+    def _error_message(self, prefix, error_code):
+        detail = self._ctypes.FormatError(int(error_code or 0)).strip()
+        return f"{prefix}: {detail}" if detail else f"{prefix}."
+
+    def _wait_slice_ms(self, deadline_at):
+        if deadline_at is None:
+            return self.RECOVERY_WAIT_SLICE_MS
+        remaining = float(deadline_at) - time.monotonic()
+        if remaining <= 0:
+            return 0
+        return max(
+            1,
+            min(
+                self.RECOVERY_WAIT_SLICE_MS,
+                int(math.ceil(remaining * 1000.0)),
+            ),
+        )
+
+    def _overlapped_result(self, overlapped):
+        bytes_read = self._wintypes.DWORD()
+        if self._kernel32.GetOverlappedResult(
+            self.handle,
+            self._ctypes.byref(overlapped),
+            self._ctypes.byref(bytes_read),
+            False,
+        ):
+            return True, True, int(bytes_read.value), 0
+        error_code = int(self._ctypes.get_last_error() or 0)
+        if error_code == self.ERROR_IO_INCOMPLETE:
+            return False, False, 0, error_code
+        return True, False, 0, error_code
+
+    def _retain_pending_read(self, buffer, overlapped, event):
+        # A pathological driver may ignore cancellation. Keep every object that
+        # Windows could still touch alive instead of risking a use-after-free.
+        retained = (buffer, overlapped, event)
+        retained_type = type(self)
+        with retained_type._retained_pending_reads_lock:
+            retained_type._retained_pending_reads.append(retained)
+        self.incomplete_cancel_drain = True
+
+        kernel32 = self._kernel32
+
+        def reap_when_signalled():
+            while True:
+                wait_result = int(
+                    kernel32.WaitForSingleObject(
+                        event,
+                        self.RECOVERY_WAIT_SLICE_MS,
+                    )
+                )
+                if wait_result == self.WAIT_TIMEOUT:
+                    continue
+                if wait_result != self.WAIT_OBJECT_0:
+                    # Keep the objects rooted if Windows cannot confirm that it
+                    # has stopped touching them.
+                    return
+                with retained_type._retained_pending_reads_lock:
+                    retained_type._retained_pending_reads[:] = [
+                        item
+                        for item in retained_type._retained_pending_reads
+                        if item is not retained
+                    ]
+                kernel32.CloseHandle(event)
+                return
+
+        try:
+            threading.Thread(
+                target=reap_when_signalled,
+                name="aps-floppy-read-reaper",
+                daemon=True,
+            ).start()
+        except Exception:
+            # The tuple and event intentionally remain retained. Losing a small
+            # amount of memory is safer than releasing objects a driver may
+            # still be writing into.
+            pass
+
+    def _drain_cancelled_read(self, overlapped):
+        # CancelIoEx requests cancellation; the OVERLAPPED, event, and buffer
+        # must remain alive until Windows signals final completion.
+        result = self._overlapped_result(overlapped)
+        if result[0]:
+            return result
+        if not self._kernel32.CancelIoEx(
+            self.handle,
+            self._ctypes.byref(overlapped),
+        ):
+            error_code = self._ctypes.get_last_error()
+            if error_code != self.ERROR_NOT_FOUND:
+                # Still wait: the operation owns the Python buffers until its
+                # completion is observed, even when cancellation reports an error.
+                pass
+        drain_deadline = time.monotonic() + self.CANCEL_DRAIN_GRACE_SECONDS
+        while True:
+            result = self._overlapped_result(overlapped)
+            if result[0]:
+                return result
+            remaining = drain_deadline - time.monotonic()
+            if remaining <= 0:
+                return result
+            wait_result = int(
+                self._kernel32.WaitForSingleObject(
+                    overlapped.hEvent,
+                    max(
+                        1,
+                        min(
+                            self.RECOVERY_WAIT_SLICE_MS,
+                            int(math.ceil(remaining * 1000.0)),
+                        ),
+                    ),
+                )
+            )
+            if wait_result in {self.WAIT_OBJECT_0, self.WAIT_TIMEOUT}:
+                continue
+            return self._overlapped_result(overlapped)
+
+    def read_at_recovery(
+        self,
+        offset,
+        size,
+        label,
+        *,
+        cancel_callback=None,
+        deadline_at=None,
+        submitted_callback=None,
+    ):
+        _raise_if_cancelled(cancel_callback)
+        if deadline_at is not None and time.monotonic() >= float(deadline_at):
+            raise _RecoveryReadDeadlineExceeded(
+                "The physical-floppy recovery read reached its overall time limit."
+            )
+
+        offset = int(offset)
+        size = int(size)
+        if offset < 0 or size < 0:
+            raise FloppyImageError(f"Invalid recovery read range for {label}.")
+        if size == 0:
+            return b""
+
+        event = self._kernel32.CreateEventW(None, True, False, None)
+        if not event:
+            error_code = self._ctypes.get_last_error()
+            raise FloppyImageError(
+                self._error_message("Could not create a floppy read event", error_code)
+            )
+
+        buffer = self._ctypes.create_string_buffer(size)
+        overlapped = type(self)._overlapped_type()
+        overlapped.Offset = offset & 0xFFFFFFFF
+        overlapped.OffsetHigh = (offset >> 32) & 0xFFFFFFFF
+        overlapped.hEvent = event
+        operation_started = False
+        completion_observed = False
+        drain_attempted = False
+        retain_event = False
+        try:
+            if submitted_callback is not None:
+                submitted_callback()
+            ok = self._kernel32.ReadFile(
+                self.handle,
+                buffer,
+                size,
+                None,
+                self._ctypes.byref(overlapped),
+            )
+            if ok:
+                operation_started = True
+            else:
+                error_code = self._ctypes.get_last_error()
+                if error_code == self.ERROR_HANDLE_EOF:
+                    return b""
+                if error_code != self.ERROR_IO_PENDING:
+                    raise FloppyImageError(
+                        self._error_message(f"Could not read {label}", error_code)
+                    )
+                operation_started = True
+                while True:
+                    _raise_if_cancelled(cancel_callback)
+                    wait_slice_ms = self._wait_slice_ms(deadline_at)
+                    wait_result = int(
+                        self._kernel32.WaitForSingleObject(
+                            event,
+                            wait_slice_ms,
+                        )
+                    )
+                    if wait_result == self.WAIT_OBJECT_0:
+                        break
+                    if wait_result == self.WAIT_TIMEOUT:
+                        if (
+                            deadline_at is not None
+                            and time.monotonic() >= float(deadline_at)
+                        ):
+                            # CancelIoEx races with normal completion. Preserve
+                            # valid bytes if the operation won that race at the
+                            # deadline instead of reporting the range unresolved.
+                            drain_attempted = True
+                            (
+                                terminal,
+                                succeeded,
+                                completed_bytes,
+                                completion_error,
+                            ) = self._drain_cancelled_read(overlapped)
+                            completion_observed = terminal
+                            if succeeded:
+                                return buffer.raw[:completed_bytes]
+                            if (
+                                terminal
+                                and completion_error == self.ERROR_HANDLE_EOF
+                            ):
+                                return b""
+                            raise _RecoveryReadDeadlineExceeded(
+                                "The physical-floppy recovery read reached its overall time limit."
+                            )
+                        continue
+                    if wait_result == self.WAIT_FAILED:
+                        error_code = self._ctypes.get_last_error()
+                        raise FloppyImageError(
+                            self._error_message(
+                                f"Could not wait while reading {label}",
+                                error_code,
+                            )
+                        )
+                    raise FloppyImageError(
+                        f"Could not wait while reading {label}: unexpected wait result {wait_result}."
+                    )
+
+            (
+                completion_observed,
+                succeeded,
+                completed_bytes,
+                error_code,
+            ) = self._overlapped_result(overlapped)
+            if not succeeded:
+                if completion_observed and error_code == self.ERROR_HANDLE_EOF:
+                    return b""
+                raise FloppyImageError(
+                    self._error_message(f"Could not finish reading {label}", error_code)
+                )
+            return buffer.raw[:completed_bytes]
+        finally:
+            try:
+                if operation_started and not completion_observed:
+                    if not drain_attempted:
+                        completion_observed = self._drain_cancelled_read(overlapped)[0]
+                    if not completion_observed:
+                        retain_event = True
+                        self._retain_pending_read(buffer, overlapped, event)
+            finally:
+                if not retain_event:
+                    self._kernel32.CloseHandle(event)
+
+    def read_at(self, offset, size, label):
+        return self.read_at_recovery(offset, size, label)
+
+
 def _open_block_device_for_read(device_path):
     if os.name == "nt":
         return _WindowsVolumeHandle(device_path, write=False)
@@ -2827,6 +3478,12 @@ def _open_block_device_for_read(device_path):
         elif "busy" in lower:
             detail += "\n\nClose programs using the disk, unmount it if needed, and try again."
         raise FloppyImageError(detail) from exc
+
+
+def _open_block_device_for_recovery_read(device_path):
+    if os.name == "nt":
+        return _WindowsRecoveryVolumeHandle(device_path, write=False)
+    return _open_block_device_for_read(device_path)
 
 
 def _close_block_device(device):
@@ -3137,74 +3794,754 @@ def convert_greaseweazle_image_file(
                 pass
 
 
-def _read_device_chunk_for_recovery(device, offset, size):
+def _read_device_chunk_for_recovery(
+    device,
+    offset,
+    size,
+    *,
+    cancel_callback=None,
+    deadline_at=None,
+    submitted_callback=None,
+):
+    bounded_reader = getattr(device, "read_at_recovery", None)
+    if callable(bounded_reader):
+        return bounded_reader(
+            offset,
+            size,
+            "floppy recovery image",
+            cancel_callback=cancel_callback,
+            deadline_at=deadline_at,
+            submitted_callback=submitted_callback,
+        )
+    if submitted_callback is not None:
+        submitted_callback()
     if hasattr(device, "read_at"):
         return device.read_at(offset, size, "floppy recovery image")
     return os.pread(device, size, offset)
 
 
-def _read_block_device_recovery_image(device_path, output_path, size_bytes, progress_callback=None, cancel_callback=None):
-    total_size = int(size_bytes or 0)
-    if total_size <= 0:
-        total_size = _YAMAHA_TOTAL_SIZE
+def _record_recovery_read_error(diagnostics, exc):
+    errors = diagnostics.setdefault("read_errors", {})
+    message = " ".join(str(exc or "read failed").split()) or "read failed"
+    if len(message) > 200:
+        message = message[:197].rstrip() + "..."
+    if message not in errors and len(errors) >= 16:
+        message = "additional distinct read errors"
+    errors[message] = int(errors.get(message) or 0) + 1
 
-    image = bytearray(total_size)
-    bad_ranges = []
-    chunk_size = 64 * 1024
-    sector_size = _YAMAHA_BYTES_PER_SECTOR
-    last_progress = -1
-    device = _open_block_device_for_read(device_path)
+
+def _update_usb_recovery_counts(
+    diagnostics,
+    sector_states,
+    sector_size,
+    total_size=None,
+    partial_sector_bytes=None,
+):
+    good = sum(1 for state in sector_states if state == 1)
+    recovered = sum(1 for state in sector_states if state == 2)
+    bad = sum(1 for state in sector_states if state == 3)
+    unresolved = sum(1 for state in sector_states if state == 4)
+    expected = len(sector_states)
+    attempted = good + recovered + bad + unresolved
+    total_size = (
+        expected * int(sector_size)
+        if total_size is None
+        else max(0, int(total_size))
+    )
+    complete_bytes = sum(
+        max(0, min(int(sector_size), total_size - index * int(sector_size)))
+        for index, state in enumerate(sector_states)
+        if state in {1, 2}
+    )
+    if not isinstance(partial_sector_bytes, list):
+        partial_sector_bytes = []
+    partial_bytes = sum(
+        max(
+            0,
+            min(
+                int(value or 0),
+                int(sector_size),
+                total_size - index * int(sector_size),
+            ),
+        )
+        for index, value in enumerate(partial_sector_bytes[:expected])
+        if sector_states[index] not in {1, 2}
+    )
+    partially_readable = sum(
+        1
+        for index, value in enumerate(partial_sector_bytes[:expected])
+        if int(value or 0) > 0 and sector_states[index] not in {1, 2}
+    )
+    diagnostics.update(
+        {
+            "expected_sectors": expected,
+            "attempted_sectors": attempted,
+            "good_sectors": good,
+            "recovered_after_fallback_sectors": recovered,
+            "readable_sectors": good + recovered,
+            "bad_sectors": bad,
+            "unresolved_sectors": unresolved,
+            "unattempted_sectors": max(0, expected - attempted),
+            "bytes_recovered": complete_bytes + partial_bytes,
+            "partial_bytes_recovered": partial_bytes,
+            "partially_readable_sectors": partially_readable,
+        }
+    )
+
+
+def _sector_state_ranges(sector_states, target_state, *, max_ranges=256):
+    ranges = []
+    total_ranges = 0
+    start = None
+    previous = None
+    for sector_index, state in enumerate(sector_states):
+        if state == target_state:
+            if start is None:
+                start = previous = sector_index
+            elif sector_index == previous + 1:
+                previous = sector_index
+            else:
+                total_ranges += 1
+                if len(ranges) < max_ranges:
+                    ranges.append([start, previous])
+                start = previous = sector_index
+        elif start is not None:
+            total_ranges += 1
+            if len(ranges) < max_ranges:
+                ranges.append([start, previous])
+            start = previous = None
+    if start is not None:
+        total_ranges += 1
+        if len(ranges) < max_ranges:
+            ranges.append([start, previous])
+    return ranges, max(0, total_ranges - len(ranges))
+
+
+def _update_usb_recovery_sector_ranges(diagnostics, sector_states):
+    truncated = {}
+    for key, state in (
+        ("unattempted_sector_ranges", 0),
+        ("fallback_recovered_sector_ranges", 2),
+        ("bad_sector_ranges", 3),
+        ("unresolved_sector_ranges", 4),
+    ):
+        ranges, omitted = _sector_state_ranges(sector_states, state)
+        diagnostics[key] = ranges
+        if omitted:
+            truncated[key] = omitted
+    diagnostics["sector_ranges_truncated"] = truncated
+
+
+def _set_recovery_boot_geometry(diagnostics, sector0):
+    sector0 = bytes(sector0 or b"")
+    geometry = _geometry_from_boot_sector(sector0)
+    if geometry is None:
+        return None
+    claimed_bytes = int(geometry.total_size)
+    claimed_format = DISK_FORMAT_BY_SIZE.get(claimed_bytes)
+    diagnostics.update(
+        {
+            "boot_claimed_format_key": str(getattr(claimed_format, "key", "") or ""),
+            "boot_claimed_format_label": str(
+                getattr(claimed_format, "label", "")
+                or f"FAT12 ({geometry.total_sectors} sectors)"
+            ),
+            "boot_claimed_bytes": claimed_bytes,
+        }
+    )
+    if not _recovery_boot_geometry_is_known_layout(sector0, geometry):
+        return geometry
+
+    diagnostics.update(
+        {
+            "detected_format_key": diagnostics["boot_claimed_format_key"],
+            "detected_format_label": diagnostics["boot_claimed_format_label"],
+            "detected_bytes": claimed_bytes,
+            "detection_basis": "validated_boot_sector",
+        }
+    )
+    selected_bytes = int(diagnostics.get("selected_bytes") or 0)
+    diagnostics["geometry_mismatch"] = bool(
+        selected_bytes > 0 and claimed_bytes > 0 and selected_bytes != claimed_bytes
+    )
+    return geometry
+
+
+def _recovery_boot_geometry_is_known_layout(sector0, geometry):
+    if geometry is None:
+        return False
+    layout = _protected_layout_hint_from_boot_sector(bytes(sector0 or b""))
+    return layout is not None and _layout_total_size(layout) == geometry.total_size
+
+
+def _usb_recovery_read_note(diagnostics):
+    details = dict(diagnostics or {})
+    readable = int(details.get("readable_sectors") or 0)
+    expected = int(details.get("expected_sectors") or 0)
+    bad = int(details.get("bad_sectors") or 0)
+    unresolved = int(details.get("unresolved_sectors") or 0)
+    unattempted = int(details.get("unattempted_sectors") or 0)
+    note = (
+        f"Physical recovery read {readable} of {expected} selected sector(s) "
+        f"({_diagnostic_percent(readable, expected)}), including "
+        f"{int(details.get('recovered_after_fallback_sectors') or 0)} recovered after sector fallback."
+    )
+    if bad:
+        note += f" {bad} sector(s) remained unreadable and were filled with zeros."
+    if unresolved:
+        note += (
+            f" {unresolved} attempted sector(s) could not be resolved before recovery stopped; "
+            "any missing bytes remain zero-filled."
+        )
+    if unattempted:
+        note += f" {unattempted} sector(s) were not attempted because recovery stopped early."
+    stop_reason = str(details.get("stop_reason") or "")
+    if stop_reason == "soft_deadline":
+        if details.get("read_deadline_mode") == "windows_overlapped_cancel":
+            note += (
+                " Recovery reached its five-minute read deadline and requested cancellation "
+                "of the pending Windows device read."
+            )
+        else:
+            note += (
+                " The five-minute recovery deadline is soft because each operating-system "
+                "read is synchronous."
+            )
+    return note
+
+
+def _read_block_device_recovery_image(
+    device_path,
+    output_path,
+    size_bytes,
+    progress_callback=None,
+    cancel_callback=None,
+    *,
+    diagnostics=None,
+    soft_deadline_seconds=None,
+    chunk_size=None,
+    sector_size=None,
+    all_bad_sample_sectors=None,
+    mostly_bad_sample_sectors=None,
+    mostly_bad_ratio=None,
+    consecutive_bad_sectors=None,
+    bad_media_minimum_coverage=None,
+):
+    """Best-effort raw USB read with bounded fallback and structured diagnostics.
+
+    POSIX pread calls are synchronous, so one call can overrun the time limit.
+    Windows recovery reads use cancellable overlapped I/O, but device open,
+    read submission, or an unresponsive driver can still overrun it. The
+    deadline and cancellation state are also checked between every call.
+    """
+
+    requested_size = int(size_bytes or 0)
+    if requested_size <= 0:
+        requested_size = _YAMAHA_TOTAL_SIZE
+    sector_size = max(
+        1,
+        int(
+            USB_FLOPPY_RECOVERY_SECTOR_SIZE
+            if sector_size is None
+            else sector_size
+        ),
+    )
+    chunk_size = max(
+        sector_size,
+        int(USB_FLOPPY_RECOVERY_CHUNK_SIZE if chunk_size is None else chunk_size),
+    )
+    chunk_size = max(sector_size, (chunk_size // sector_size) * sector_size)
+    soft_deadline_seconds = max(
+        0.0,
+        float(
+            USB_FLOPPY_RECOVERY_SOFT_DEADLINE_SECONDS
+            if soft_deadline_seconds is None
+            else soft_deadline_seconds
+        ),
+    )
+    all_bad_sample_sectors = max(
+        1,
+        int(
+            USB_FLOPPY_RECOVERY_ALL_BAD_SAMPLE_SECTORS
+            if all_bad_sample_sectors is None
+            else all_bad_sample_sectors
+        ),
+    )
+    mostly_bad_sample_sectors = max(
+        1,
+        int(
+            USB_FLOPPY_RECOVERY_MOSTLY_BAD_SAMPLE_SECTORS
+            if mostly_bad_sample_sectors is None
+            else mostly_bad_sample_sectors
+        ),
+    )
+    mostly_bad_ratio = min(
+        1.0,
+        max(
+            0.0,
+            float(
+                USB_FLOPPY_RECOVERY_MOSTLY_BAD_RATIO
+                if mostly_bad_ratio is None
+                else mostly_bad_ratio
+            ),
+        ),
+    )
+    consecutive_bad_sectors = max(
+        1,
+        int(
+            USB_FLOPPY_RECOVERY_CONSECUTIVE_BAD_SECTORS
+            if consecutive_bad_sectors is None
+            else consecutive_bad_sectors
+        ),
+    )
+    bad_media_minimum_coverage = min(
+        1.0,
+        max(
+            0.0,
+            float(
+                USB_FLOPPY_RECOVERY_BAD_MEDIA_MINIMUM_COVERAGE
+                if bad_media_minimum_coverage is None
+                else bad_media_minimum_coverage
+            ),
+        ),
+    )
+
+    if diagnostics is None:
+        diagnostics = _new_usb_floppy_recovery_diagnostics(
+            None,
+            DISK_FORMAT_BY_SIZE.get(requested_size),
+            requested_size,
+            sector_size=sector_size,
+            soft_deadline_seconds=soft_deadline_seconds,
+        )
+        diagnostics["drive_path"] = str(device_path or "")
+    else:
+        diagnostics = dict(diagnostics)
+        diagnostics["selected_bytes"] = requested_size
+        diagnostics["sector_size"] = sector_size
+        diagnostics["soft_deadline_seconds"] = soft_deadline_seconds
+    diagnostics["bad_media_minimum_coverage"] = bad_media_minimum_coverage
+
+    expected_sectors = int(math.ceil(requested_size / sector_size))
+    sector_states = [0] * expected_sectors
+    partial_sector_bytes = [0] * expected_sectors
+    diagnostics["_sector_states"] = sector_states
+    image = bytearray(requested_size)
+    read_limit = requested_size
+    detected_smaller_geometry = False
+    started_at = time.monotonic()
+    deadline_at = (
+        started_at + soft_deadline_seconds
+        if soft_deadline_seconds > 0
+        else None
+    )
+    last_progress_state = None
+    consecutive_bad = 0
+
+    def deadline_reached():
+        return bool(
+            soft_deadline_seconds > 0
+            and time.monotonic() - started_at >= soft_deadline_seconds
+        )
+
+    def stop(reason):
+        diagnostics["stopped_early"] = True
+        diagnostics["stop_reason"] = str(reason)
+
+    def update_counts():
+        _update_usb_recovery_counts(
+            diagnostics,
+            sector_states,
+            sector_size,
+            requested_size,
+            partial_sector_bytes,
+        )
+
+    def mark_attempted_range(start_offset, end_offset, *, fallback=False):
+        diagnostics["read_calls"] = int(diagnostics.get("read_calls") or 0) + 1
+        if fallback:
+            diagnostics["fallback_read_calls"] = int(
+                diagnostics.get("fallback_read_calls") or 0
+            ) + 1
+            diagnostics["read_passes"] = max(
+                2,
+                int(diagnostics.get("read_passes") or 0),
+            )
+        else:
+            diagnostics["read_passes"] = max(
+                1,
+                int(diagnostics.get("read_passes") or 0),
+            )
+        first_sector = max(0, int(start_offset) // sector_size)
+        sector_end = min(
+            expected_sectors,
+            int(math.ceil(int(end_offset) / sector_size)),
+        )
+        for sector_index in range(first_sector, sector_end):
+            if sector_states[sector_index] == 0:
+                sector_states[sector_index] = 4
+
+    def inspect_boot_sector():
+        nonlocal read_limit, detected_smaller_geometry
+        sector0 = bytes(image[:sector_size])
+        if len(sector0) < sector_size:
+            return
+        diagnostics["boot_sector_readable"] = True
+        diagnostics["boot_signature_present"] = (
+            sector0[-2:] == _YAMAHA_BOOT_SIGNATURE
+        )
+        boot_geometry = _set_recovery_boot_geometry(diagnostics, sector0)
+        if (
+            boot_geometry is not None
+            and _recovery_boot_geometry_is_known_layout(sector0, boot_geometry)
+            and 0 < boot_geometry.total_size < read_limit
+            and boot_geometry.total_size in DISK_FORMAT_BY_SIZE
+        ):
+            read_limit = int(boot_geometry.total_size)
+            first_sector_beyond_geometry = int(
+                math.ceil(read_limit / sector_size)
+            )
+            for sector_index in range(
+                first_sector_beyond_geometry,
+                expected_sectors,
+            ):
+                sector_states[sector_index] = 0
+                partial_sector_bytes[sector_index] = 0
+            detected_smaller_geometry = True
+            diagnostics["stopped_early"] = True
+            diagnostics["stop_reason"] = "detected_smaller_geometry"
+
+    def detect_smaller_geometry_at_eof(eof_offset, attempted_start, attempted_end):
+        nonlocal read_limit, detected_smaller_geometry
+        eof_offset = int(eof_offset)
+        detected_format = DISK_FORMAT_BY_SIZE.get(eof_offset)
+        prefix_sectors = eof_offset // sector_size
+        if (
+            detected_format is None
+            or eof_offset <= 0
+            or eof_offset >= read_limit
+            or eof_offset % sector_size
+            or prefix_sectors <= 0
+        ):
+            return False
+        prefix_states = sector_states[:prefix_sectors]
+        resolved = sum(1 for state in prefix_states if state in {1, 2, 3})
+        readable = sum(1 for state in prefix_states if state in {1, 2})
+        if (
+            resolved != prefix_sectors
+            or readable / prefix_sectors < 0.90
+        ):
+            return False
+
+        for sector_index in range(
+            max(0, attempted_start // sector_size),
+            min(expected_sectors, int(math.ceil(attempted_end / sector_size))),
+        ):
+            if sector_states[sector_index] == 4 and not partial_sector_bytes[sector_index]:
+                sector_states[sector_index] = 0
+        diagnostics.update(
+            {
+                "detected_format_key": str(detected_format.key),
+                "detected_format_label": str(detected_format.label),
+                "detected_bytes": eof_offset,
+                "detection_basis": "device_eof_after_readable_prefix",
+                "geometry_mismatch": bool(
+                    requested_size > 0 and requested_size != eof_offset
+                ),
+                "stopped_early": True,
+                "stop_reason": "detected_smaller_geometry",
+            }
+        )
+        read_limit = eof_offset
+        detected_smaller_geometry = True
+        return True
+
+    def notify_read_progress():
+        nonlocal last_progress_state
+        if progress_callback is None or expected_sectors <= 0:
+            return
+        attempted = int(diagnostics.get("attempted_sectors") or 0)
+        readable = int(diagnostics.get("readable_sectors") or 0)
+        bad = int(diagnostics.get("bad_sectors") or 0)
+        unresolved = int(diagnostics.get("unresolved_sectors") or 0)
+        progress_state = (attempted, readable, bad, unresolved)
+        if progress_state == last_progress_state:
+            return
+        last_progress_state = progress_state
+        progress_callback(
+            min(70, int((attempted / expected_sectors) * 70)),
+            100,
+            "Copying floppy for recovery: "
+            f"{attempted} of {expected_sectors} sector(s) attempted; "
+            f"{readable} readable, {bad} bad, {unresolved} unresolved...",
+        )
+
+    def check_bad_media_cutoff():
+        readable = int(diagnostics.get("readable_sectors") or 0)
+        bad = int(diagnostics.get("bad_sectors") or 0)
+        resolved = readable + bad
+        if expected_sectors > 0 and resolved / expected_sectors < bad_media_minimum_coverage:
+            return False
+        if resolved >= all_bad_sample_sectors and readable <= 0:
+            stop("all_sectors_bad")
+            return True
+        if (
+            resolved >= mostly_bad_sample_sectors
+            and resolved > 0
+            and (bad / resolved) >= mostly_bad_ratio
+        ):
+            stop("mostly_bad_media")
+            return True
+        if consecutive_bad >= consecutive_bad_sectors:
+            stop("consecutive_bad_sectors")
+            return True
+        return False
+
+    def attach_cancelled_diagnostics(exc):
+        stop("cancelled")
+        diagnostics["duration_seconds"] = round(time.monotonic() - started_at, 3)
+        update_counts()
+        _update_usb_recovery_sector_ranges(diagnostics, sector_states)
+        diagnostics.pop("_sector_states", None)
+        diagnostics["human_report"] = format_floppy_recovery_diagnostics(diagnostics)
+        exc.diagnostics = dict(diagnostics)
+
+    try:
+        _raise_if_cancelled(cancel_callback)
+        device = _open_block_device_for_recovery_read(device_path)
+        diagnostics["read_deadline_mode"] = (
+            "windows_overlapped_cancel"
+            if callable(getattr(device, "read_at_recovery", None))
+            else "synchronous_soft"
+        )
+    except FloppyOperationCancelled as exc:
+        attach_cancelled_diagnostics(exc)
+        raise
+    except (OSError, FloppyImageError) as exc:
+        diagnostics["stop_reason"] = "device_open_failed"
+        diagnostics["stopped_early"] = True
+        diagnostics["duration_seconds"] = round(time.monotonic() - started_at, 3)
+        _record_recovery_read_error(diagnostics, exc)
+        update_counts()
+        _update_usb_recovery_sector_ranges(diagnostics, sector_states)
+        diagnostics.pop("_sector_states", None)
+        diagnostics["human_report"] = format_floppy_recovery_diagnostics(diagnostics)
+        raise FloppyRecoveryError(
+            f"Could not open floppy device {device_path} for recovery: {exc}\n\n"
+            f"{diagnostics['human_report']}",
+            diagnostics=diagnostics,
+        ) from exc
+
+    cancelled_error = None
     try:
         offset = 0
-        while offset < total_size:
+        while offset < read_limit:
             _raise_if_cancelled(cancel_callback)
-            current_size = min(chunk_size, total_size - offset)
+            if deadline_reached():
+                stop("soft_deadline")
+                break
+
+            current_size = min(chunk_size, read_limit - offset)
+            first_target_sector = offset // sector_size
+            fallback_start = offset
             try:
-                chunk = _read_device_chunk_for_recovery(device, offset, current_size)
+                chunk = _read_device_chunk_for_recovery(
+                    device,
+                    offset,
+                    current_size,
+                    cancel_callback=cancel_callback,
+                    deadline_at=deadline_at,
+                    submitted_callback=lambda start=offset, end=offset + current_size: mark_attempted_range(
+                        start,
+                        end,
+                    ),
+                )
+                chunk = bytes(chunk or b"")
+                if not chunk and detect_smaller_geometry_at_eof(
+                    offset,
+                    offset,
+                    offset + current_size,
+                ):
+                    break
                 if len(chunk) != current_size:
-                    raise FloppyImageError("short read")
+                    if chunk:
+                        image[offset:offset + len(chunk)] = chunk
+                        complete_length = (len(chunk) // sector_size) * sector_size
+                        complete_sector_end = min(
+                            expected_sectors,
+                            (offset + complete_length) // sector_size,
+                        )
+                        for sector_index in range(
+                            first_target_sector,
+                            complete_sector_end,
+                        ):
+                            sector_states[sector_index] = 1
+                            partial_sector_bytes[sector_index] = 0
+                        if complete_length > 0:
+                            consecutive_bad = 0
+                        partial_length = len(chunk) - complete_length
+                        if partial_length:
+                            partial_index = (offset + complete_length) // sector_size
+                            if 0 <= partial_index < expected_sectors:
+                                partial_sector_bytes[partial_index] = max(
+                                    partial_sector_bytes[partial_index],
+                                    partial_length,
+                                )
+                                sector_states[partial_index] = 4
+                        fallback_start = offset + complete_length
+                        if offset == 0 and complete_length >= sector_size:
+                            inspect_boot_sector()
+                        if (
+                            len(chunk) % sector_size == 0
+                            and detect_smaller_geometry_at_eof(
+                                offset + len(chunk),
+                                offset + len(chunk),
+                                offset + current_size,
+                            )
+                        ):
+                            break
+                    raise FloppyImageError(
+                        f"short read at byte {offset}: expected {current_size}, received {len(chunk)}"
+                    )
                 image[offset:offset + current_size] = chunk
-            except Exception:
-                sector_end = offset + current_size
-                sector_offset = offset
+                sector_count = int(math.ceil(current_size / sector_size))
+                for sector_index in range(
+                    first_target_sector,
+                    min(expected_sectors, first_target_sector + sector_count),
+                ):
+                    sector_states[sector_index] = 1
+                    partial_sector_bytes[sector_index] = 0
+                consecutive_bad = 0
+
+                if offset == 0 and len(chunk) >= sector_size:
+                    inspect_boot_sector()
+            except _RecoveryReadDeadlineExceeded:
+                stop("soft_deadline")
+                break
+            except FloppyOperationCancelled:
+                raise
+            except (OSError, FloppyImageError) as chunk_exc:
+                _record_recovery_read_error(diagnostics, chunk_exc)
+                sector_end = min(offset + current_size, read_limit)
+                sector_offset = fallback_start
                 while sector_offset < sector_end:
                     _raise_if_cancelled(cancel_callback)
+                    if deadline_reached():
+                        stop("soft_deadline")
+                        break
                     sector_read_size = min(sector_size, sector_end - sector_offset)
+                    sector_index = sector_offset // sector_size
                     try:
-                        sector = _read_device_chunk_for_recovery(device, sector_offset, sector_read_size)
+                        sector = _read_device_chunk_for_recovery(
+                            device,
+                            sector_offset,
+                            sector_read_size,
+                            cancel_callback=cancel_callback,
+                            deadline_at=deadline_at,
+                            submitted_callback=lambda start=sector_offset, end=(
+                                sector_offset + sector_read_size
+                            ): mark_attempted_range(start, end, fallback=True),
+                        )
+                        sector = bytes(sector or b"")
                         if len(sector) != sector_read_size:
-                            raise FloppyImageError("short read")
-                        image[sector_offset:sector_offset + sector_read_size] = sector
-                    except Exception:
-                        bad_ranges.append((sector_offset, sector_read_size))
+                            if sector:
+                                image[
+                                    sector_offset:sector_offset + len(sector)
+                                ] = sector
+                                if 0 <= sector_index < expected_sectors:
+                                    partial_sector_bytes[sector_index] = max(
+                                        partial_sector_bytes[sector_index],
+                                        len(sector),
+                                    )
+                                    sector_states[sector_index] = 4
+                            raise FloppyImageError(
+                                f"short sector read at byte {sector_offset}: "
+                                f"expected {sector_read_size}, received {len(sector)}"
+                            )
+                        image[
+                            sector_offset:sector_offset + sector_read_size
+                        ] = sector
+                        if 0 <= sector_index < expected_sectors:
+                            sector_states[sector_index] = 2
+                            partial_sector_bytes[sector_index] = 0
+                        consecutive_bad = 0
+                        if sector_index == 0:
+                            inspect_boot_sector()
+                            sector_end = min(sector_end, read_limit)
+                    except _RecoveryReadDeadlineExceeded:
+                        stop("soft_deadline")
+                        break
+                    except FloppyOperationCancelled:
+                        raise
+                    except (OSError, FloppyImageError) as sector_exc:
+                        _record_recovery_read_error(diagnostics, sector_exc)
+                        if 0 <= sector_index < expected_sectors:
+                            sector_states[sector_index] = (
+                                4 if partial_sector_bytes[sector_index] else 3
+                            )
+                        consecutive_bad += 1
+
+                    update_counts()
+                    notify_read_progress()
+                    if check_bad_media_cutoff():
+                        break
                     sector_offset += sector_read_size
 
+                if diagnostics.get("stopped_early") and diagnostics.get("stop_reason") != "detected_smaller_geometry":
+                    break
+
+            update_counts()
+            notify_read_progress()
             offset += current_size
-            if progress_callback is not None and total_size > 0:
-                progress = min(70, int((offset / total_size) * 70))
-                if progress > last_progress:
-                    last_progress = progress
-                    unreadable = ""
-                    if bad_ranges:
-                        unreadable = f" ({len(bad_ranges)} unreadable sector(s) filled with zeros)"
-                    progress_callback(
-                        progress,
-                        100,
-                        f"Copying full floppy image for recovery: {display_bytes(offset)} of {display_bytes(total_size)}{unreadable}...",
-                    )
+
         _raise_if_cancelled(cancel_callback)
+    except FloppyOperationCancelled as exc:
+        cancelled_error = exc
     finally:
         _close_block_device(device)
-
-    with open(output_path, "wb") as output:
-        output.write(image)
-
-    if bad_ranges:
-        return (
-            f"Full recovery image copied with {len(bad_ranges)} unreadable sector(s) replaced by zeros; "
-            "songs touching those sectors may be incomplete."
+        diagnostics["windows_cancel_drain_incomplete"] = bool(
+            getattr(device, "incomplete_cancel_drain", False)
         )
-    return "Full recovery image copied successfully."
+        diagnostics["duration_seconds"] = round(time.monotonic() - started_at, 3)
+
+    if cancelled_error is not None:
+        attach_cancelled_diagnostics(cancelled_error)
+        raise cancelled_error
+
+    update_counts()
+    _update_usb_recovery_sector_ranges(diagnostics, sector_states)
+    if not diagnostics.get("stop_reason"):
+        diagnostics["stop_reason"] = "completed"
+    if detected_smaller_geometry:
+        output_image = bytes(image[:read_limit])
+    else:
+        output_image = bytes(image)
+    diagnostics["image_bytes"] = len(output_image)
+    diagnostics["sha256"] = hashlib.sha256(output_image).hexdigest()
+    diagnostics["nonzero_sectors"] = sum(
+        1
+        for offset in range(0, len(output_image), sector_size)
+        if any(output_image[offset:offset + sector_size])
+    )
+    if diagnostics.get("boot_sector_readable") is None and sector_states:
+        diagnostics["boot_sector_readable"] = sector_states[0] in {1, 2}
+    diagnostics["human_report"] = format_floppy_recovery_diagnostics(diagnostics)
+
+    try:
+        with open(output_path, "wb") as output:
+            output.write(output_image)
+    except OSError as exc:
+        _record_recovery_read_error(diagnostics, exc)
+        diagnostics["stop_reason"] = "output_write_failed"
+        diagnostics.pop("_sector_states", None)
+        diagnostics["human_report"] = format_floppy_recovery_diagnostics(diagnostics)
+        raise FloppyRecoveryError(
+            f"Could not save the temporary floppy recovery image: {exc}\n\n"
+            f"{diagnostics['human_report']}",
+            diagnostics=diagnostics,
+        ) from exc
+
+    return diagnostics
 
 
 _WINDOWS_RAW_WRITE_HELPER_ARG = "--aps-raw-floppy-write-helper"
@@ -3844,6 +5181,26 @@ def _root_dir_looks_plausible(data, offset, root_dir_sectors=_YAMAHA_ROOT_DIR_SE
     return found > 0
 
 
+def _root_dir_is_structurally_valid(data, offset, root_dir_sectors):
+    end = offset + int(root_dir_sectors) * _YAMAHA_BYTES_PER_SECTOR
+    if offset < 0 or end > len(data):
+        return False
+
+    for pos in range(offset, end, 32):
+        entry = data[pos:pos + 32]
+        if len(entry) < 32:
+            return False
+        first = entry[0]
+        attr = entry[11]
+        if first == 0x00:
+            return True
+        if first == 0xE5 or attr == 0x0F:
+            continue
+        if attr & 0xC0 or not _entry_name_looks_plausible(entry[:11]):
+            return False
+    return True
+
+
 def _layout_root_dir_sectors(layout):
     return int(math.ceil((int(layout["root_entries"]) * 32) / int(layout["bytes_per_sector"])))
 
@@ -4101,6 +5458,14 @@ def _geometry_from_boot_sector(sector0):
         sectors_per_fat=sectors_per_fat,
     )
     if geometry.data_offset >= geometry.total_size:
+        return None
+    data_clusters = _fat12_data_cluster_count(geometry)
+    fat_entry_capacity = (geometry.fat_size * 2) // 3
+    if (
+        data_clusters <= 0
+        or data_clusters >= 4085
+        or data_clusters > max(0, fat_entry_capacity - 2)
+    ):
         return None
     return geometry
 
@@ -5229,7 +6594,18 @@ def _sector_map_has_blank_disk_evidence(sector_map):
         return False
     if total <= 0:
         return False
-    return found == 0 or found == total
+    # Zero decoded sectors is evidence of an unreadable or wrong-geometry
+    # capture, not evidence that the underlying disk is blank. Only a complete
+    # sector read gives us enough information to inspect the payload itself.
+    return found == total
+
+
+def _uniform_blank_fill_value(data):
+    data = bytes(data or b"")
+    if not data or data[0] not in BLANK_FLOPPY_FILL_VALUES:
+        return None
+    fill_value = data[0]
+    return fill_value if data.count(fill_value) == len(data) else None
 
 
 def _converted_image_appears_blank_or_unformatted(img_path, disk_format, sector_map):
@@ -5255,7 +6631,13 @@ def _converted_image_appears_blank_or_unformatted(img_path, disk_format, sector_
         )
     except Exception:
         return False
-    return not recovered
+    if recovered:
+        return False
+
+    # Fully readable, non-zero data that this version does not recognize may be
+    # an unsupported filesystem or instrument format. Calling it blank hides a
+    # materially different (and actionable) result from the user.
+    return _uniform_blank_fill_value(data) is not None
 
 
 def _is_probably_pianodir_bytes(data):
@@ -5468,7 +6850,11 @@ def _recovery_geometries_for_data(data, disk_format_hint=None):
     if hinted_geometry is not None and hinted_geometry.total_size <= len(data):
         geometries.append(hinted_geometry)
     geometry = _geometry_from_boot_sector(data[:_YAMAHA_BYTES_PER_SECTOR])
-    if geometry is not None and all(existing.total_size != geometry.total_size for existing in geometries):
+    if (
+        geometry is not None
+        and geometry.total_size <= len(data)
+        and all(existing.total_size != geometry.total_size for existing in geometries)
+    ):
         geometries.append(geometry)
     for layout in _PROTECTED_FAT12_LAYOUTS:
         candidate = _fat12_geometry_from_layout(layout)
@@ -5632,6 +7018,382 @@ def _preferred_recovery_formats_for_data(data, files, disk_format_hint=None):
     return formats
 
 
+def _recovery_range_fully_readable(diagnostics, offset, size):
+    states = (diagnostics or {}).get("_sector_states")
+    if not isinstance(states, list):
+        return None
+    sector_size = max(
+        1,
+        int((diagnostics or {}).get("sector_size") or USB_FLOPPY_RECOVERY_SECTOR_SIZE),
+    )
+    start_sector = max(0, int(offset) // sector_size)
+    end_sector = int(math.ceil((int(offset) + max(0, int(size))) / sector_size))
+    if end_sector > len(states):
+        return False
+    return all(states[index] in {1, 2} for index in range(start_sector, end_sector))
+
+
+def _recovery_geometry_label(geometry):
+    disk_format = DISK_FORMAT_BY_SIZE.get(int(geometry.total_size))
+    if disk_format is not None:
+        return disk_format.key, disk_format.label
+    return "", f"FAT12 ({geometry.total_sectors} sectors)"
+
+
+def _recovery_file_kind_counts(files):
+    files = list(files or ())
+    return {
+        "recovered_files": len(files),
+        "recovered_midi_files": sum(1 for item in files if getattr(item, "kind", "") == "MIDI"),
+        "recovered_eseq_files": sum(1 for item in files if getattr(item, "kind", "") == "E-SEQ"),
+        "recovered_pianodir_files": sum(
+            1 for item in files if getattr(item, "kind", "") == "PIANODIR"
+        ),
+    }
+
+
+def _listing_recovery_kind_counts(listing):
+    entries = list(getattr(listing, "entries", ()) or ())
+    midi_count = 0
+    eseq_count = 0
+    pianodir_count = 0
+    for entry in entries:
+        path = str(getattr(entry, "path", "") or "")
+        if is_pianodir_path(path):
+            pianodir_count += 1
+            continue
+        extension = os.path.splitext(path)[1].lower()
+        if extension in {".mid", ".midi"}:
+            midi_count += 1
+        elif extension in {".fil", ".mda"}:
+            eseq_count += 1
+    return {
+        "recovered_files": len(entries),
+        "recovered_midi_files": midi_count,
+        "recovered_eseq_files": eseq_count,
+        "recovered_pianodir_files": pianodir_count,
+    }
+
+
+def _populate_recovery_scan_diagnostics(data, diagnostics, disk_format_hint=None):
+    if not isinstance(diagnostics, dict):
+        return
+    data = bytes(data or b"")
+    sector_size = max(
+        1,
+        int(diagnostics.get("sector_size") or USB_FLOPPY_RECOVERY_SECTOR_SIZE),
+    )
+    diagnostics["image_bytes"] = len(data)
+    diagnostics["sha256"] = hashlib.sha256(data).hexdigest() if data else ""
+    diagnostics["nonzero_sectors"] = sum(
+        1
+        for offset in range(0, len(data), sector_size)
+        if any(data[offset:offset + sector_size])
+    )
+    blank_fill_value = _uniform_blank_fill_value(data)
+    diagnostics["blank_fill_only"] = blank_fill_value is not None
+    diagnostics["blank_fill_value"] = (
+        f"0x{blank_fill_value:02X}" if blank_fill_value is not None else ""
+    )
+    diagnostics["midi_header_signatures"] = data.count(b"MThd")
+    diagnostics["eseq_signatures"] = data.count(b"COM-ESEQ")
+    diagnostics["pianodir_signatures"] = data.count(PIANODIR_HEADER)
+    diagnostics["recognizable_signatures"] = (
+        int(diagnostics["midi_header_signatures"])
+        + int(diagnostics["eseq_signatures"])
+        + int(diagnostics["pianodir_signatures"])
+    )
+
+    boot_readable = _recovery_range_fully_readable(
+        diagnostics,
+        0,
+        min(sector_size, len(data)),
+    )
+    if boot_readable is None:
+        boot_readable = len(data) >= sector_size
+    diagnostics["boot_sector_readable"] = bool(boot_readable)
+    diagnostics["boot_signature_present"] = (
+        bool(
+            len(data) >= sector_size
+            and data[sector_size - 2:sector_size] == _YAMAHA_BOOT_SIGNATURE
+        )
+        if boot_readable
+        else None
+    )
+    boot_geometry = (
+        _geometry_from_boot_sector(data[:sector_size])
+        if diagnostics["boot_sector_readable"]
+        else None
+    )
+    boot_layout = (
+        _protected_layout_hint_from_boot_sector(data[:sector_size])
+        if diagnostics["boot_sector_readable"]
+        else None
+    )
+    trusted_boot_geometry = (
+        boot_geometry
+        if boot_geometry is not None
+        and boot_layout is not None
+        and _layout_total_size(boot_layout) == boot_geometry.total_size
+        else None
+    )
+
+    geometries = list(_recovery_geometries_for_data(data, disk_format_hint=disk_format_hint))
+    hinted_geometry = _geometry_for_disk_format_hint(disk_format_hint)
+    if (
+        hinted_geometry is not None
+        and all(existing.total_size != hinted_geometry.total_size for existing in geometries)
+    ):
+        geometries.insert(0, hinted_geometry)
+
+    scans = []
+    for geometry in geometries:
+        format_key, format_label = _recovery_geometry_label(geometry)
+        available = len(data) >= geometry.total_size
+        media_descriptor = (
+            data[21]
+            if trusted_boot_geometry is not None
+            and trusted_boot_geometry.total_size == geometry.total_size
+            and len(data) > 21
+            else next(
+                (
+                    int(layout["media_descriptor"])
+                    for layout in _PROTECTED_FAT12_LAYOUTS
+                    if _layout_total_size(layout) == geometry.total_size
+                ),
+                _YAMAHA_MEDIA_DESCRIPTOR,
+            )
+        )
+        fat_readable = []
+        fat_valid = []
+        fat_payloads = []
+        for fat_index in range(geometry.num_fats):
+            fat_offset = geometry.fat_offset + fat_index * geometry.fat_size
+            copy_available = fat_offset + geometry.fat_size <= len(data)
+            copy_readable = _recovery_range_fully_readable(
+                diagnostics,
+                fat_offset,
+                geometry.fat_size,
+            )
+            if copy_readable is None:
+                copy_readable = copy_available
+            fat_readable.append(bool(copy_available and copy_readable))
+            fat_payloads.append(
+                data[fat_offset:fat_offset + geometry.fat_size]
+                if copy_available and copy_readable
+                else None
+            )
+            fat_valid.append(
+                bool(
+                    copy_available
+                    and copy_readable
+                    and _fat_signature_at(data, fat_offset, media_descriptor)
+                )
+            )
+        fat_copies_consistent = None
+        if fat_payloads and all(payload is not None for payload in fat_payloads):
+            fat_copies_consistent = all(
+                payload == fat_payloads[0]
+                for payload in fat_payloads[1:]
+            )
+        allocated_data_clusters = None
+        fat_allocation_empty = None
+        if fat_payloads and fat_payloads[0] is not None and fat_valid[0]:
+            fat_entry_capacity = max(0, (len(fat_payloads[0]) * 2) // 3 - 2)
+            captured_cluster_capacity = max(
+                0,
+                (len(data) - geometry.data_offset) // max(1, geometry.cluster_size),
+            )
+            allocation_scan_clusters = min(
+                _fat12_data_cluster_count(geometry),
+                fat_entry_capacity,
+                captured_cluster_capacity,
+                4084,
+            )
+            allocated_data_clusters = sum(
+                1
+                for cluster in range(2, allocation_scan_clusters + 2)
+                if _fat12_next_cluster(fat_payloads[0], cluster) != 0
+            )
+            fat_allocation_empty = (
+                allocated_data_clusters == 0
+                if allocation_scan_clusters == _fat12_data_cluster_count(geometry)
+                else None
+            )
+
+        root_available = geometry.root_offset + geometry.root_size <= len(data)
+        root_readable = _recovery_range_fully_readable(
+            diagnostics,
+            geometry.root_offset,
+            geometry.root_size,
+        )
+        if root_readable is None:
+            root_readable = root_available
+        root_readable = bool(root_available and root_readable)
+        root_dir = (
+            data[geometry.root_offset:geometry.root_offset + geometry.root_size]
+            if root_available
+            else b""
+        )
+        root_plausible = (
+            bool(
+                _root_dir_looks_plausible(
+                    root_dir,
+                    0,
+                    geometry.root_dir_sectors,
+                )
+            )
+            if root_readable
+            else None
+        )
+        root_structurally_valid = (
+            bool(
+                _root_dir_is_structurally_valid(
+                    root_dir,
+                    0,
+                    geometry.root_dir_sectors,
+                )
+            )
+            if root_readable
+            else None
+        )
+        active_root_entries = None
+        pianodir_entry = None
+        if root_readable:
+            try:
+                active_root_entries = [
+                    entry
+                    for entry in _iter_fat_directory_entries(root_dir)
+                    if not (int(entry.get("attr") or 0) & 0x08)
+                    and not _is_windows_volume_metadata_path(entry.get("name", ""))
+                ]
+                pianodir_entry = any(
+                    is_pianodir_path(entry.get("name", ""))
+                    for entry in active_root_entries
+                )
+            except Exception:
+                active_root_entries = None
+                pianodir_entry = None
+
+        scans.append(
+            {
+                "format_key": format_key,
+                "format_label": format_label,
+                "total_bytes": int(geometry.total_size),
+                "total_sectors": int(geometry.total_sectors),
+                "selected_hint": bool(
+                    isinstance(disk_format_hint, DiskFormat)
+                    and disk_format_hint.size_bytes == geometry.total_size
+                ),
+                "boot_hint": bool(
+                    trusted_boot_geometry is not None
+                    and trusted_boot_geometry.total_size == geometry.total_size
+                ),
+                "image_has_full_geometry": bool(available),
+                "fat_copies_expected": int(geometry.num_fats),
+                "fat_copies_readable": sum(1 for value in fat_readable if value),
+                "fat_copies_valid": sum(1 for value in fat_valid if value),
+                "fat_area_readable": bool(fat_readable and all(fat_readable)),
+                "fat_copies_consistent": fat_copies_consistent,
+                "fat_allocated_data_clusters": allocated_data_clusters,
+                "fat_allocation_empty": fat_allocation_empty,
+                "root_directory_readable": root_readable,
+                "root_directory_structurally_valid": root_structurally_valid,
+                "root_directory_plausible": root_plausible,
+                "root_directory_entries": (
+                    len(active_root_entries)
+                    if active_root_entries is not None
+                    else None
+                ),
+                "pianodir_directory_entry_found": pianodir_entry,
+                "attempted": False,
+                "recovered_files": 0,
+                "error": "",
+            }
+        )
+
+    selected_bytes = int(diagnostics.get("selected_bytes") or 0)
+    detected_scan = None
+    if trusted_boot_geometry is not None:
+        detected_scan = next(
+            (
+                scan
+                for scan in scans
+                if int(scan.get("total_bytes") or 0) == trusted_boot_geometry.total_size
+            ),
+            None,
+        )
+    if detected_scan is None:
+        credible_scans = [
+            scan
+            for scan in scans
+            if int(scan.get("fat_copies_expected") or 0) > 0
+            and int(scan.get("fat_copies_valid") or 0)
+            == int(scan.get("fat_copies_expected") or 0)
+            and scan.get("fat_area_readable")
+            and scan.get("fat_copies_consistent")
+            and scan.get("root_directory_structurally_valid")
+        ]
+        if credible_scans:
+            detected_scan = max(
+                credible_scans,
+                key=lambda scan: (
+                    int(scan.get("fat_copies_valid") or 0),
+                    int(scan.get("fat_copies_readable") or 0),
+                    bool(scan.get("selected_hint")),
+                ),
+            )
+
+    if detected_scan is not None:
+        detected_bytes = int(detected_scan.get("total_bytes") or 0)
+        diagnostics.update(
+            {
+                "detected_format_key": str(detected_scan.get("format_key") or ""),
+                "detected_format_label": str(detected_scan.get("format_label") or ""),
+                "detected_bytes": detected_bytes,
+                "detection_basis": "validated_boot_sector"
+                if detected_scan.get("boot_hint")
+                else "fat_and_root",
+                "geometry_mismatch": bool(
+                    selected_bytes > 0
+                    and detected_bytes > 0
+                    and selected_bytes != detected_bytes
+                ),
+            }
+        )
+    elif diagnostics.get("geometry_mismatch") is None:
+        diagnostics["geometry_mismatch"] = None
+
+    filesystem_scan = detected_scan
+    if filesystem_scan is None and selected_bytes:
+        filesystem_scan = next(
+            (
+                scan
+                for scan in scans
+                if int(scan.get("total_bytes") or 0) == selected_bytes
+            ),
+            None,
+        )
+    if filesystem_scan is not None:
+        for key in (
+            "fat_copies_expected",
+            "fat_copies_valid",
+            "fat_area_readable",
+            "fat_copies_consistent",
+            "fat_allocated_data_clusters",
+            "fat_allocation_empty",
+            "root_directory_readable",
+            "root_directory_structurally_valid",
+            "root_directory_plausible",
+            "root_directory_entries",
+            "pianodir_directory_entry_found",
+        ):
+            diagnostics[key] = filesystem_scan.get(key)
+
+    diagnostics["geometry_scans"] = scans
+    diagnostics["human_report"] = format_floppy_recovery_diagnostics(diagnostics)
+
+
 def _write_recovered_files_to_image(
     files,
     temp_dir,
@@ -5696,17 +7458,200 @@ def _write_recovered_files_to_image(
     )
 
 
-def _recover_files_from_raw_image_bytes(data, disk_format_hint=None):
+def _recover_files_from_raw_image_bytes(data, disk_format_hint=None, diagnostics=None):
+    if isinstance(diagnostics, dict):
+        _populate_recovery_scan_diagnostics(
+            data,
+            diagnostics,
+            disk_format_hint=disk_format_hint,
+        )
     recovered = []
+    scans_by_size = {
+        int(scan.get("total_bytes") or 0): scan
+        for scan in (diagnostics or {}).get("geometry_scans", ())
+        if isinstance(scan, dict)
+    }
     for geometry in _recovery_geometries_for_data(data, disk_format_hint=disk_format_hint):
+        scan = scans_by_size.get(int(geometry.total_size))
+        if scan is not None:
+            scan["attempted"] = True
         try:
-            recovered.extend(_recover_files_from_fat_context(data, geometry))
+            geometry_files = _recover_files_from_fat_context(data, geometry)
+            recovered.extend(geometry_files)
+            if scan is not None:
+                scan["recovered_files"] = len(geometry_files)
         except FloppyOperationCancelled:
             raise
-        except Exception:
+        except Exception as exc:
+            if scan is not None:
+                scan["error"] = " ".join(str(exc).split())[:240]
             continue
     recovered.extend(_carve_recovery_files_from_bytes(data))
-    return _dedupe_recovered_files(recovered)
+    recovered = _dedupe_recovered_files(recovered)
+    if isinstance(diagnostics, dict):
+        diagnostics.update(_recovery_file_kind_counts(recovered))
+        diagnostics["human_report"] = format_floppy_recovery_diagnostics(diagnostics)
+    return recovered
+
+
+def _usb_recovery_no_data_message(diagnostics):
+    details = dict(diagnostics or {})
+    expected = max(0, int(details.get("expected_sectors") or 0))
+    readable = max(0, int(details.get("readable_sectors") or 0))
+    bad = max(0, int(details.get("bad_sectors") or 0))
+    unresolved = max(0, int(details.get("unresolved_sectors") or 0))
+    unattempted = max(0, int(details.get("unattempted_sectors") or 0))
+    readable_ratio = (readable / expected) if expected > 0 else 0.0
+    readable_percent = _diagnostic_percent(readable, expected)
+    selected_label = str(details.get("selected_format_label") or "the selected format")
+    detected_label = str(details.get("detected_format_label") or "another disk geometry")
+
+    # A credible geometry disagreement is more actionable than the downstream
+    # absence of carved files, so it deliberately takes precedence here.
+    if details.get("geometry_mismatch"):
+        if details.get("detection_basis") == "device_eof_after_readable_prefix":
+            detection_evidence = (
+                "the device reached a clean end-of-media boundary after a mostly readable prefix "
+                f"matching {detected_label}"
+            )
+        else:
+            detection_evidence = f"validated FAT/boot data identifies the disk as {detected_label}"
+        return (
+            f"Recovery was requested as {selected_label}, but {detection_evidence}. "
+            "The geometry mismatch can make valid sectors appear "
+            "unreadable. Retry recovery with the detected disk format. "
+            f"This pass read {readable} of {expected} selected sectors ({readable_percent}) and "
+            "found no recoverable PIANODIR.FIL, MIDI, or E-SEQ files."
+        )
+
+    if expected <= 0 or readable_ratio < 0.90:
+        stop_reason = str(details.get("stop_reason") or "")
+        stop_note = ""
+        if stop_reason == "soft_deadline":
+            if details.get("read_deadline_mode") == "windows_overlapped_cancel":
+                stop_note = (
+                    " Recovery reached its five-minute read deadline and requested cancellation "
+                    "of the pending Windows device read."
+                )
+            else:
+                stop_note = (
+                    " Recovery stopped at its five-minute soft deadline; a single synchronous "
+                    "operating-system read can finish after that limit."
+                )
+        elif stop_reason in {
+            "all_sectors_bad",
+            "mostly_bad_media",
+            "consecutive_bad_sectors",
+        }:
+            stop_note = " Recovery stopped early because the sampled media was all or mostly unreadable."
+        return (
+            f"Recovery could read only {readable} of {expected} sectors ({readable_percent}); "
+            f"{bad} were unreadable, {unresolved} attempted sectors remained unresolved, and "
+            f"{unattempted} were not attempted. "
+            "No identifiable PIANODIR.FIL, MIDI, or E-SEQ data was found in the readable sectors."
+            + stop_note
+        )
+
+    fully_readable = bad == 0 and unattempted == 0 and readable >= expected > 0
+    if fully_readable:
+        if int(details.get("nonzero_sectors") or 0) <= 0:
+            return (
+                f"Recovery read all {expected} sectors, but the captured disk contains no non-zero "
+                "sector data and no recognizable FAT, PIANODIR.FIL, MIDI, or E-SEQ structures. "
+                "The disk may be blank or unformatted."
+            )
+        if details.get("blank_fill_only"):
+            fill_value = str(details.get("blank_fill_value") or "a common blank-media value")
+            return (
+                f"Recovery read all {expected} sectors, but every byte has the repeated blank-media "
+                f"fill value {fill_value}, with no recognizable FAT, PIANODIR.FIL, MIDI, or E-SEQ "
+                "structures. The disk may be blank or unformatted."
+            )
+        fat_copies_expected = int(details.get("fat_copies_expected") or 0)
+        fat_copies_valid = int(details.get("fat_copies_valid") or 0)
+        credible_fat_metadata = bool(
+            details.get("detection_basis") == "validated_boot_sector"
+            or (
+                fat_copies_expected > 0
+                and fat_copies_valid == fat_copies_expected
+                and details.get("fat_copies_consistent") is True
+            )
+            or (
+                fat_copies_valid > 0
+                and details.get("root_directory_plausible") is True
+                and int(details.get("root_directory_entries") or 0) > 0
+            )
+        )
+        damaged_fat_metadata = bool(
+            credible_fat_metadata
+            and (
+                details.get("fat_area_readable") is False
+                or (
+                    fat_copies_expected > 0
+                    and fat_copies_valid < fat_copies_expected
+                )
+                or details.get("fat_copies_consistent") is False
+                or details.get("root_directory_readable") is False
+                or details.get("root_directory_structurally_valid") is False
+            )
+        )
+        if damaged_fat_metadata:
+            return (
+                f"Recovery read all {expected} sectors and recognized FAT12 filesystem metadata, "
+                "but the FAT copies and/or root directory are incomplete or inconsistent. "
+                "This points to filesystem damage rather than a blank disk; no recoverable "
+                "PIANODIR.FIL, MIDI, or E-SEQ files were found."
+            )
+        empty_root_filesystem_is_credible = (
+            fat_copies_expected > 0
+            and fat_copies_valid == fat_copies_expected
+            and details.get("fat_area_readable")
+            and details.get("fat_copies_consistent")
+            and details.get("root_directory_readable")
+            and details.get("root_directory_structurally_valid")
+            and details.get("root_directory_entries") == 0
+        )
+        if empty_root_filesystem_is_credible and details.get("fat_allocation_empty"):
+            return (
+                f"Recovery successfully read all {expected} sectors and found a readable FAT filesystem, "
+                "but its root directory contains no files. The disk appears to be formatted but blank."
+            )
+        if (
+            empty_root_filesystem_is_credible
+            and details.get("fat_allocation_empty") is False
+            and int(details.get("fat_allocated_data_clusters") or 0) > 0
+        ):
+            return (
+                f"Recovery successfully read all {expected} sectors and found FAT filesystem metadata, "
+                "but the root directory is empty while the FAT still marks "
+                f"{int(details.get('fat_allocated_data_clusters') or 0)} data cluster(s) as allocated. "
+                "This suggests orphaned files or filesystem damage; it is not evidence that the disk is blank."
+            )
+        if credible_fat_metadata:
+            return (
+                f"Recovery successfully read all {expected} sectors and found FAT12 filesystem metadata, "
+                "but no recoverable PIANODIR.FIL, MIDI, or E-SEQ files. The disk may contain "
+                "unsupported file types or an unsupported disk layout; it is not evidence that the disk is blank."
+            )
+        return (
+            f"Recovery successfully read all {expected} sectors and non-zero data is present, "
+            "but no recognizable FAT filesystem, PIANODIR.FIL, MIDI headers, or E-SEQ structures "
+            "were found. The disk may use an unsupported format; this is not evidence that it is blank."
+        )
+
+    return (
+        f"Recovery read {readable} of {expected} sectors ({readable_percent}), but found no "
+        "recoverable PIANODIR.FIL, MIDI, or E-SEQ files. Review the disk diagnostics for unreadable "
+        "areas, filesystem damage, or an unsupported format."
+    )
+
+
+def _finalize_recovery_diagnostics(diagnostics):
+    if not isinstance(diagnostics, dict):
+        return {}
+    diagnostics.pop("_sector_states", None)
+    diagnostics["human_report"] = format_floppy_recovery_diagnostics(diagnostics)
+    return diagnostics
 
 
 class FloppyImageSession:
@@ -5728,6 +7673,7 @@ class FloppyImageSession:
         virtual_files=None,
         conversion_warnings=None,
         read_only_format="",
+        recovery_diagnostics=None,
     ):
         self.source_path = source_path
         self.source_ext = source_ext
@@ -5748,6 +7694,7 @@ class FloppyImageSession:
         }
         self.conversion_warnings = tuple(conversion_warnings or ())
         self.read_only_format = str(read_only_format or "")
+        self.recovery_diagnostics = dict(recovery_diagnostics or {})
         self.repair_note = repair_result.note
         self.repair_changed = repair_result.changed
         self.extracted_dir = os.path.join(temp_dir, "extracted")
@@ -6652,19 +8599,30 @@ class FloppyImageSession:
                 if isinstance(disk_format_hint, DiskFormat)
                 else drive_info.size_bytes
             )
+            if int(read_size or 0) <= 0:
+                read_size = _YAMAHA_TOTAL_SIZE
+            diagnostics = _new_usb_floppy_recovery_diagnostics(
+                drive_info,
+                disk_format_hint,
+                read_size,
+                sector_size=USB_FLOPPY_RECOVERY_SECTOR_SIZE,
+                soft_deadline_seconds=USB_FLOPPY_RECOVERY_SOFT_DEADLINE_SECONDS,
+            )
             _notify_progress(
                 progress_callback,
                 0,
                 100,
-                "Copying a full floppy image for recovery. This may take a long time...",
+                "Copying a floppy image for recovery (five-minute soft limit)...",
             )
-            read_note = _read_block_device_recovery_image(
+            diagnostics = _read_block_device_recovery_image(
                 drive_info.path,
                 source_copy,
                 read_size,
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
+                diagnostics=diagnostics,
             )
+            read_note = _usb_recovery_read_note(diagnostics)
             format_note = ""
             if isinstance(disk_format_hint, DiskFormat):
                 format_note = (
@@ -6677,9 +8635,20 @@ class FloppyImageSession:
                 source_name=f"Recovered from {drive_info.display_name}",
                 extra_note=f"{read_note}{format_note} The source floppy was not modified.",
                 disk_format_hint=disk_format_hint,
+                recovery_diagnostics=diagnostics,
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
             )
+        except FloppyOperationCancelled as exc:
+            cancellation_diagnostics = getattr(exc, "diagnostics", None)
+            if not isinstance(cancellation_diagnostics, dict) or not cancellation_diagnostics:
+                cancellation_diagnostics = locals().get("diagnostics")
+            if isinstance(cancellation_diagnostics, dict):
+                cancellation_diagnostics["recovery_cancelled"] = True
+                _finalize_recovery_diagnostics(cancellation_diagnostics)
+                exc.diagnostics = dict(cancellation_diagnostics)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
         except Exception:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
@@ -6836,12 +8805,44 @@ class FloppyImageSession:
         extra_note="",
         disk_format_hint=None,
         gw_sector_reports=None,
+        recovery_diagnostics=None,
         progress_callback=None,
         cancel_callback=None,
     ):
         source_img = os.path.abspath(source_img)
         prepared = os.path.join(temp_dir, "recovery_prepared.img")
         working_img = os.path.join(temp_dir, "working.img")
+        diagnostics = (
+            recovery_diagnostics
+            if isinstance(recovery_diagnostics, dict)
+            else None
+        )
+
+        def attach_recovery_cancellation(exc):
+            if diagnostics is None:
+                return
+            diagnostics["recovery_cancelled"] = True
+            _finalize_recovery_diagnostics(diagnostics)
+            exc.diagnostics = dict(diagnostics)
+
+        source_data = None
+        if diagnostics is not None:
+            try:
+                with open(source_img, "rb") as handle:
+                    source_data = handle.read()
+                _populate_recovery_scan_diagnostics(
+                    source_data,
+                    diagnostics,
+                    disk_format_hint=disk_format_hint,
+                )
+            except OSError as exc:
+                diagnostics["filesystem_repair_error"] = str(exc)
+                _finalize_recovery_diagnostics(diagnostics)
+                raise FloppyRecoveryError(
+                    f"Recovery could not inspect the copied floppy image: {exc}\n\n"
+                    f"{diagnostics['human_report']}",
+                    diagnostics=diagnostics,
+                ) from exc
         try:
             _raise_if_cancelled(cancel_callback)
             _notify_progress(progress_callback, 72, 100, "Trying Yamaha/FAT repair before carving files...")
@@ -6849,6 +8850,10 @@ class FloppyImageSession:
             disk_format = _disk_format_for_image(prepared)
             listing = read_image_listing(prepared)
             if listing.entries:
+                if diagnostics is not None:
+                    diagnostics.update(_listing_recovery_kind_counts(listing))
+                    diagnostics["filesystem_repair_succeeded"] = True
+                    _finalize_recovery_diagnostics(diagnostics)
                 shutil.copy2(prepared, working_img)
                 note = "Recovery opened a repaired editable image copy. Review before saving."
                 if extra_note:
@@ -6863,18 +8868,36 @@ class FloppyImageSession:
                     source_kind="recovered_image",
                     source_name=source_name,
                     gw_sector_reports=gw_sector_reports,
+                    recovery_diagnostics=diagnostics,
                 )
-        except FloppyOperationCancelled:
+        except FloppyOperationCancelled as exc:
+            attach_recovery_cancellation(exc)
             raise
-        except Exception:
-            pass
+        except Exception as exc:
+            if diagnostics is not None:
+                diagnostics["filesystem_repair_succeeded"] = False
+                diagnostics["filesystem_repair_error"] = " ".join(str(exc).split())[:500]
 
-        _raise_if_cancelled(cancel_callback)
-        _notify_progress(progress_callback, 78, 100, "Scanning raw image for recoverable songs...")
-        with open(source_img, "rb") as handle:
-            source_data = handle.read()
+        try:
+            _raise_if_cancelled(cancel_callback)
+            _notify_progress(
+                progress_callback,
+                78,
+                100,
+                "Scanning raw image for recoverable songs...",
+            )
+        except FloppyOperationCancelled as exc:
+            attach_recovery_cancellation(exc)
+            raise
+        if source_data is None:
+            with open(source_img, "rb") as handle:
+                source_data = handle.read()
 
-        recovered_files = _recover_files_from_raw_image_bytes(source_data, disk_format_hint=disk_format_hint)
+        recovered_files = _recover_files_from_raw_image_bytes(
+            source_data,
+            disk_format_hint=disk_format_hint,
+            diagnostics=diagnostics,
+        )
         if os.path.isfile(prepared):
             try:
                 with open(prepared, "rb") as handle:
@@ -6889,21 +8912,47 @@ class FloppyImageSession:
             except OSError:
                 pass
 
-        recovered_img, disk_format = _write_recovered_files_to_image(
-            recovered_files,
-            temp_dir,
-            source_data,
-            disk_format_hint=disk_format_hint,
-            progress_callback=progress_callback,
-            cancel_callback=cancel_callback,
-        )
-        shutil.copy2(recovered_img, working_img)
+        if diagnostics is not None:
+            diagnostics.update(_recovery_file_kind_counts(recovered_files))
+            if not recovered_files:
+                _finalize_recovery_diagnostics(diagnostics)
+                primary_message = _usb_recovery_no_data_message(diagnostics)
+                raise FloppyRecoveryError(
+                    f"{primary_message}\n\n{diagnostics['human_report']}",
+                    diagnostics=diagnostics,
+                )
+
+        try:
+            recovered_img, disk_format = _write_recovered_files_to_image(
+                recovered_files,
+                temp_dir,
+                source_data,
+                disk_format_hint=disk_format_hint,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+            )
+            shutil.copy2(recovered_img, working_img)
+        except FloppyOperationCancelled as exc:
+            attach_recovery_cancellation(exc)
+            raise
+        except Exception as exc:
+            if diagnostics is None:
+                raise
+            diagnostics["recovery_output_error"] = " ".join(str(exc).split())[:500]
+            _finalize_recovery_diagnostics(diagnostics)
+            raise FloppyRecoveryError(
+                f"Recovery found identifiable data but could not create the editable recovery image: {exc}\n\n"
+                f"{diagnostics['human_report']}",
+                diagnostics=diagnostics,
+            ) from exc
         note = (
             f"Recovery created an editable image copy from {len(recovered_files)} recovered file(s). "
             "Some names, order, or damaged song data may be missing."
         )
         if extra_note:
             note += f" {str(extra_note).strip()}"
+        if diagnostics is not None:
+            _finalize_recovery_diagnostics(diagnostics)
         return cls(
             working_img,
             "img",
@@ -6914,6 +8963,7 @@ class FloppyImageSession:
             source_kind="recovered_image",
             source_name=source_name,
             gw_sector_reports=gw_sector_reports,
+            recovery_diagnostics=diagnostics,
         )
 
     @property
