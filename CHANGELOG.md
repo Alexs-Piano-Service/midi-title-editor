@@ -23,6 +23,12 @@ with release sections grouped by version and date.
   Failure messages distinguish low read coverage, geometry mismatch, genuinely
   blank media, and fully readable but unsupported data.
 
+### Fixed
+
+- PianoDisc System 3 IMG/HFE images now accept production disks that omit the
+  optional version text, decode multi-line catalog titles correctly, and keep
+  later valid songs when an individual catalog record is damaged.
+
 ## [0.8.1] - 2026-08-23
 
 ### Added

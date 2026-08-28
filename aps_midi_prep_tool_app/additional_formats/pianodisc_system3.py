@@ -66,13 +66,11 @@ def _system_header_offset(data: bytes) -> int | None:
     search_limit = min(len(data), 64 * SECTOR_SIZE)
     offset = data.find(SYSTEM_SIGNATURE, 0, search_limit)
     while offset >= 0:
-        if (
-            offset % SECTOR_SIZE == 0
-            and data[
-                offset + SYSTEM_VERSION_OFFSET:
-                offset + SYSTEM_VERSION_OFFSET + len(SYSTEM_VERSION)
-            ] == SYSTEM_VERSION
-        ):
+        # Real production disks do not consistently include the optional
+        # "System 3" version text used by early fixtures. The sector-aligned
+        # product signature plus the validated catalog is the stable format
+        # identifier.
+        if offset % SECTOR_SIZE == 0:
             return offset
         offset = data.find(SYSTEM_SIGNATURE, offset + 1, search_limit)
     return None
@@ -87,19 +85,27 @@ def looks_like_pianodisc_system3_bytes(data: bytes) -> bool:
 
 
 def _decode_catalog_title(raw_title: bytes, number: int) -> str:
-    raw_title = raw_title.split(b"\x00", 1)[0].rstrip(b" \xff\xfe")
+    raw_title = (
+        raw_title.split(b"\x00", 1)[0]
+        .replace(b"\xfe", b" ")
+        .replace(b"\xff", b" ")
+        .rstrip(b" ")
+    )
     title = raw_title.decode("cp1252", errors="replace")
     title = "".join(" " if ord(char) < 32 else char for char in title)
     title = re.sub(r"\s+", " ", title).strip()
     return title or f"PianoDisc Track {number:02d}"
 
 
-def parse_pianodisc_system3_image(data: bytes) -> tuple[PianoDiscSong, ...]:
-    """Parse the catalog and return songs in catalog order.
+def _parse_pianodisc_system3_catalog(
+    data: bytes,
+) -> tuple[tuple[PianoDiscSong, ...], tuple[str, ...]]:
+    """Parse valid catalog songs and retain per-record damage reports.
 
     System 3 catalog entries hold a sector count and starting sector.  Song
-    extents are copied exactly as described by the catalog; malformed extents
-    reject the image rather than reading outside it.
+    extents are copied exactly as described by the catalog. A malformed active
+    record is skipped rather than reading outside the image or hiding valid
+    songs that follow it.
     """
     data = bytes(data)
     header_offset = _system_header_offset(data)
@@ -113,6 +119,7 @@ def parse_pianodisc_system3_image(data: bytes) -> tuple[PianoDiscSong, ...]:
         raise PianoDiscSystem3Error("The PianoDisc catalog is truncated.")
 
     songs = []
+    errors = []
     total_sectors = len(data) // SECTOR_SIZE
     max_records = min(256, (len(data) - catalog_offset) // CATALOG_RECORD_SIZE)
     for record_index in range(max_records):
@@ -123,23 +130,26 @@ def parse_pianodisc_system3_image(data: bytes) -> tuple[PianoDiscSong, ...]:
             break
 
         number = record_index + 1
+        title = _decode_catalog_title(record[:CATALOG_TITLE_SIZE], number)
         sector_count = int.from_bytes(record[24:26], "little")
         start_sector = int.from_bytes(record[26:28], "little")
         if sector_count <= 0:
-            raise PianoDiscSystem3Error(
-                f"PianoDisc catalog entry {number} has no allocated sectors."
+            errors.append(
+                f"Track {number:02d} ({title}): catalog entry has no allocated sectors."
             )
+            continue
         if start_sector <= 0 or start_sector + sector_count > total_sectors:
-            raise PianoDiscSystem3Error(
-                f"PianoDisc catalog entry {number} points outside the image."
+            errors.append(
+                f"Track {number:02d} ({title}): catalog entry points outside the image."
             )
+            continue
 
         start = start_sector * SECTOR_SIZE
         end = (start_sector + sector_count) * SECTOR_SIZE
         songs.append(
             PianoDiscSong(
                 number=number,
-                title=_decode_catalog_title(record[:CATALOG_TITLE_SIZE], number),
+                title=title,
                 start_sector=start_sector,
                 sector_count=sector_count,
                 data=data[start:end],
@@ -147,8 +157,15 @@ def parse_pianodisc_system3_image(data: bytes) -> tuple[PianoDiscSong, ...]:
         )
 
     if not songs:
-        raise PianoDiscSystem3Error("The PianoDisc System 3 catalog is empty or invalid.")
-    return tuple(songs)
+        detail = errors[0] if errors else "The PianoDisc System 3 catalog is empty or invalid."
+        raise PianoDiscSystem3Error(detail)
+    return tuple(songs), tuple(errors)
+
+
+def parse_pianodisc_system3_image(data: bytes) -> tuple[PianoDiscSong, ...]:
+    """Parse the catalog and return valid songs in catalog order."""
+    songs, _errors = _parse_pianodisc_system3_catalog(data)
+    return songs
 
 
 def _read_source_delay(stream: bytes, offset: int) -> tuple[int | None, int]:
@@ -374,9 +391,9 @@ def convert_pianodisc_system3_image(
     long_filenames: bool = False,
 ) -> PianoDiscImageConversion:
     """Convert every valid catalog song and report damaged entries separately."""
-    songs = parse_pianodisc_system3_image(data)
+    songs, catalog_errors = _parse_pianodisc_system3_catalog(data)
     files = []
-    errors = []
+    errors = list(catalog_errors)
     used_names = set()
     for song in songs:
         try:

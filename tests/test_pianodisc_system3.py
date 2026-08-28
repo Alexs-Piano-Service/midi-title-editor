@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from aps_midi_prep_tool_app import floppy_image
 from aps_midi_prep_tool_app.additional_formats import pianodisc_system3
 from aps_midi_prep_tool_app.bulk_extraction import bulk_extract_images
 from aps_midi_prep_tool_app.floppy_image import FloppyImageSession
@@ -131,6 +132,63 @@ def test_recognizes_catalog_and_converts_timing_to_smf0(tmp_path):
     assert last_tick == 240 + pianodisc_system3.END_PAUSE_TICKS
 
 
+def test_recognizes_production_header_without_optional_version_text():
+    image_data = bytearray(
+        _system3_image([("FIRSTþSECOND", _simple_song_stream())])
+    )
+    system_offset = 9 * pianodisc_system3.SECTOR_SIZE
+    version_offset = system_offset + pianodisc_system3.SYSTEM_VERSION_OFFSET
+    image_data[
+        version_offset:version_offset + len(pianodisc_system3.SYSTEM_VERSION)
+    ] = b"\x00" * len(pianodisc_system3.SYSTEM_VERSION)
+
+    assert pianodisc_system3.looks_like_pianodisc_system3_bytes(image_data)
+    songs = pianodisc_system3.parse_pianodisc_system3_image(image_data)
+    assert [song.title for song in songs] == ["FIRST SECOND"]
+    conversion = pianodisc_system3.convert_pianodisc_system3_image(image_data)
+    assert [item.filename for item in conversion.files] == ["PIANO001.MID"]
+    assert conversion.errors == ()
+
+
+def test_corrupt_catalog_record_does_not_hide_later_valid_songs():
+    image_data = bytearray(
+        _system3_image(
+            [
+                ("First", _simple_song_stream()),
+                ("Damaged", _simple_song_stream()),
+                ("Third", _simple_song_stream()),
+            ]
+        )
+    )
+    catalog_offset = 10 * pianodisc_system3.SECTOR_SIZE
+    damaged_record = catalog_offset + pianodisc_system3.CATALOG_RECORD_SIZE
+    image_data[damaged_record + 24:damaged_record + 26] = b"\xFE\xFE"
+
+    songs = pianodisc_system3.parse_pianodisc_system3_image(image_data)
+    assert [(song.number, song.title) for song in songs] == [
+        (1, "First"),
+        (3, "Third"),
+    ]
+    conversion = pianodisc_system3.convert_pianodisc_system3_image(image_data)
+    assert [item.filename for item in conversion.files] == [
+        "PIANO001.MID",
+        "PIANO003.MID",
+    ]
+    assert len(conversion.errors) == 1
+    assert "Track 02 (Damaged)" in conversion.errors[0]
+    assert "outside the image" in conversion.errors[0]
+
+
+def test_aligned_product_signature_without_valid_catalog_is_rejected():
+    image_data = bytearray([0xFF] * 737_280)
+    system_offset = 9 * pianodisc_system3.SECTOR_SIZE
+    image_data[
+        system_offset:system_offset + len(pianodisc_system3.SYSTEM_SIGNATURE)
+    ] = pianodisc_system3.SYSTEM_SIGNATURE
+
+    assert not pianodisc_system3.looks_like_pianodisc_system3_bytes(image_data)
+
+
 def test_running_status_and_piano_program_are_preserved():
     stream = bytes(
         [
@@ -187,7 +245,15 @@ def test_damaged_catalog_song_is_reported_without_losing_good_songs():
 
 def test_floppy_session_exposes_decoded_midi_files_for_raw_images(tmp_path):
     image_path = Path(tmp_path) / "pianodisc.img"
-    image_path.write_bytes(_system3_image([("Session Song", _simple_song_stream())]))
+    image_data = bytearray(
+        _system3_image([("Session Song", _simple_song_stream())])
+    )
+    system_offset = 9 * pianodisc_system3.SECTOR_SIZE
+    version_offset = system_offset + pianodisc_system3.SYSTEM_VERSION_OFFSET
+    image_data[
+        version_offset:version_offset + len(pianodisc_system3.SYSTEM_VERSION)
+    ] = b"\x00" * len(pianodisc_system3.SYSTEM_VERSION)
+    image_path.write_bytes(image_data)
 
     session = FloppyImageSession.load(image_path)
     try:
@@ -197,6 +263,45 @@ def test_floppy_session_exposes_decoded_midi_files_for_raw_images(tmp_path):
         assert [entry.path for entry in entries] == ["PIANO001.MID"]
         extracted = Path(session.extract_file(entries[0].path))
         assert extracted.read_bytes().startswith(b"MThd")
+    finally:
+        session.cleanup()
+
+
+def test_converted_hfe_routes_versionless_production_disk_to_pianodisc(
+    monkeypatch,
+    tmp_path,
+):
+    image_data = bytearray(
+        _system3_image([("Converted Session", _simple_song_stream())])
+    )
+    system_offset = 9 * pianodisc_system3.SECTOR_SIZE
+    version_offset = system_offset + pianodisc_system3.SYSTEM_VERSION_OFFSET
+    image_data[
+        version_offset:version_offset + len(pianodisc_system3.SYSTEM_VERSION)
+    ] = b"\x00" * len(pianodisc_system3.SYSTEM_VERSION)
+    source_path = Path(tmp_path) / "pianodisc.hfe"
+    source_path.write_bytes(b"mock HFE source")
+
+    def fake_convert(
+        _input_path,
+        output_path,
+        _disk_format,
+        cancel_callback=None,
+        *,
+        allow_sector_failures=False,
+    ):
+        Path(output_path).write_bytes(image_data)
+        return ""
+
+    monkeypatch.setattr(floppy_image, "_gw_convert", fake_convert)
+
+    session = FloppyImageSession.load(source_path)
+    try:
+        assert session.read_only_format == "pianodisc_system3"
+        assert session.disk_format.key == "pianodisc.system3"
+        assert [entry.path for entry in session.list_entries().entries] == [
+            "PIANO001.MID"
+        ]
     finally:
         session.cleanup()
 
