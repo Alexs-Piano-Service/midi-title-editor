@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/images/aps-readme-mark.png" width="104" alt="APS MIDI Prep Tool piano and MIDI logo">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/alexs-piano-service-logo-dark.png">
+    <img src="aps_midi_prep_tool_app/assets/aps_wordmark_small.png" width="300" alt="Alex's Piano Service logo">
+  </picture>
 </p>
 
 <h1 align="center">APS MIDI Prep Tool</h1>
