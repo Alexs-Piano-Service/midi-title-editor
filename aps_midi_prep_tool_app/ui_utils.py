@@ -31,7 +31,7 @@ def pixmap_from_base64(data):
     return pixmap
 
 
-def center_dialog_on_parent(dialog, parent=None):
+def center_dialog_on_parent(dialog, parent=None, *, adjust_size=True):
     parent_widget = parent or dialog.parentWidget()
     screen = None
     target_geometry = None
@@ -51,7 +51,8 @@ def center_dialog_on_parent(dialog, parent=None):
             return
         target_geometry = screen.availableGeometry()
 
-    dialog.adjustSize()
+    if adjust_size:
+        dialog.adjustSize()
     dialog_geometry = dialog.frameGeometry()
     if dialog_geometry.width() <= 0 or dialog_geometry.height() <= 0:
         dialog_geometry.setSize(dialog.sizeHint())

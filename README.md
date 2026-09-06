@@ -86,9 +86,56 @@ playback, and process an entire folder at once.
 ## Build IMG and HFE floppy-emulator disk sets
 
 Turn a folder of MIDI or E-SEQ songs into numbered IMG or HFE images for a
-floppy emulator such as Nalbantov. Choose the disk format, reserve a safety
-margin, include subfolders, create song lists, and build Yamaha E-SEQ disks with
-`PIANODIR.FIL` automatically.
+floppy emulator such as Nalbantov. Choose how to organize the set:
+
+- **One album per folder** starts a separate disk for each folder containing
+  songs. For example, songs in `DSKA001/` go on `DSKA0001.hfe`, and songs in
+  `DSKA002/` start on `DSKA0002.hfe`. Large albums continue on extra disks;
+  different folders never share a disk. Empty folders are skipped.
+- **Fill disks automatically** pools the songs and fills each disk before
+  starting the next, regardless of source folders.
+
+**One album per folder** always scans nested folders. Each folder's own songs
+stay together, including songs directly in the selected folder. In **Fill disks
+automatically**, **Include nested folders** is optional; turn it off to use only
+the selected folder. Its setting is remembered when switching layouts. Album
+folders and songs follow natural number order; shuffle can randomize songs
+within each album.
+
+**Include Song Lists** applies to the entire build. It writes one combined text
+file in the output folder, organized by image (`DSKA0001.hfe`, `DSKA0002.hfe`,
+and so on), with every album and track in playback order. Recursive builds
+include all nested albums, even when an album spans several images. Automatic
+filling identifies each track's source album when folders share an image.
+Tracks use available song titles, falling back to filenames when untitled.
+
+Choose MIDI or Yamaha E-SEQ contents, IMG or HFE output, and disk capacity.
+Expand **Naming and capacity options** to change the
+image prefix, starting number, free-space reserve, or shared album title.
+E-SEQ disks get a `PIANODIR.FIL` automatically. In folder mode, album titles
+come from each folder's `PDISK.MNG` when available, otherwise its folder name;
+your shared album-title override takes precedence. `PSONG.MNG` supplies song
+titles in either layout, matching original filenames and the numbered long
+filenames produced by extraction. Catalogs are read separately in each folder.
+Both original CRLF catalogs and copies with LF-only line endings are supported.
+Older numeric extraction names (such as `01 - 01.mid`) and identical renamed
+copies in the same folder can also be matched to their catalog records.
+Matching song titles from `INDEX.csv` override catalog titles, with a folder's
+own index taking precedence over the collection's index. Embedded titles and
+filenames remain the fallbacks when catalog metadata is missing or invalid.
+The combined list includes these song and album titles.
+MIDI images also include valid `PSONG.MNG` and `PDISK.MNG` files when available
+in their source folders, independently of **Include Song Lists**. Song catalogs
+follow each image's actual filenames and track order, including shuffled songs
+and albums split across disks. Automatic filling combines catalog entries when
+folders share an image; such a compilation's disk title uses its image number.
+If a source MIDI contains bad-sector recovery filler or its embedded title
+cannot be safely updated, the builder can preserve its original bytes and
+store the title in its available `PSONG.MNG` catalog. The completion dialog and
+combined song list identify affected images and files. This preserves damaged
+recordings; it does not repair missing music. E-SEQ conversion still requires
+readable MIDI data.
+Existing users keep their saved automatic-fill and subfolder settings.
 
 [![Build numbered IMG or HFE floppy emulator disks for Nalbantov](docs/images/aps-midi-prep-tool-hfe-emulator-disk-builder.png)](docs/images/aps-midi-prep-tool-hfe-emulator-disk-builder.png)
 

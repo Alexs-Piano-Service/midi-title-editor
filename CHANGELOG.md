@@ -9,6 +9,18 @@ with release sections grouped by version and date.
 
 ### Added
 
+- MIDI emulator images now include available `PSONG.MNG` and `PDISK.MNG`
+  catalogs. Song records follow output filenames, title edits, shuffling and
+  disk splits; disk-space and directory-slot reservations include the catalogs.
+  This is independent of the combined song-list option.
+- Emulator disk sets now read each folder's `PSONG.MNG` song titles and
+  `PDISK.MNG` album title, including extraction-renamed songs, and include them
+  in generated contents and the combined list. Explicit index edits and album
+  overrides retain priority. Bulk extraction shares the PDISK album reader.
+- Build Emulator Disk Set can create separate albums from every song folder,
+  with folder-based E-SEQ album titles, per-folder song shuffling and INDEX.csv
+  titles, and additional disks for albums that exceed capacity. Album contents
+  never mix across folders, and optional song lists identify each source folder.
 - Physical USB-floppy recovery now records sector-level read coverage, fallback
   results, unreadable and unresolved ranges, timing, trusted geometry evidence,
   FAT/root-directory checks, recognizable raw signatures, and an image SHA-256.
@@ -17,6 +29,17 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- `Include Song Lists` is a build-wide control outside the individual disk
+  settings. One combined overview covers all images, albums, and tracks,
+  including nested albums and albums split across images. MIDI lists now name
+  their albums, and automatic-fill lists retain each track's source album.
+- The emulator-set dialog separates disk layout from recursive scanning and
+  groups source and output controls, with expandable naming/capacity options
+  and a live filename example. Automatic disk filling and all existing options
+  remain available; previous scan preferences and packing behavior are retained.
+- Folder-album layout now always includes nested folders. The scan checkbox
+  stays checked and disabled in this layout; automatic-fill layout retains
+  its own remembered scan preference.
 - Direct USB-floppy recovery now uses smaller bulk reads with one sector-level
   fallback pass, a five-minute soft deadline, progress and poor-media cutoffs,
   and automatic clamping when a reliable smaller FAT12 geometry is detected.
@@ -25,6 +48,19 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Extraction and batch disk creation now read MNG catalogs whose CRLF endings
+  were converted to LF. Album/song fields retain their correct offsets, and
+  generated catalogs use CRLF. Batch creation also recognizes old numeric
+  extraction names and identical renamed copies within the same folder.
+- Catalog-backed MIDI disk sets no longer abort when a damaged song prevents
+  an embedded-title update. Original MIDI bytes are preserved and titles stay
+  in `PSONG.MNG`. Known bad-sector filler is reported even when title editing
+  could succeed; completion warnings and song lists name affected images and
+  files. Missing musical data is not repaired or converted to E-SEQ.
+- The emulator-set dialog now centers only when opened and keeps its geometry
+  when changing layout modes or expanding options. A shorter form and reserved
+  description space avoid resize/recenter feedback and keep controls stable;
+  the action button also retains its `Build Disk Set` label.
 - PianoDisc System 3 IMG/HFE images now accept production disks that omit the
   optional version text, decode multi-line catalog titles correctly, and keep
   later valid songs when an individual catalog record is damaged.

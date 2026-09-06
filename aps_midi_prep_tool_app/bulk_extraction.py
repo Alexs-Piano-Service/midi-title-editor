@@ -27,7 +27,10 @@ from .midi_metadata import (
     read_eseq_title_from_file,
     read_first_title_from_midi,
 )
-from .smart_pianosoft import smart_pianosoft_catalog_from_session
+from .smart_pianosoft import (
+    smart_pianosoft_catalog_from_session,
+    smart_pianosoft_disk_title_from_session,
+)
 
 
 _INVALID_FOLDER_CHARS = '<>:"/\\|?*'
@@ -133,7 +136,7 @@ def _album_name_from_image(session, entries):
                 return album_name
         except Exception:
             pass
-    return ""
+    return smart_pianosoft_disk_title_from_session(session, entries)
 
 
 def _relative_key(parts):

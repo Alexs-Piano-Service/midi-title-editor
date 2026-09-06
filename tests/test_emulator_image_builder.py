@@ -28,12 +28,18 @@ from aps_midi_prep_tool_app.floppy_image import (
     FloppyImageError,
     FloppyImageSession,
     FloppyOperationCancelled,
+    allocated_size,
+    create_blank_floppy_image,
     read_image_listing,
 )
 from aps_midi_prep_tool_app.midi_metadata import (
     extract_eseq_title_from_file,
     extract_first_title_from_midi,
     is_midi_file,
+)
+from aps_midi_prep_tool_app.smart_pianosoft import (
+    parse_smart_pianosoft_disk_title,
+    parse_smart_pianosoft_song_catalog,
 )
 
 
@@ -770,6 +776,7 @@ def test_include_song_lists_writes_every_image_and_song_in_packed_order(
         "Album: Customer Album\n"
         "Catalog: LIST-0005\n"
         "\n"
+        "Source album: songs\n"
         "1. First Song\n"
         "2. Second Song\n"
         "\n"
@@ -777,6 +784,7 @@ def test_include_song_lists_writes_every_image_and_song_in_packed_order(
         "Album: Customer Album\n"
         "Catalog: LIST-0006\n"
         "\n"
+        "Source album: songs\n"
         "1. Third Song\n"
     )
 
@@ -934,3 +942,747 @@ def test_rejects_a_set_that_would_run_past_slot_9999(tmp_path, monkeypatch):
             output_ext="img",
             output_content="eseq",
         )
+
+
+def _image_songs_and_metadata(image_path, output_content):
+    session = FloppyImageSession.load(image_path)
+    try:
+        listing = session.list_entries()
+        songs = []
+        for entry in listing.entries:
+            if entry.name in {PIANODIR_FILENAME, "PSONG.MNG", "PDISK.MNG"}:
+                continue
+            path = session.extract_file(entry.path)
+            songs.append(
+                extract_first_title_from_midi(path)
+                if output_content == "midi" else extract_eseq_title_from_file(path)
+            )
+        metadata = (
+            read_pianodir_metadata_from_file(session.extract_file(PIANODIR_FILENAME))
+            if output_content == "eseq" else None
+        )
+        return songs, metadata
+    finally:
+        session.cleanup()
+
+
+@pytest.mark.parametrize("output_content", ["midi", "eseq"])
+@pytest.mark.parametrize("output_ext", ["img", "hfe"])
+def test_folder_albums_keep_root_nested_and_sibling_songs_separate(
+    tmp_path, output_content, output_ext,
+):
+    source = tmp_path / "Collection"
+    for relative in ["DSKA010", "DSKA002/Bonus", "Empty"]:
+        (source / relative).mkdir(parents=True)
+    (source / "Root.mid").write_bytes(_midi_bytes("Root song"))
+    for relative, title in [
+        ("DSKA002/Song 10.mid", "Second album ten"),
+        ("DSKA002/Song 2.mid", "Second album two"),
+        ("DSKA010/Song 2.mid", "Tenth album"),
+        ("DSKA002/Bonus/Song 2.mid", "Bonus song"),
+    ]:
+        (source / relative).write_bytes(_midi_bytes(title))
+    eseq_path = source / "DSKA010" / "Song 2.fil"
+    convert_midi_file_to_eseq_path(source / "DSKA010" / "Song 2.mid", eseq_path)
+    (source / "DSKA010" / "Song 2.mid").unlink()
+    (source / "Empty" / "PIANODIR.FIL").write_bytes(b"not a song")
+
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", disk_layout="folders",
+        output_content=output_content, output_ext=output_ext,
+        prefix="DSKB", starting_number=12, include_song_lists=True,
+    )
+
+    assert result.disk_layout == "folders"
+    assert result.song_files_found == result.files_prepared == 5
+    assert result.images_created == 4
+    assert [Path(path).name for path in result.output_paths] == [
+        f"DSKB{index:04d}.{output_ext}" for index in range(12, 16)
+    ]
+    expected = [
+        (["Root song"], "Collection"),
+        (["Second album two", "Second album ten"], "DSKA002"),
+        (["Tenth album"], "DSKA010"),
+        (["Bonus song"], "Bonus"),
+    ]
+    for index, (path, (titles, album)) in enumerate(zip(result.output_paths, expected), 12):
+        songs, metadata = _image_songs_and_metadata(path, output_content)
+        assert songs == titles
+        if metadata is not None:
+            assert metadata.disk_title == album
+            assert metadata.catalog_number == f"DSKB-{index:04d}"
+    song_list = Path(result.song_list_path).read_text(encoding="utf-8")
+    assert "Folder: Collection" in song_list
+    assert f"Folder: {Path('DSKA002') / 'Bonus'}" in song_list
+    assert "Album: DSKA002" in song_list
+    sections = song_list.split("\nImage ")[1:]
+    assert len(sections) == result.images_created
+    for index, (section, (titles, album)) in enumerate(zip(sections, expected), 12):
+        assert f"DSKB{index:04d}.{output_ext}" in section
+        assert f"Album: {album}\n" in section
+        assert [line for line in section.splitlines() if line.split(". ", 1)[0].isdigit()] == [
+            f"{track}. {title}" for track, title in enumerate(titles, 1)
+        ]
+    assert list((tmp_path / "images").glob("*.txt")) == [Path(result.song_list_path)]
+
+
+@pytest.mark.parametrize("disk_layout", ["folders", "fill"])
+def test_only_fill_layout_allows_nonrecursive_selected_folder_scope(tmp_path, disk_layout):
+    source = tmp_path / "songs"
+    child = source / "child"
+    child.mkdir(parents=True)
+    grandchild = child / "nested"
+    grandchild.mkdir()
+    (source / "Root.mid").write_bytes(_midi_bytes("Root"))
+    (child / "Child.mid").write_bytes(_midi_bytes("Child"))
+    (grandchild / "Nested.mid").write_bytes(_midi_bytes("Nested"))
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", output_ext="img", output_content="midi",
+        disk_layout=disk_layout, include_subfolders=False,
+    )
+    expected = [["Root"], ["Child"], ["Nested"]] if disk_layout == "folders" else [["Root"]]
+    assert result.song_files_found == len(expected)
+    assert result.images_created == len(expected)
+    assert [_image_songs_and_metadata(path, "midi")[0] for path in result.output_paths] == expected
+
+
+def test_fill_layout_still_combines_folders_into_one_disk(tmp_path):
+    source = tmp_path / "songs"
+    for folder in ["Album 2", "Album 10"]:
+        (source / folder).mkdir(parents=True)
+        (source / folder / "Song.mid").write_bytes(_midi_bytes(folder))
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", output_ext="img", output_content="midi",
+        disk_layout="fill",
+    )
+    assert result.images_created == 1
+    assert _image_songs_and_metadata(result.output_paths[0], "midi")[0] == [
+        "Album 2", "Album 10",
+    ]
+
+
+@pytest.mark.parametrize("output_content", ["midi", "eseq"])
+def test_oversized_folder_spills_without_filling_remainder_from_next_album(
+    tmp_path, monkeypatch, output_content,
+):
+    source = tmp_path / "songs"
+    for folder in ["Album 1", "Album 2"]:
+        (source / folder).mkdir(parents=True)
+    for index in range(1, 4):
+        payload = (
+            _large_midi_bytes(f"Song {index}", 250_000)
+            if output_content == "midi" else _midi_bytes(f"Song {index}")
+        )
+        (source / "Album 1" / f"Song {index}.mid").write_bytes(payload)
+    (source / "Album 2" / "Last.mid").write_bytes(_midi_bytes("Last album"))
+    monkeypatch.setattr(emulator_image_builder, "PIANODIR_MAX_TRACKS", 2)
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", output_ext="img", output_content=output_content,
+        disk_layout="folders", include_song_lists=True,
+    )
+    assert result.images_created == 3
+    images = [_image_songs_and_metadata(path, output_content) for path in result.output_paths]
+    assert [songs for songs, metadata in images] == [
+        ["Song 1", "Song 2"], ["Song 3"], ["Last album"],
+    ]
+    if output_content == "eseq":
+        assert [metadata.disk_title for songs, metadata in images] == [
+            "Album 1", "Album 1", "Album 2",
+        ]
+    for path in result.output_paths:
+        assert read_image_listing(path).free_space >= DEFAULT_SAFETY_MARGIN_BYTES
+    text = Path(result.song_list_path).read_text(encoding="utf-8")
+    sections = text.split("\nImage ")[1:]
+    for index, (section, (titles, _metadata), album) in enumerate(zip(
+        sections, images, ["Album 1", "Album 1", "Album 2"],
+    ), 1):
+        assert f"DSKA{index:04d}.img" in section
+        assert f"Album: {album}\n" in section
+        assert "\n".join(f"{track}. {title}" for track, title in enumerate(titles, 1)) in section
+    assert len(sections) == 3
+    assert list((tmp_path / "images").glob("*.txt")) == [Path(result.song_list_path)]
+
+
+def test_folder_shuffle_and_local_index_titles_preserve_album_boundaries(tmp_path, monkeypatch):
+    source = tmp_path / "songs"
+    source.mkdir()
+    _write_index_csv(source, [
+        {"output_folder": "Album 2", "output_file": "Song 1.mid", "title": "Root title"},
+        {"output_folder": "Album 1", "output_file": "Song 1.mid", "title": "Superseded"},
+    ])
+    for folder in ["Album 1", "Album 2"]:
+        album = source / folder
+        album.mkdir()
+        for index in [1, 2]:
+            (album / f"Song {index}.mid").write_bytes(_midi_bytes(f"{folder} song {index}"))
+    _write_index_csv(source / "Album 1", [
+        {"output_file": "Song 1.mid", "title": "Local title"},
+        {"output_file": "Song 2.mid", "title": ""},
+    ])
+    monkeypatch.setattr(emulator_image_builder.random, "shuffle", lambda paths: paths.reverse())
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", output_ext="img", disk_layout="folders",
+        shuffle=True, album_title="Shared album", include_song_lists=True,
+    )
+    assert result.shuffled
+    images = [_image_songs_and_metadata(path, "eseq") for path in result.output_paths]
+    assert [songs for songs, metadata in images] == [
+        ["Album 1 song 2", "Local title"], ["Album 2 song 2", "Root title"],
+    ]
+    assert [metadata.disk_title for songs, metadata in images] == ["Shared album"] * 2
+    text = Path(result.song_list_path).read_text(encoding="utf-8")
+    assert text.index("Folder: Album 1") < text.index("Folder: Album 2")
+    assert text.index("Album 1 song 2") < text.index("Local title")
+
+
+def test_folder_build_slot_overflow_does_not_commit_any_images(tmp_path):
+    source = tmp_path / "songs"
+    for folder in ["Album 1", "Album 2"]:
+        (source / folder).mkdir(parents=True)
+        (source / folder / "Song.mid").write_bytes(_midi_bytes(folder))
+    output = tmp_path / "images"
+    with pytest.raises(FloppyImageError, match="exceed disk 9999"):
+        build_emulator_disk_images(
+            source, output, disk_layout="folders", output_ext="img", starting_number=9999,
+        )
+    assert list(output.iterdir()) == []
+
+
+def test_folder_build_rejects_empty_collection_and_unknown_layout(tmp_path):
+    source = tmp_path / "songs"
+    (source / "empty").mkdir(parents=True)
+    output = tmp_path / "images"
+    with pytest.raises(FloppyImageError, match="does not contain any"):
+        build_emulator_disk_images(source, output, disk_layout="folders")
+    with pytest.raises(FloppyImageError, match="Disk layout"):
+        build_emulator_disk_images(source, output, disk_layout="unknown")
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("output_content", ["midi", "eseq"])
+def test_recursive_fill_song_list_keeps_source_albums_in_shuffled_image_order(
+    tmp_path, monkeypatch, output_content,
+):
+    source = tmp_path / "Collection"
+    album_a = source / "Album 1"
+    album_b = source / "Nested" / "Album 2"
+    album_a.mkdir(parents=True)
+    album_b.mkdir(parents=True)
+    (album_a / "Track 1.mid").write_bytes(_midi_bytes("First title"))
+    (album_a / "Track 2.mid").write_bytes(_midi_bytes("Second title"))
+    (album_b / "Track 1.mid").write_bytes(_midi_bytes("Nested title"))
+
+    def interleave(paths):
+        paths[:] = [paths[0], paths[2], paths[1]]
+
+    monkeypatch.setattr(emulator_image_builder.random, "shuffle", interleave)
+    monkeypatch.setattr(emulator_image_builder, "PIANODIR_MAX_TRACKS", 2)
+    output = tmp_path / "images"
+    result = build_emulator_disk_images(
+        source, output, disk_layout="fill", include_subfolders=True,
+        output_ext="img", output_content=output_content, shuffle=True,
+        include_song_lists=True,
+    )
+    assert result.images_created == (2 if output_content == "eseq" else 1)
+    text = Path(result.song_list_path).read_text(encoding="utf-8")
+    assert "Songs: 3\n" in text
+    sections = text.split("\nImage ")[1:]
+    assert len(sections) == result.images_created
+    for section, image_path in zip(sections, result.output_paths):
+        titles, _metadata = _image_songs_and_metadata(image_path, output_content)
+        assert Path(image_path).name in section
+        assert [line for line in section.splitlines() if line.split(". ", 1)[0].isdigit()] == [
+            f"{track}. {title}" for track, title in enumerate(titles, 1)
+        ]
+    assert text.count("Source album: Album 1\n") == 2
+    assert f"Source album: {Path('Nested') / 'Album 2'}\n2. Nested title\n" in text
+    assert text.index("First title") < text.index("Nested title") < text.index("Second title")
+    assert list(output.glob("*.txt")) == [Path(result.song_list_path)]
+
+
+def test_combined_song_list_falls_back_to_filenames_for_missing_or_blank_titles(tmp_path):
+    source = tmp_path / "Collection"
+    for folder, filename, title in [
+        ("Album 1", "No title.mid", ""),
+        ("Album 2", "Blank title.mid", "   "),
+    ]:
+        album = source / folder
+        album.mkdir(parents=True)
+        (album / filename).write_bytes(_midi_bytes(title))
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", disk_layout="folders", output_ext="img",
+        output_content="midi", include_song_lists=True,
+    )
+    text = Path(result.song_list_path).read_text(encoding="utf-8")
+    assert "Image 1 of 2: DSKA0001.img\nFolder: Album 1\nAlbum: Album 1\n\n1. No title\n" in text
+    assert "Image 2 of 2: DSKA0002.img\nFolder: Album 2\nAlbum: Album 2\n\n1. Blank title\n" in text
+
+
+@pytest.mark.parametrize("disk_layout", ["folders", "fill"])
+def test_disabling_song_lists_applies_to_entire_recursive_build(tmp_path, disk_layout):
+    source = tmp_path / "Collection"
+    for folder in ["Album 1", "Nested/Album 2"]:
+        album = source / folder
+        album.mkdir(parents=True)
+        (album / "Track.mid").write_bytes(_midi_bytes("Song title"))
+    output = tmp_path / "images"
+    result = build_emulator_disk_images(
+        source, output, disk_layout=disk_layout, include_subfolders=True,
+        output_ext="img", output_content="midi", include_song_lists=False,
+    )
+    assert result.song_files_found == 2
+    assert result.images_created == (2 if disk_layout == "folders" else 1)
+    assert result.song_list_path == ""
+    assert set(output.iterdir()) == {Path(path) for path in result.output_paths}
+
+
+def _write_mng_catalogs(folder, album, songs):
+    pdisk = bytearray(b" " * 128)
+    pdisk[:16] = b"PDISK   MNG   \r\n"
+    pdisk[16:32] = b"P.PLAYER      \r\n"
+    pdisk[32:48] = b"Ver1.01DMV0.53\r\n"
+    pdisk[48:112] = album.encode("cp1252").ljust(64, b" ")
+    pdisk[112:114] = b"\r\n"
+    (folder / "PDISK.MNG").write_bytes(pdisk)
+    psong = bytearray(b" " * (0x80 + len(songs) * 0xB0))
+    psong[:16] = b"PSONG   MNG   \r\n"
+    psong[0x20:0x30] = f"FILE{len(songs):03d}       \r\n".encode("ascii")
+    for index, (filename, title) in enumerate(songs):
+        start = 0x80 + index * 0xB0
+        stem, extension = filename.rsplit(".", 1)
+        psong[start:start + 11] = stem.encode("cp1252").ljust(8, b" ") + extension.encode("cp1252").ljust(3, b" ")
+        psong[start + 16:start + 48] = title.encode("cp1252").ljust(32, b" ")
+    (folder / "PSONG.MNG").write_bytes(psong)
+
+
+def _image_files(image_path):
+    session = FloppyImageSession.load(image_path)
+    try:
+        return {
+            entry.name: Path(session.extract_file(entry.path)).read_bytes()
+            for entry in session.list_entries().entries
+        }
+    finally:
+        session.cleanup()
+
+
+@pytest.mark.parametrize("output_content", ["midi", "eseq"])
+@pytest.mark.parametrize("output_ext", ["img", "hfe"])
+def test_folder_mng_titles_follow_original_renamed_and_converted_songs(
+    tmp_path, output_content, output_ext,
+):
+    source = tmp_path / "Collection"
+    first = source / "DSKA001"
+    second = source / "Nested" / "DSKA002"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    _write_mng_catalogs(first, "Evening Jazz", [
+        ("FIRST.MID", "Moon River"), ("SECOND.MID", "Summer Wind"),
+        ("THIRD.MID", "Night and Day"),
+    ])
+    _write_mng_catalogs(second, "Sunday Classics", [("FIRST.MID", "Morning Prelude")])
+    # Catalog lookup is local and case-insensitive, and extraction may have
+    # already replaced an original DOS name with its numbered title.
+    (first / "first.MiD").write_bytes(_midi_bytes("Old first title"))
+    (first / "02 - Summer Wind.mid").write_bytes(_midi_bytes("Old second title"))
+    (second / "FIRST.MID").write_bytes(_midi_bytes("Old other album"))
+    convert_midi_file_to_eseq_path(first / "first.MiD", first / "THIRD.fil")
+    (second / "PSONG.MNG").rename(second / "psong.mng")
+    (second / "PDISK.MNG").rename(second / "pdisk.mng")
+    originals = {path: path.read_bytes() for path in source.rglob("*") if path.is_file()}
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", disk_layout="folders", output_content=output_content,
+        output_ext=output_ext, include_song_lists=True,
+    )
+    assert result.images_created == 2
+    expected = [
+        (["Summer Wind", "Moon River", "Night and Day"], "Evening Jazz"),
+        (["Morning Prelude"], "Sunday Classics"),
+    ]
+    text = Path(result.song_list_path).read_text(encoding="utf-8")
+    sections = text.split("\nImage ")[1:]
+    for image_path, section, (titles, album), folder in zip(
+        result.output_paths, sections, expected, [first, second],
+    ):
+        image_titles, metadata = _image_songs_and_metadata(image_path, output_content)
+        assert image_titles == titles
+        assert f"Album: {album}\n" in section
+        if metadata is not None:
+            assert metadata.disk_title == album
+        assert all(title in section for title in titles)
+        files = _image_files(image_path)
+        if output_content == "midi":
+            catalog = parse_smart_pianosoft_song_catalog(files["PSONG.MNG"])
+            assert [song.filename for song in catalog] == [name for name in files if name.endswith(".MID")]
+            assert [song.title for song in catalog] == titles
+            original_disk = next(path for path in originals if path.parent == folder and path.name.upper() == "PDISK.MNG")
+            assert files["PDISK.MNG"] == originals[original_disk]
+            assert PIANODIR_FILENAME not in files
+        else:
+            assert "PSONG.MNG" not in files
+            assert "PDISK.MNG" not in files
+    assert {path: path.read_bytes() for path in originals} == originals
+
+
+@pytest.mark.parametrize("output_content", ["midi", "eseq"])
+def test_extracted_catalog_names_override_numeric_embedded_titles_in_hfe_sets(
+    tmp_path, monkeypatch, output_content,
+):
+    source = tmp_path / "Extracted Images"
+    album = source / "Artist - Folder album"
+    album.mkdir(parents=True)
+    records = [
+        ("01.mid", "First catalog title", "01"),
+        ("02.MID", "Second catalog title", "2"),
+        ("03THIR-1.mid", "Third catalog title", "03 Embedded title"),
+    ]
+    _write_mng_catalogs(album, "Catalog album", [
+        (filename, title) for filename, title, embedded in records
+    ])
+    for index, (filename, title, embedded) in enumerate(records, start=1):
+        (album / f"{index:02d} - {title}.mid").write_bytes(_midi_bytes(embedded))
+    monkeypatch.setattr(emulator_image_builder.random, "shuffle", lambda paths: paths.reverse())
+
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", disk_layout="folders", output_content=output_content,
+        output_ext="hfe", include_song_lists=True, shuffle=True, starting_number=0,
+    )
+
+    expected = [title for filename, title, embedded in reversed(records)]
+    assert result.images_created == 1
+    assert _image_songs_and_metadata(result.output_paths[0], output_content)[0] == expected
+    report = Path(result.song_list_path).read_text(encoding="utf-8")
+    assert "Image 1 of 1: DSKA0000.hfe\n" in report
+    assert "Album: Catalog album\n" in report
+    assert "\n".join(f"{index}. {title}" for index, title in enumerate(expected, start=1)) in report
+    assert all(f". {embedded}\n" not in report for filename, title, embedded in records)
+
+
+@pytest.mark.parametrize("disk_layout", ["folders", "fill"])
+def test_mng_metadata_respects_explicit_index_and_album_overrides(tmp_path, disk_layout):
+    source = tmp_path / "Collection"
+    album = source / "Album 1"
+    album.mkdir(parents=True)
+    _write_mng_catalogs(source, "Parent catalog", [("FIRST.MID", "Wrong parent title")])
+    _write_mng_catalogs(album, "Catalog album", [
+        ("FIRST.MID", "Catalog first"), ("SECOND.MID", "Catalog second"),
+        ("THIRD.MID", ""), ("FOURTH.MID", "Catalog fourth"),
+    ])
+    for filename in ["FIRST.MID", "SECOND.MID", "THIRD.MID", "FOURTH.MID"]:
+        (album / filename).write_bytes(_midi_bytes("Embedded title"))
+    _write_index_csv(source, [
+        {"output_folder": "Album 1", "output_file": "FIRST.MID", "title": "Root first"},
+        {"output_folder": "Album 1", "output_file": "FOURTH.MID", "title": "Root fourth"},
+    ])
+    _write_index_csv(album, [
+        {"output_file": "FIRST.MID", "title": "Local first"},
+        {"output_file": "SECOND.MID", "title": ""},
+    ])
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", disk_layout=disk_layout, output_ext="img",
+        album_title="Shared override", include_song_lists=True,
+    )
+    titles, metadata = _image_songs_and_metadata(result.output_paths[0], "eseq")
+    assert titles == ["Local first", "Root fourth", "Catalog second", "Embedded title"]
+    assert metadata.disk_title == "Shared override"
+    text = Path(result.song_list_path).read_text(encoding="utf-8")
+    assert "Album: Shared override\n" in text
+    assert "Wrong parent title" not in text
+    if disk_layout == "fill":
+        assert "Source album: Catalog album (Album 1)\n" in text
+
+
+def test_invalid_and_missing_mng_files_fall_back_independently(tmp_path):
+    source = tmp_path / "Collection"
+    for folder in ["Bad song catalog", "Bad disk catalog", "No catalogs"]:
+        album = source / folder
+        album.mkdir(parents=True)
+        (album / "FIRST.MID").write_bytes(_midi_bytes("Embedded title"))
+        if folder != "No catalogs":
+            _write_mng_catalogs(album, "Catalog album", [("FIRST.MID", "Catalog song")])
+    (source / "Bad song catalog" / "PSONG.MNG").write_bytes(b"truncated")
+    (source / "Bad disk catalog" / "PDISK.MNG").write_bytes(b"truncated")
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", disk_layout="folders", output_content="midi",
+        output_ext="img", include_song_lists=True,
+    )
+    sections = Path(result.song_list_path).read_text(encoding="utf-8").split("\nImage ")[1:]
+    assert "Album: Bad disk catalog\n\n1. Catalog song\n" in sections[0]
+    assert "Album: Catalog album\n\n1. Embedded title\n" in sections[1]
+    assert "Album: No catalogs\n\n1. Embedded title\n" in sections[2]
+    expected_catalogs = [{"PSONG.MNG"}, {"PDISK.MNG"}, set()]
+    for path, catalogs in zip(result.output_paths, expected_catalogs):
+        files = _image_files(path)
+        assert {name for name in files if name.endswith(".MNG")} == catalogs
+
+
+def test_conflicting_catalog_records_do_not_guess_song_titles(tmp_path):
+    source = tmp_path / "Album"
+    source.mkdir()
+    (source / "FIRST.MID").write_bytes(_midi_bytes("Embedded title"))
+    _write_mng_catalogs(source, "Catalog album", [
+        ("FIRST.MID", "Conflicting title one"), ("first.mid", "Conflicting title two"),
+    ])
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", disk_layout="folders", output_content="midi", output_ext="img",
+    )
+    assert _image_songs_and_metadata(result.output_paths[0], "midi")[0] == ["Embedded title"]
+
+
+def test_catalog_album_and_song_titles_survive_shuffle_and_capacity_splits(tmp_path, monkeypatch):
+    source = tmp_path / "DSKA001"
+    source.mkdir()
+    records = [(f"0{index}.MID", f"Catalog song {index}") for index in range(1, 4)]
+    _write_mng_catalogs(source, "Catalog album", records)
+    for filename, _title in records:
+        (source / filename).write_bytes(_midi_bytes("Embedded title"))
+    monkeypatch.setattr(emulator_image_builder, "PIANODIR_MAX_TRACKS", 2)
+    monkeypatch.setattr(emulator_image_builder.random, "shuffle", lambda paths: paths.reverse())
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", disk_layout="folders", output_ext="img",
+        shuffle=True, include_song_lists=True,
+    )
+    assert result.images_created == 2
+    images = [_image_songs_and_metadata(path, "eseq") for path in result.output_paths]
+    assert [titles for titles, metadata in images] == [
+        ["Catalog song 3", "Catalog song 2"], ["Catalog song 1"],
+    ]
+    assert all(metadata.disk_title == "Catalog album" for titles, metadata in images)
+    text = Path(result.song_list_path).read_text(encoding="utf-8")
+    assert text.count("Album: Catalog album\n") == 2
+    assert text.index("Catalog song 3") < text.index("Catalog song 2") < text.index("Catalog song 1")
+
+
+@pytest.mark.parametrize("include_song_lists", [False, True])
+def test_midi_compilation_catalogs_cover_all_songs_and_local_title_edits(
+    tmp_path, monkeypatch, include_song_lists,
+):
+    source = tmp_path / "Collection"
+    for index in range(1, 4):
+        folder = source / f"Album {index}"
+        folder.mkdir(parents=True)
+        (folder / "FIRST.MID").write_bytes(_midi_bytes(f"Embedded title {index}"))
+        if index < 3:
+            _write_mng_catalogs(folder, f"Album title {index}", [("FIRST.MID", f"Catalog title {index}")])
+    _write_index_csv(source / "Album 2", [{"output_file": "FIRST.MID", "title": "Edited title"}])
+    monkeypatch.setattr(emulator_image_builder.random, "shuffle", lambda paths: paths.reverse())
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", disk_layout="fill", output_ext="img", output_content="midi",
+        prefix="MIX", starting_number=7, shuffle=True, include_song_lists=include_song_lists,
+    )
+    assert result.images_created == 1
+    assert bool(result.song_list_path) == include_song_lists
+    files = _image_files(result.output_paths[0])
+    catalog = parse_smart_pianosoft_song_catalog(files["PSONG.MNG"])
+    assert [song.filename for song in catalog] == [name for name in files if name.endswith(".MID")]
+    assert [song.title for song in catalog] == ["Embedded title 3", "Edited title", "Catalog title 1"]
+    assert parse_smart_pianosoft_disk_title(files["PDISK.MNG"]) == "MIX0007"
+    assert _image_songs_and_metadata(result.output_paths[0], "midi")[0] == [song.title for song in catalog]
+
+
+def test_midi_catalog_space_forces_split_before_using_safety_reserve(tmp_path, monkeypatch):
+    source = tmp_path / "Album"
+    source.mkdir()
+    records = [("FIRST.MID", "First"), ("SECOND.MID", "Second")]
+    for filename, title in records:
+        (source / filename).write_bytes(_large_midi_bytes(title, 5000))
+    _write_mng_catalogs(source, "Album title", records)
+    # Retain the smaller observed PDISK variant byte-for-byte on both parts.
+    disk_catalog = (source / "PDISK.MNG").read_bytes()[:114]
+    (source / "PDISK.MNG").write_bytes(disk_catalog)
+    blank = tmp_path / "blank.img"
+    create_blank_floppy_image(blank, _disk_format())
+    listing = read_image_listing(blank)
+    # Both MIDI files fit exactly above the reserve if catalogs are ignored.
+    margin = listing.free_space - sum(
+        allocated_size((source / name).stat().st_size, listing.cluster_size) for name, title in records
+    )
+    monkeypatch.setattr(emulator_image_builder.random, "shuffle", lambda paths: paths.reverse())
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", disk_layout="folders", output_ext="img", output_content="midi",
+        safety_margin_bytes=margin, shuffle=True, include_song_lists=False,
+    )
+    assert result.images_created == 2
+    for path, expected_title in zip(result.output_paths, ["Second", "First"]):
+        files = _image_files(path)
+        song, = parse_smart_pianosoft_song_catalog(files["PSONG.MNG"])
+        assert song.title == expected_title
+        assert song.filename in files
+        assert files["PDISK.MNG"] == disk_catalog
+        assert read_image_listing(path).free_space >= margin
+
+
+def test_midi_catalogs_reserve_root_directory_slots(tmp_path):
+    source = tmp_path / "Album"
+    source.mkdir()
+    records = [(f"SONG{index:03d}.MID", f"Song {index}") for index in range(110)]
+    for filename, title in records:
+        (source / filename).write_bytes(_midi_bytes(title))
+    _write_mng_catalogs(source, "Full directory", records)
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", disk_layout="folders", output_ext="img", output_content="midi",
+        disk_format=_disk_format(),
+    )
+    assert result.images_created == 2
+    counts = []
+    for path in result.output_paths:
+        files = _image_files(path)
+        songs = parse_smart_pianosoft_song_catalog(files["PSONG.MNG"])
+        counts.append(len(songs))
+        assert {song.filename for song in songs} == {name for name in files if name.endswith(".MID")}
+        assert parse_smart_pianosoft_disk_title(files["PDISK.MNG"]) == "Full directory"
+    # 112 FAT root entries: one label, two catalogs, and 109 songs.
+    assert counts == [109, 1]
+
+
+def _damaged_midi_bytes(kind):
+    if kind == "running_status":
+        track = b"\x00\x3c\x40"  # Data bytes with no preceding channel status.
+    else:
+        track = b"\x00\xff\x03\x03Old" if kind == "after_title" else b""
+        track += b"-=[BAD SECTOR]=-" * 32
+    track += b"\x00\xff\x2f\x00"
+    return _midi_bytes("")[:14] + b"MTrk" + len(track).to_bytes(4, "big") + track
+
+
+@pytest.mark.parametrize("damage", ["before_title", "after_title", "running_status"])
+@pytest.mark.parametrize("output_ext", ["img", "hfe"])
+def test_damaged_cataloged_midi_is_preserved_with_titles_and_image_warnings(
+    tmp_path, damage, output_ext,
+):
+    source = tmp_path / "Collection"
+    album = source / "Album"
+    album.mkdir(parents=True)
+    damaged_path = album / "01 - Catalog title.mid"
+    original = _damaged_midi_bytes(damage)
+    damaged_path.write_bytes(original)
+    (album / "02 - Healthy.mid").write_bytes(_midi_bytes("Old healthy title"))
+    _write_mng_catalogs(album, "Catalog album", [("01.MID", "Catalog title"), ("02.MID", "Healthy")])
+    # Explicit edits still reach the catalog when the song cannot be rewritten.
+    _write_index_csv(album, [{"output_file": damaged_path.name, "title": "Edited catalog title"}])
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", disk_layout="folders", output_ext=output_ext,
+        output_content="midi", include_song_lists=output_ext == "img",
+    )
+    assert result.images_created == 1
+    assert result.files_prepared == 2
+    files = _image_files(result.output_paths[0])
+    damaged_song, healthy_song = parse_smart_pianosoft_song_catalog(files["PSONG.MNG"])
+    assert damaged_song.title == "Edited catalog title"
+    assert healthy_song.title == "Healthy"
+    assert files[damaged_song.filename] == original
+    assert damaged_path.read_bytes() == original
+    assert len(result.warnings) == 1
+    warning, = result.warnings
+    assert f"DSKA0001.{output_ext} / {damaged_song.filename}" in warning
+    assert "Album/01 - Catalog title.mid" in warning
+    assert "preserved unchanged" in warning
+    assert "playback may fail" in warning.lower()
+    assert ("Invalid running status" if damage == "running_status" else "[BAD SECTOR]") in warning
+    if result.song_list_path:
+        report = Path(result.song_list_path).read_text(encoding="utf-8")
+        assert "1. Edited catalog title\n2. Healthy\n" in report
+        assert "Warnings:\n" in report
+        assert warning in report
+
+
+def test_known_bad_sector_data_cannot_be_converted_to_eseq(tmp_path):
+    source = tmp_path / "Album"
+    source.mkdir()
+    (source / "01.MID").write_bytes(_damaged_midi_bytes("after_title"))
+    _write_mng_catalogs(source, "Album", [("01.MID", "Catalog title")])
+    output = tmp_path / "images"
+    with pytest.raises(FloppyImageError, match="Missing MIDI data cannot be converted to E-SEQ"):
+        build_emulator_disk_images(source, output, output_content="eseq", output_ext="img")
+    assert list(output.iterdir()) == []
+
+
+def test_unreadable_embedded_title_without_catalog_does_not_drop_an_index_edit(tmp_path):
+    source = tmp_path / "Album"
+    source.mkdir()
+    (source / "01.MID").write_bytes(_damaged_midi_bytes("running_status"))
+    _write_index_csv(source, [{"output_file": "01.MID", "title": "Requested edit"}])
+    output = tmp_path / "images"
+    with pytest.raises(FloppyImageError, match="Invalid running status"):
+        build_emulator_disk_images(source, output, output_content="midi", output_ext="img")
+    assert list(output.iterdir()) == []
+
+
+@pytest.mark.parametrize("output_content", ["midi", "eseq"])
+def test_lf_catalogs_match_old_numeric_extraction_names_and_identical_renamed_copies(
+    tmp_path, output_content,
+):
+    source = tmp_path / "Collection"
+    album = source / "Artist - Album"
+    album.mkdir(parents=True)
+    originals = {"01 - 01.mid": _midi_bytes("01"), "02 - 02.mid": _midi_bytes("02")}
+    for name, data in originals.items():
+        (album / name).write_bytes(data)
+    (album / "Manually renamed.mid").write_bytes(originals["01 - 01.mid"])
+    _write_mng_catalogs(album, "Catalog album", [
+        ("01.MID", "First catalog title"), ("02.MID", "Second catalog title"),
+    ])
+    for name in ["PSONG.MNG", "PDISK.MNG"]:
+        path = album / name
+        path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n"))
+    source_bytes = {path: path.read_bytes() for path in album.iterdir()}
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", disk_layout="folders", output_ext="hfe",
+        output_content=output_content, include_song_lists=True,
+    )
+    expected = ["First catalog title", "Second catalog title", "First catalog title"]
+    assert _image_songs_and_metadata(result.output_paths[0], output_content)[0] == expected
+    report = Path(result.song_list_path).read_text(encoding="utf-8")
+    assert "Album: Catalog album\n" in report
+    assert "1. First catalog title\n2. Second catalog title\n3. First catalog title\n" in report
+    if output_content == "midi":
+        files = _image_files(result.output_paths[0])
+        assert files["PSONG.MNG"].startswith(b"PSONG   MNG   \r\n")
+        assert parse_smart_pianosoft_disk_title(files["PDISK.MNG"]) == "Catalog album"
+        assert [song.title for song in parse_smart_pianosoft_song_catalog(files["PSONG.MNG"])] == expected
+    assert source_bytes == {path: path.read_bytes() for path in source_bytes}
+
+
+def test_identical_recordings_with_conflicting_catalog_titles_do_not_guess_copies(tmp_path):
+    source = tmp_path / "Album"
+    source.mkdir()
+    data = _midi_bytes("Embedded fallback")
+    for name in ["01 - 01.mid", "02 - 02.mid", "Unknown copy.mid"]:
+        (source / name).write_bytes(data)
+    _write_mng_catalogs(source, "Album", [("01.MID", "First"), ("02.MID", "Second")])
+    result = build_emulator_disk_images(source, tmp_path / "images", output_content="midi", output_ext="img")
+    assert _image_songs_and_metadata(result.output_paths[0], "midi")[0] == [
+        "First", "Second", "Embedded fallback",
+    ]
+
+
+@pytest.mark.parametrize("output_content", ["midi", "eseq"])
+def test_single_bad_sector_marker_in_valid_title_is_not_treated_as_recovery_filler(tmp_path, output_content):
+    source = tmp_path / "Songs"
+    source.mkdir()
+    title = "Song -=[BAD SECTOR]=-"
+    (source / "Song.mid").write_bytes(_midi_bytes(title))
+    result = build_emulator_disk_images(
+        source, tmp_path / "images", output_content=output_content, output_ext="img",
+    )
+    assert result.warnings == ()
+    assert _image_songs_and_metadata(result.output_paths[0], output_content)[0] == [title]
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_catalog_fallback_does_not_swallow_write_errors_or_cancellation(tmp_path, monkeypatch, cancel):
+    source = tmp_path / "Album"
+    source.mkdir()
+    (source / "01.MID").write_bytes(_midi_bytes("Embedded title"))
+    _write_mng_catalogs(source, "Album", [("01.MID", "Catalog title")])
+    failure = FloppyOperationCancelled("cancelled") if cancel else OSError("No space left on device")
+
+    def fail_write(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(emulator_image_builder, "write_midi_title_to_path", fail_write)
+    output = tmp_path / "images"
+    expected_type = FloppyOperationCancelled if cancel else FloppyImageError
+    with pytest.raises(expected_type, match=str(failure)):
+        build_emulator_disk_images(source, output, output_content="midi", output_ext="img")
+    assert list(output.iterdir()) == []

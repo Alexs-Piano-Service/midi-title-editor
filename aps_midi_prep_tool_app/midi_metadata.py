@@ -26,6 +26,10 @@ _ESEQ_TITLE_END = 0x76
 _ESEQ_TITLE_LENGTH = _ESEQ_TITLE_END - _ESEQ_TITLE_START + 1
 
 
+class MidiTitleFormatError(ValueError):
+    """The MIDI event stream or requested title could not be interpreted safely."""
+
+
 def normalize_title_spacing(title):
     """Return a title with Disklavier splits and excess spacing cleaned up."""
     text = str(title or "").replace("\x00", " ")
@@ -450,16 +454,23 @@ def update_midi_title_to_destination(source_path, new_title, dest_dir):
         return f"Could not write updated title for {os.path.basename(source_path)}: {e}"
 
 
+def write_midi_title_to_path(source_path, new_title, dest_path):
+    """Write a title edit, distinguishing MIDI format errors from file I/O errors."""
+    with open(source_path, "rb") as f:
+        midi_bytes = f.read()
+
+    try:
+        patched = _set_first_title_in_midi_bytes(midi_bytes, new_title)
+    except ValueError as exc:
+        raise MidiTitleFormatError(str(exc)) from exc
+
+    with open(dest_path, "wb") as f:
+        f.write(patched)
+
+
 def update_midi_title_to_path(source_path, new_title, dest_path):
     try:
-        with open(source_path, "rb") as f:
-            midi_bytes = f.read()
-
-        patched = _set_first_title_in_midi_bytes(midi_bytes, new_title)
-
-        with open(dest_path, "wb") as f:
-            f.write(patched)
-
+        write_midi_title_to_path(source_path, new_title, dest_path)
         return None
     except Exception as e:
         return f"Could not write updated title for {os.path.basename(source_path)}: {e}"

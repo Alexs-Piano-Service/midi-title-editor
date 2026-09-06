@@ -1,7 +1,10 @@
+import pytest
+
 from aps_midi_prep_tool_app import disk_session_worker
 
 
-def test_emulator_build_worker_forwards_include_subfolders_false(monkeypatch):
+@pytest.mark.parametrize("disk_layout", ["fill", "folders"])
+def test_emulator_build_worker_forwards_layout_and_scan_options(monkeypatch, disk_layout):
     calls = []
     result = object()
 
@@ -24,6 +27,8 @@ def test_emulator_build_worker_forwards_include_subfolders_false(monkeypatch):
         disk_format=object(),
         output_ext="img",
         include_subfolders=False,
+        disk_layout=disk_layout,
+        include_song_lists=True,
     )
     finished = []
     worker.buildFinished.connect(finished.append)
@@ -31,6 +36,8 @@ def test_emulator_build_worker_forwards_include_subfolders_false(monkeypatch):
     worker.run()
 
     assert calls[0][1]["include_subfolders"] is False
+    assert calls[0][1]["disk_layout"] == disk_layout
+    assert calls[0][1]["include_song_lists"] is True
     assert finished == [result]
 
 

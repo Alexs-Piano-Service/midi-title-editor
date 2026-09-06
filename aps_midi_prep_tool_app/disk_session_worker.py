@@ -254,6 +254,7 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
         output_ext,
         output_content="eseq",
         include_subfolders=True,
+        disk_layout="fill",
         shuffle=False,
         include_song_lists=False,
         language_code=None,
@@ -270,6 +271,7 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
         self.output_ext = output_ext
         self.output_content = output_content
         self.include_subfolders = bool(include_subfolders)
+        self.disk_layout = disk_layout
         self.shuffle = bool(shuffle)
         self.include_song_lists = bool(include_song_lists)
         self.language_code = language_code
@@ -307,6 +309,7 @@ class EmulatorImageBuildWorker(_CancellableDiskWorker):
                 output_ext=self.output_ext,
                 output_content=self.output_content,
                 include_subfolders=self.include_subfolders,
+                disk_layout=self.disk_layout,
                 shuffle=self.shuffle,
                 include_song_lists=self.include_song_lists,
                 overwrite_callback=self._request_overwrite_confirmation,

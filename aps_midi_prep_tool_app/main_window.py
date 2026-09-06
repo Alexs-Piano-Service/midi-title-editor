@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QCheckBox,
+    QRadioButton,
     QGroupBox,
     QToolButton,
     QToolTip,
@@ -102,6 +103,7 @@ from .eseq_converter import (
     is_eseq_file,
 )
 from .dos83_renamer import apply_midi_dos83_plan, build_dos83_filename, validate_midi_dos83_plan
+from .emulator_image_builder import sanitize_image_prefix
 from .long_midi_filename import build_long_midi_filename
 from .smart_pianosoft import (
     SMART_PIANOSOFT_SONG_CATALOG_NAME,
@@ -8579,6 +8581,7 @@ class MidiTitleWindow(QMainWindow):
     SETTING_EMULATOR_IMAGE_OUTPUT_FORMAT = "emulator_image_output_format"
     SETTING_EMULATOR_IMAGE_DISK_FORMAT = "emulator_image_disk_format"
     SETTING_EMULATOR_IMAGE_INCLUDE_SUBFOLDERS = "emulator_image_include_subfolders"
+    SETTING_EMULATOR_IMAGE_DISK_LAYOUT = "emulator_image_disk_layout"
     SETTING_EMULATOR_IMAGE_SHUFFLE = "emulator_image_shuffle"
     SETTING_EMULATOR_IMAGE_INCLUDE_SONG_LISTS = "emulator_image_include_song_lists"
     SETTING_CHECK_UPDATES_AT_STARTUP = "check_updates_at_startup"
@@ -10835,26 +10838,51 @@ class MidiTitleWindow(QMainWindow):
         dialog = QDialog(self)
         apply_window_icon(dialog)
         dialog.setWindowTitle(self._t("emulator.action"))
-        layout = QVBoxLayout(dialog)
+        dialog_layout = QVBoxLayout(dialog)
+        options_scroll = QScrollArea()
+        options_scroll.setObjectName("emulatorOptionsScroll")
+        options_scroll.setWidgetResizable(True)
+        options_scroll.setFrameShape(QFrame.NoFrame)
+        options_widget = QWidget()
+        layout = QVBoxLayout(options_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setAlignment(Qt.AlignTop)
+        options_scroll.setWidget(options_widget)
+        dialog_layout.addWidget(options_scroll, 1)
+        available = dialog.screen().availableGeometry()
+        dialog.setMaximumSize(available.width() - 40, available.height() - 60)
+        dialog.setMinimumSize(
+            min(600, dialog.maximumWidth()), min(360, dialog.maximumHeight())
+        )
 
-        intro = QLabel(self._t("emulator.description"))
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-
-        form_layout = QGridLayout()
-        form_layout.setContentsMargins(0, 8, 0, 0)
-        form_layout.setHorizontalSpacing(10)
-        form_layout.setVerticalSpacing(8)
-        form_layout.setColumnStretch(1, 1)
+        def set_initial_size():
+            layout.activate()
+            desired_width = min(760, dialog.maximumWidth())
+            margins = dialog_layout.contentsMargins()
+            content_width = desired_width - margins.left() - margins.right()
+            content_height = layout.totalHeightForWidth(content_width)
+            if content_height < 0:
+                content_height = layout.sizeHint().height()
+            footer_height = (
+                include_song_lists_checkbox.sizeHint().height()
+                + buttons.sizeHint().height()
+                + 2 * dialog_layout.spacing()
+                + margins.top() + margins.bottom()
+            )
+            desired_height = min(content_height + footer_height, 640, dialog.maximumHeight())
+            dialog.resize(desired_width, desired_height)
 
         source_edit = QLineEdit()
+        source_edit.setObjectName("emulatorSourceEdit")
         source_browse = QPushButton(self._lt("Browse..."))
         output_edit = QLineEdit()
         output_browse = QPushButton(self._lt("Browse..."))
         prefix_edit = QLineEdit()
+        prefix_edit.setObjectName("emulatorPrefixEdit")
         prefix_edit.setMaxLength(4)
         prefix_edit.setPlaceholderText("DSKA")
         starting_number_spin = QSpinBox()
+        starting_number_spin.setObjectName("emulatorStartingNumberSpin")
         starting_number_spin.setRange(0, 9999)
         starting_number_spin.setValue(1)
         starting_number_spin.setToolTip(self._t("emulator.starting_number.tip"))
@@ -10864,11 +10892,14 @@ class MidiTitleWindow(QMainWindow):
         safety_margin_spin.setSuffix(" KiB")
         safety_margin_spin.setToolTip(self._t("emulator.safety_margin.tip"))
         album_title_edit = QLineEdit()
+        album_title_edit.setObjectName("emulatorAlbumTitleEdit")
         album_title_edit.setPlaceholderText(self._t("emulator.album_title.placeholder"))
         content_combo = QComboBox()
+        content_combo.setObjectName("emulatorContentCombo")
         content_combo.addItem(self._t("emulator.content.eseq"), "eseq")
         content_combo.addItem(self._t("emulator.content.midi"), "midi")
         output_format_combo = QComboBox()
+        output_format_combo.setObjectName("emulatorOutputFormatCombo")
         output_format_combo.addItem(self._t("emulator.format.img"), "img")
         output_format_combo.addItem(self._t("emulator.format.hfe"), "hfe")
         disk_format_combo = QComboBox()
@@ -10878,29 +10909,54 @@ class MidiTitleWindow(QMainWindow):
                 disk_format,
             )
 
-        rows = (
-            (self._t("emulator.source.label"), source_edit, source_browse),
-            (self._t("emulator.output.label"), output_edit, output_browse),
-            (self._t("emulator.set_name.label"), prefix_edit, None),
-            (self._t("emulator.starting_number.label"), starting_number_spin, None),
-            (self._t("emulator.safety_margin.label"), safety_margin_spin, None),
-            (self._t("emulator.content.label"), content_combo, None),
-            (self._t("emulator.album_title.label"), album_title_edit, None),
-            (self._t("emulator.image_format.label"), output_format_combo, None),
-            (self._t("emulator.disk_format.label"), disk_format_combo, None),
-        )
-        for row, (label_text, field, browse_button) in enumerate(rows):
-            label = QLabel(label_text)
-            label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            form_layout.addWidget(label, row, 0)
-            form_layout.addWidget(field, row, 1)
-            if browse_button is not None:
-                form_layout.addWidget(browse_button, row, 2)
+        def add_form_rows(parent_layout, rows):
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(10)
+            grid.setVerticalSpacing(6)
+            grid.setColumnStretch(1, 1)
+            labels = []
+            for row, (label_text, field, browse_button) in enumerate(rows):
+                label = QLabel(label_text)
+                label.setBuddy(field)
+                grid.addWidget(label, row, 0)
+                grid.addWidget(field, row, 1, 1, 1 if browse_button else 2)
+                if browse_button is not None:
+                    grid.addWidget(browse_button, row, 2)
+                labels.append(label)
+            parent_layout.addLayout(grid)
+            return labels
 
-        album_title_label = form_layout.itemAtPosition(6, 0).widget()
+        source_group = QGroupBox(self._lt("Source and disk layout"))
+        source_layout = QVBoxLayout(source_group)
+        add_form_rows(source_layout, (
+            (self._t("emulator.source.label"), source_edit, source_browse),
+        ))
+        folders_radio = QRadioButton(self._lt("One album per folder"))
+        folders_radio.setObjectName("emulatorFoldersRadio")
+        fill_radio = QRadioButton(self._lt("Fill disks automatically"))
+        fill_radio.setObjectName("emulatorFillRadio")
+        layout_choices = QHBoxLayout()
+        layout_choices.setSpacing(20)
+        layout_choices.addWidget(folders_radio)
+        layout_choices.addWidget(fill_radio)
+        layout_choices.addStretch()
+        source_layout.addLayout(layout_choices)
+        # A stack reserves the larger description's height, so switching
+        # modes does not move the controls below it.
+        layout_hints = QStackedWidget()
+        layout_hints.setObjectName("emulatorLayoutHints")
+        for hint_text in (
+            self._lt("Each folder's own songs form an album. Empty folders are skipped; large albums continue on extra disks."),
+            self._lt("Combine all selected songs and fill each disk before starting the next."),
+        ):
+            hint = QLabel(hint_text)
+            hint.setWordWrap(True)
+            hint.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+            layout_hints.addWidget(hint)
+        source_layout.addWidget(layout_hints)
 
         include_subfolders_checkbox = QCheckBox(
-            self._t("emulator.include_subfolders")
+            self._lt("Include nested folders")
         )
         include_subfolders_checkbox.setObjectName(
             "emulatorIncludeSubfoldersCheckbox"
@@ -10908,27 +10964,64 @@ class MidiTitleWindow(QMainWindow):
         include_subfolders_checkbox.setToolTip(
             self._t("emulator.include_subfolders.tip")
         )
-        form_layout.addWidget(include_subfolders_checkbox, len(rows), 1, 1, 2)
+        source_layout.addWidget(include_subfolders_checkbox)
         shuffle_checkbox = QCheckBox(self._t("emulator.shuffle"))
+        shuffle_checkbox.setObjectName("emulatorShuffleCheckbox")
         shuffle_checkbox.setToolTip(self._t("emulator.shuffle.tip"))
-        form_layout.addWidget(shuffle_checkbox, len(rows) + 1, 1, 1, 2)
+        source_layout.addWidget(shuffle_checkbox)
+        layout.addWidget(source_group)
+
+        output_group = QGroupBox(self._lt("Output disks"))
+        output_layout = QVBoxLayout(output_group)
+        add_form_rows(output_layout, (
+            (self._t("emulator.output.label"), output_edit, output_browse),
+            (self._t("emulator.content.label"), content_combo, None),
+            (self._t("emulator.image_format.label"), output_format_combo, None),
+            (self._t("emulator.disk_format.label"), disk_format_combo, None),
+        ))
         include_song_lists_checkbox = QCheckBox(
             self._t("emulator.include_song_lists")
         )
+        include_song_lists_checkbox.setObjectName("emulatorSongListsCheckbox")
         include_song_lists_checkbox.setToolTip(
-            self._t("emulator.include_song_lists.tip")
+            self._lt("One combined list for the entire set: every image, album and track, using song titles when available.")
         )
-        form_layout.addWidget(
-            include_song_lists_checkbox,
-            len(rows) + 2,
-            1,
-            1,
-            2,
-        )
-        retention_hint = QLabel(self._t("emulator.no_overwrite"))
+        layout.addWidget(output_group)
+
+        advanced_toggle = QToolButton()
+        advanced_toggle.setObjectName("emulatorAdvancedToggle")
+        advanced_toggle.setText(self._lt("Naming and capacity options"))
+        advanced_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        advanced_toggle.setCheckable(True)
+        advanced_toggle.setArrowType(Qt.RightArrow)
+        layout.addWidget(advanced_toggle)
+        advanced_widget = QWidget()
+        advanced_widget.setObjectName("emulatorAdvancedOptions")
+        advanced_layout = QVBoxLayout(advanced_widget)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_labels = add_form_rows(advanced_layout, (
+            (self._t("emulator.set_name.label"), prefix_edit, None),
+            (self._t("emulator.starting_number.label"), starting_number_spin, None),
+            (self._t("emulator.safety_margin.label"), safety_margin_spin, None),
+            (self._t("emulator.album_title.label"), album_title_edit, None),
+        ))
+        album_title_label = advanced_labels[-1]
+        layout.addWidget(advanced_widget)
+        advanced_widget.hide()
+
+        def toggle_advanced(checked):
+            advanced_widget.setVisible(checked)
+            advanced_toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+
+        advanced_toggle.toggled.connect(toggle_advanced)
+        naming_example = QLabel()
+        naming_example.setObjectName("emulatorNamingExample")
+        naming_example.setTextFormat(Qt.PlainText)
+        naming_example.setWordWrap(True)
+        layout.addWidget(naming_example)
+        retention_hint = QLabel(self._lt("You will be asked before existing output files are replaced."))
         retention_hint.setWordWrap(True)
-        form_layout.addWidget(retention_hint, len(rows) + 3, 1, 1, 2)
-        layout.addLayout(form_layout)
+        layout.addWidget(retention_hint)
 
         source_directory = self._emulator_image_default_source_directory()
         default_output = os.path.join(source_directory, "Emulator Images")
@@ -10985,13 +11078,22 @@ class MidiTitleWindow(QMainWindow):
             if disk_format_combo.itemData(index).key == saved_disk_format:
                 disk_format_combo.setCurrentIndex(index)
                 break
-        include_subfolders_checkbox.setChecked(
-            self.settings.value(
-                self.SETTING_EMULATOR_IMAGE_INCLUDE_SUBFOLDERS,
-                True,
-                type=bool,
-            )
+        fill_include_subfolders = self.settings.value(
+            self.SETTING_EMULATOR_IMAGE_INCLUDE_SUBFOLDERS,
+            True,
+            type=bool,
         )
+        # Existing installations retain their pooled layout and scan setting.
+        # New installations start with the folder-album workflow.
+        legacy_scan = self.settings.value(
+            self.SETTING_EMULATOR_IMAGE_INCLUDE_SUBFOLDERS, None
+        )
+        saved_layout = self.settings.value(
+            self.SETTING_EMULATOR_IMAGE_DISK_LAYOUT,
+            "fill" if legacy_scan is not None else "folders",
+        )
+        folders_radio.setChecked(saved_layout == "folders")
+        fill_radio.setChecked(saved_layout != "folders")
         shuffle_checkbox.setChecked(
             self.settings.value(
                 self.SETTING_EMULATOR_IMAGE_SHUFFLE,
@@ -11006,6 +11108,66 @@ class MidiTitleWindow(QMainWindow):
                 type=bool,
             )
         )
+
+        def update_layout_fields():
+            folder_mode = folders_radio.isChecked()
+            layout_hints.setCurrentIndex(0 if folder_mode else 1)
+            include_subfolders_checkbox.setEnabled(not folder_mode)
+            include_subfolders_checkbox.blockSignals(True)
+            include_subfolders_checkbox.setChecked(folder_mode or fill_include_subfolders)
+            include_subfolders_checkbox.blockSignals(False)
+            include_subfolders_checkbox.setToolTip(
+                self._lt("Required for one album per folder. Every nested folder is scanned.")
+                if folder_mode else self._t("emulator.include_subfolders.tip")
+            )
+            shuffle_checkbox.setText(
+                self._lt("Shuffle songs within each folder")
+                if folder_mode else self._t("emulator.shuffle")
+            )
+            shuffle_checkbox.setToolTip(
+                self._lt("Folder order stays the same; only the songs within each album are shuffled.")
+                if folder_mode else self._t("emulator.shuffle.tip")
+            )
+            album_title_edit.setPlaceholderText(
+                self._lt("Defaults to the catalog title or folder name")
+                if folder_mode else self._t("emulator.album_title.placeholder")
+            )
+            example_prefix = sanitize_image_prefix(prefix_edit.text())
+            example_image = (
+                f"{example_prefix}{starting_number_spin.value():04d}."
+                f"{output_format_combo.currentData()}"
+            )
+            if folder_mode:
+                naming_example.setText(self._lt(
+                    "Example: {folder}/ → {image}"
+                ).format(
+                    folder="DSKA001",
+                    image=example_image,
+                ))
+            else:
+                naming_example.setText(self._lt(
+                    "Disk names start at {image} and count up."
+                ).format(image=example_image))
+
+        def update_scan_preference(checked):
+            nonlocal fill_include_subfolders
+            if not folders_radio.isChecked():
+                fill_include_subfolders = checked
+            update_layout_fields()
+
+        folders_radio.toggled.connect(update_layout_fields)
+        include_subfolders_checkbox.toggled.connect(update_scan_preference)
+        prefix_edit.textChanged.connect(update_layout_fields)
+        source_edit.textChanged.connect(update_layout_fields)
+        starting_number_spin.valueChanged.connect(update_layout_fields)
+        output_format_combo.currentIndexChanged.connect(update_layout_fields)
+        update_layout_fields()
+        advanced_toggle.setChecked(bool(
+            album_title_edit.text()
+            or prefix_edit.text().upper() != "DSKA"
+            or starting_number_spin.value() != 1
+            or safety_margin_spin.value() != 32
+        ))
 
         def browse_source():
             previous_source = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
@@ -11037,12 +11199,13 @@ class MidiTitleWindow(QMainWindow):
         output_browse.clicked.connect(browse_output)
 
         buttons = self._make_dialog_button_box(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            QDialogButtonBox.Cancel,
             dialog,
         )
-        create_button = buttons.button(QDialogButtonBox.Ok)
-        if create_button is not None:
-            create_button.setText(self._t("emulator.create"))
+        create_button = buttons.addButton(
+            self._t("emulator.create"), QDialogButtonBox.AcceptRole
+        )
+        create_button.setDefault(True)
         buttons.rejected.connect(dialog.reject)
 
         def accept_options():
@@ -11079,9 +11242,10 @@ class MidiTitleWindow(QMainWindow):
             dialog.accept()
 
         buttons.accepted.connect(accept_options)
-        layout.addWidget(buttons)
-        dialog.resize(760, dialog.sizeHint().height())
-        if self._exec_child_dialog(dialog) != QDialog.Accepted:
+        dialog_layout.addWidget(include_song_lists_checkbox)
+        dialog_layout.addWidget(buttons)
+        set_initial_size()
+        if self._exec_child_dialog(dialog, resize_to_contents=False) != QDialog.Accepted:
             return
 
         source_directory = os.path.abspath(os.path.expanduser(source_edit.text().strip()))
@@ -11094,6 +11258,7 @@ class MidiTitleWindow(QMainWindow):
         output_ext = output_format_combo.currentData()
         disk_format = disk_format_combo.currentData()
         include_subfolders = include_subfolders_checkbox.isChecked()
+        disk_layout = "folders" if folders_radio.isChecked() else "fill"
         shuffle_songs = shuffle_checkbox.isChecked()
         include_song_lists = include_song_lists_checkbox.isChecked()
         self.settings.setValue(self.SETTING_EMULATOR_IMAGE_SOURCE, source_directory)
@@ -11113,9 +11278,10 @@ class MidiTitleWindow(QMainWindow):
         self.settings.setValue(self.SETTING_EMULATOR_IMAGE_DISK_FORMAT, disk_format.key)
         self.settings.setValue(
             self.SETTING_EMULATOR_IMAGE_INCLUDE_SUBFOLDERS,
-            include_subfolders,
+            fill_include_subfolders,
         )
         self.settings.setValue(self.SETTING_EMULATOR_IMAGE_SHUFFLE, shuffle_songs)
+        self.settings.setValue(self.SETTING_EMULATOR_IMAGE_DISK_LAYOUT, disk_layout)
         self.settings.setValue(
             self.SETTING_EMULATOR_IMAGE_INCLUDE_SONG_LISTS,
             include_song_lists,
@@ -11131,6 +11297,7 @@ class MidiTitleWindow(QMainWindow):
             disk_format=disk_format,
             output_ext=output_ext,
             include_subfolders=include_subfolders,
+            disk_layout=disk_layout,
             shuffle=shuffle_songs,
             include_song_lists=include_song_lists,
         )
@@ -11150,6 +11317,7 @@ class MidiTitleWindow(QMainWindow):
         include_subfolders,
         shuffle,
         include_song_lists,
+        disk_layout="fill",
     ):
         if self._disk_worker_busy():
             QMessageBox.information(self, self._lt("Busy"), self._t("emulator.busy"))
@@ -11184,6 +11352,7 @@ class MidiTitleWindow(QMainWindow):
             disk_format=disk_format,
             output_ext=output_ext,
             include_subfolders=include_subfolders,
+            disk_layout=disk_layout,
             shuffle=shuffle,
             include_song_lists=include_song_lists,
             language_code=self._language_code(),
@@ -11219,6 +11388,7 @@ class MidiTitleWindow(QMainWindow):
             "output_content": output_content,
             "shuffle": shuffle,
             "include_song_lists": include_song_lists,
+            "disk_layout": disk_layout,
         }
         self._set_disk_load_busy(True)
         self._log_event(
@@ -11233,6 +11403,7 @@ class MidiTitleWindow(QMainWindow):
             starting_number=starting_number,
             safety_margin_bytes=safety_margin_bytes,
             include_subfolders=include_subfolders,
+            disk_layout=disk_layout,
             shuffle=shuffle,
             include_song_lists=include_song_lists,
         )
@@ -11296,6 +11467,7 @@ class MidiTitleWindow(QMainWindow):
 
     def _on_emulator_image_success(self, result):
         self._close_emulator_image_progress()
+        warnings = tuple(getattr(result, "warnings", ()) or ())
         summary = self._t(
             "emulator.complete.message",
             files=result.files_prepared,
@@ -11307,6 +11479,11 @@ class MidiTitleWindow(QMainWindow):
             summary += "\n\n" + self._t(
                 "emulator.complete.song_list",
                 path=result.song_list_path,
+            )
+        if warnings:
+            summary += "\n\n" + self._lt(
+                "Some MIDI files were preserved with warnings and may not play correctly. "
+                "See Details for affected files."
             )
         self.status_label.setText(summary.replace("\n", " "))
         self._log_event(
@@ -11321,7 +11498,18 @@ class MidiTitleWindow(QMainWindow):
             images=result.images_created,
             outputs="; ".join(result.output_paths),
             song_list=result.song_list_path,
+            warnings="\n".join(warnings),
         )
+        if warnings:
+            message = QMessageBox(self)
+            message.setWindowTitle(self._t("emulator.complete.title"))
+            message.setIcon(QMessageBox.Warning)
+            message.setTextFormat(Qt.PlainText)
+            message.setText(summary)
+            message.setDetailedText("\n\n".join(warnings))
+            message.setStandardButtons(QMessageBox.Ok)
+            self._exec_child_dialog(message)
+            return
         QMessageBox.information(
             self,
             self._t("emulator.complete.title"),
@@ -11579,10 +11767,15 @@ class MidiTitleWindow(QMainWindow):
         self._center_child_dialog_now(dialog)
         self._schedule_center_child_dialog(dialog, delays=(0, 25, 100))
 
-    def _exec_child_dialog(self, dialog):
+    def _exec_child_dialog(self, dialog, *, resize_to_contents=True):
         dialog.setWindowModality(Qt.WindowModal)
         self._translate_dialog_tree(dialog)
-        self._center_child_dialog(dialog, recenter_on_content_change=True)
+        if resize_to_contents:
+            self._center_child_dialog(dialog, recenter_on_content_change=True)
+        else:
+            # Scrollable forms own their initial size. Center once and leave
+            # later layout changes and user resizing to the window manager.
+            center_dialog_on_parent(dialog, self, adjust_size=False)
         return dialog.exec()
 
     def _translate_dialog_tree(self, dialog):

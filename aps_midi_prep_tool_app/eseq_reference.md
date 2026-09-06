@@ -13,6 +13,45 @@
 
 > This document is intentionally written as an engineering reference. It distinguishes proven behavior from inferred or compatibility-oriented behavior. It does not contain proprietary Yamaha source code or third-party program code; it specifies file behavior derived from personal recordings, supplied disk images, static binary inspection, and public format references. Third-party names are used only to identify compatibility targets; APS MIDI Prep Tool is independent and is not affiliated with, sponsored by, or endorsed by Yamaha or other product owners mentioned here.
 
+Unreleased emulator-set behavior:
+
+- Folder layout gives each directory's own songs separate disks. Its E-SEQ
+  `PIANODIR.FIL` album title defaults to the folder's `PDISK.MNG` title when
+  available, otherwise its folder name, while catalog IDs
+  still follow the generated disk slots. A shared album-title override takes
+  precedence. Capacity and the 60-song limit can split an album across disks;
+  every part retains its album title and receives a distinct catalog ID.
+- Folder-local `PSONG.MNG` titles are matched to original stems or numbered long
+  names produced by extraction, including songs converted between MIDI and
+  E-SEQ. `PDISK.MNG` stores its 64-byte album title at `0x30:0x70`; both 114-byte
+  and 128-byte catalogs have a following CRLF. Readers also feed bulk extraction.
+- Folder-local `INDEX.csv` song-title matches override collection-level matches,
+  and both take precedence over `PSONG.MNG` titles.
+  The existing E-SEQ title encoding and field limits continue to apply.
+- MIDI images carry valid source MNG catalogs independently of song-list export.
+  `PSONG.MNG` is rebuilt with one 176-byte record per output song in image order,
+  an updated 128-byte header (`MAXnnn` / `FILEnnn`), DOS filenames and 32-byte
+  Windows-1252 titles. Matched records retain their other fields, with the SMF
+  type descriptor updated to the prepared file. Songs missing a source record
+  use a basic record so mixed automatic-fill images have a complete catalog.
+  Unused source records and stale trailing data are omitted. A single-folder
+  image keeps its source `PDISK.MNG` fields, including split albums; compilations
+  use the image stem as their disk title while retaining other disk fields.
+  Catalog bytes and root-directory slots count toward image capacity and the
+  free-space reserve. E-SEQ output continues to use `PIANODIR.FIL` only.
+- Catalogs with an LF-only header have their line endings restored to CRLF
+  before fixed-offset parsing or editing. Existing CRLF catalogs are preserved
+  as-is. The shared readers cover extraction and batch builds, and generated
+  catalogs use canonical offsets. Batch title matching also recognizes older
+  numeric extraction names and exact-content copies of matched songs within
+  the same folder; conflicting catalog identities never resolve by guesswork.
+- Native MIDI containing `-=[BAD SECTOR]=-` recovery filler is preserved
+  byte-for-byte with a warning during MIDI builds. Catalog-backed MIDI whose
+  embedded title cannot be safely updated is also preserved, with the chosen
+  title written to `PSONG.MNG` and the combined list. Image verification checks
+  packing and file presence; this fallback does not repair or validate damaged
+  musical events. E-SEQ conversion rejects known bad-sector filler.
+
 Review notes for v0.8.1 release preparation:
 
 - The app stages MIDI-to-E-SEQ, E-SEQ-to-MIDI, and SMF1-to-SMF0 conversions before writing them to disk.

@@ -154,12 +154,14 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 <p>Use <strong>Utilities &gt; Build Emulator Disk Set...</strong> to turn a whole
                 folder of MIDI and Yamaha E-SEQ songs into numbered emulator-ready disks.</p>
                 <ul>
-                  <li><strong>Explore source folders recursively</strong> includes songs at every nested level; turn it off to use only the selected folder. The utility fills as many raw IMG or HFE images as needed.</li>
-                  <li>Choose either E-SEQ-only disks or Standard-MIDI-only disks; source songs are converted only when necessary.</li>
+                  <li><strong>One album per folder</strong> always scans nested folders and starts a new disk for each folder's own songs, using its <strong>PDISK.MNG</strong> album title when available, otherwise its folder name. Empty folders are skipped; large albums continue on extra disks without mixing folders.</li>
+                  <li><strong>Fill disks automatically</strong> combines songs into as many full disks as needed. In this layout, <strong>Include nested folders</strong> is optional; turn it off to use only the selected folder. This choice is remembered when switching layouts.</li>
+                  <li>Expand <strong>Naming and capacity options</strong> to change numbering, the free-space reserve, or the shared album title. The filename example updates as you change settings.</li>
+                  <li>Choose E-SEQ or Standard MIDI for the songs; source songs are converted only when necessary.</li>
                   <li>E-SEQ disks receive DOS 8.3 <strong>.FIL</strong> names and a <strong>PIANODIR.FIL</strong> containing only that image's songs and album metadata.</li>
-                  <li>MIDI disks contain only <strong>.MID</strong> files and do not receive a Yamaha directory file.</li>
-                  <li>When the source folder has an <strong>INDEX.csv</strong>, matching values from its <strong>title</strong> column replace embedded titles; MIDI keeps the full value and E-SEQ uses its 32-character limit.</li>
-                  <li><strong>Include Song Lists</strong> writes one text overview of every generated image and its songs in playback order.</li>
+                  <li>MIDI disks contain <strong>.MID</strong> songs plus available <strong>PSONG.MNG</strong> and <strong>PDISK.MNG</strong> catalogs, updated for each image's songs. Catalogs are included independently of <strong>Include Song Lists</strong>.</li>
+                  <li>Each folder's <strong>PSONG.MNG</strong> supplies song titles for original or extraction-renamed files. Matching <strong>INDEX.csv</strong> title edits take precedence; MIDI keeps the full value and E-SEQ uses its 32-character limit.</li>
+                  <li><strong>Include Song Lists</strong> applies to the entire build and writes one combined text overview, organized by image name, with every album and track in playback order. Nested albums and albums spanning several images are included; available song titles are used, with filenames as a fallback.</li>
                   <li>The usual Disklavier choice is 720K DD; disk capacity and the E-SEQ-only 60-song limit are enforced.</li>
                   <li>Generated images are verified; if an exact output name exists, the utility lists the affected files and asks before replacing them.</li>
                 </ul>

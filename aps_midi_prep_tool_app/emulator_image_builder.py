@@ -37,6 +37,7 @@ from .floppy_image import (
     _copy_host_file_into_image,
     _delete_eseq_directory_entries_from_image,
     _finish_temp_output,
+    _geometry_from_boot_sector,
     _is_image_capacity_error,
     _write_image_direct,
     allocated_size,
@@ -44,13 +45,24 @@ from .floppy_image import (
     read_image_listing,
 )
 from .midi_metadata import (
+    MidiTitleFormatError,
     extract_eseq_title_from_file,
     extract_first_title_from_midi,
     is_midi_file,
     update_eseq_title_to_path,
-    update_midi_title_to_path,
+    write_midi_title_to_path,
 )
 from .message_catalog import tr
+from .long_midi_filename import build_long_midi_filename
+from .smart_pianosoft import (
+    SMART_PIANOSOFT_DISK_CATALOG_NAME,
+    SMART_PIANOSOFT_SONG_CATALOG_NAME,
+    SmartPianoSoftMetadata,
+    build_smart_pianosoft_song_catalog,
+    build_smart_pianosoft_song_record,
+    smart_pianosoft_metadata_from_directory,
+    update_smart_pianosoft_disk_title,
+)
 
 
 MIDI_EXTENSIONS = {".mid", ".midi"}
@@ -58,12 +70,14 @@ ESEQ_EXTENSIONS = {".fil", ".mda"}
 SONG_EXTENSIONS = MIDI_EXTENSIONS | ESEQ_EXTENSIONS
 EMULATOR_IMAGE_EXTENSIONS = {"img", "hfe"}
 EMULATOR_CONTENT_FORMATS = {"eseq", "midi"}
+EMULATOR_DISK_LAYOUTS = {"fill", "folders"}
 DEFAULT_IMAGE_PREFIX = "DSKA"
 DEFAULT_STARTING_NUMBER = 1
 DEFAULT_SAFETY_MARGIN_BYTES = 32 * 1024
 MAX_IMAGE_NUMBER = 9999
 _INVALID_PORTABLE_FILENAME_CHARS = '<>:"/\\|?*'
 _NATURAL_NUMBER_RE = re.compile(r"(\d+)")
+_BAD_SECTOR_FILLER = b"-=[BAD SECTOR]=-" * 2
 
 
 @dataclass(frozen=True)
@@ -81,6 +95,8 @@ class EmulatorImageBuildResult:
     safety_margin_bytes: int
     shuffled: bool
     song_list_path: str = ""
+    disk_layout: str = "fill"
+    warnings: tuple[str, ...] = ()
 
     @property
     def midi_files_found(self):
@@ -94,6 +110,10 @@ class _PreparedSong:
     image_path: str
     local_path: str
     title: str
+    album_title: str = ""
+    smart_pianosoft: SmartPianoSoftMetadata = SmartPianoSoftMetadata()
+    catalog_record: bytes = b""
+    warning: str = ""
 
 
 def _natural_sort_key(path):
@@ -350,7 +370,55 @@ def _load_index_title_overrides(
     return overrides
 
 
-def _index_title_for_output(title, output_content):
+def _catalog_song_matches(catalog_songs, song_paths, *, cancel_callback=None):
+    """Match local originals and extraction-generated names without guessing."""
+    songs_by_stem = {}
+    for song in catalog_songs:
+        for filename in (
+            song.filename,
+            build_long_midi_filename(song.track_number, song.title, song.filename),
+            # Earlier extraction could not read the catalog and fell back to
+            # the original stem, for example 01.MID -> 01 - 01.mid.
+            build_long_midi_filename(
+                song.track_number, os.path.splitext(song.filename)[0], song.filename,
+            ),
+        ):
+            _set_unique_title(
+                songs_by_stem,
+                os.path.splitext(filename)[0].casefold(),
+                song,
+            )
+    matches = {}
+    for path in song_paths:
+        _raise_if_cancelled(cancel_callback)
+        stem = os.path.splitext(os.path.basename(path))[0].casefold()
+        song = songs_by_stem.get(stem)
+        if song is not None:
+            matches[path] = song
+    unmatched = [path for path in song_paths if path not in matches]
+    if matches and unmatched:
+        # Manually renamed copies can still be identified by exact contents.
+        # Limit this lookup to the same source folder and reject conflicting
+        # catalog identities, including identical recordings listed twice.
+        songs_by_hash = {}
+        for path, song in matches.items():
+            try:
+                digest = _sha256_file(path, cancel_callback=cancel_callback)
+            except OSError:
+                continue
+            _set_unique_title(songs_by_hash, digest, song)
+        for path in unmatched:
+            try:
+                digest = _sha256_file(path, cancel_callback=cancel_callback)
+            except OSError:
+                continue
+            song = songs_by_hash.get(digest)
+            if song is not None:
+                matches[path] = song
+    return matches
+
+
+def _title_override_for_output(title, output_content):
     text = str(title or "").replace("\x00", " ").strip()
     if not text:
         return None
@@ -368,12 +436,29 @@ def _prepared_song_name(source_path, index, output_content):
     )
 
 
+def _contains_bad_sector_filler(path, cancel_callback=None):
+    """Recognize repeated recovery filler, allowing a marker in normal text."""
+    tail = b""
+    with open(path, "rb") as handle:
+        while True:
+            _raise_if_cancelled(cancel_callback)
+            chunk = handle.read(64 * 1024)
+            if not chunk:
+                return False
+            data = tail + chunk
+            if _BAD_SECTOR_FILLER in data:
+                return True
+            tail = data[-(len(_BAD_SECTOR_FILLER) - 1):]
+
+
 def _prepare_song_files(
     song_paths,
     temp_directory,
     *,
     output_content,
     title_overrides=None,
+    folder_metadata=None,
+    catalog_songs=None,
     progress_callback=None,
     cancel_callback=None,
     midi_to_eseq_converter=None,
@@ -386,13 +471,18 @@ def _prepare_song_files(
     converted_count = 0
     total = len(song_paths)
     title_overrides = dict(title_overrides or {})
+    folder_metadata = dict(folder_metadata or {})
+    catalog_songs = dict(catalog_songs or {})
+    include_song_catalog = output_content == "midi" and any(
+        item.song_catalog for item in folder_metadata.values()
+    )
 
     for index, source_path in enumerate(song_paths, start=1):
         _raise_if_cancelled(cancel_callback)
         source_name = os.path.basename(source_path)
         source_is_midi = is_midi_file(source_path)
         source_is_eseq = is_eseq_file(source_path)
-        title_override = _index_title_for_output(
+        title_override = _title_override_for_output(
             title_overrides.get(source_path),
             output_content,
         )
@@ -417,12 +507,35 @@ def _prepare_song_files(
         )
 
         image_path = _prepared_song_name(source_path, index, output_content)
+        source_metadata = folder_metadata.get(os.path.dirname(source_path), SmartPianoSoftMetadata())
+        preserved_midi = False
+        warning = ""
         local_path = os.path.join(
             temp_directory,
             f"{index:05d}_{uuid.uuid4().hex}_{image_path}",
         )
         try:
-            if output_content == "eseq" and source_is_midi:
+            bad_sector_filler = source_is_midi and _contains_bad_sector_filler(
+                source_path, cancel_callback,
+            )
+            if bad_sector_filler:
+                if output_content != "midi":
+                    raise FloppyImageError(
+                        "The source contains [BAD SECTOR] recovery filler. "
+                        "Missing MIDI data cannot be converted to E-SEQ."
+                    )
+                if title_override is not None and not source_metadata.song_catalog:
+                    raise FloppyImageError(
+                        "The source contains [BAD SECTOR] recovery filler. "
+                        "Its title cannot be updated without a PSONG.MNG catalog."
+                    )
+                shutil.copy2(source_path, local_path)
+                preserved_midi = True
+                warning = (
+                    "Source contains [BAD SECTOR] recovery filler. MIDI bytes were "
+                    "preserved unchanged; missing data was not repaired and playback may fail."
+                )
+            elif output_content == "eseq" and source_is_midi:
                 converter_options = {"filename_hint": image_path}
                 if title_override is not None:
                     converter_options["title_override"] = title_override
@@ -470,15 +583,24 @@ def _prepare_song_files(
                 )
                 converted_count += 1
             elif title_override is not None:
-                update_error = update_midi_title_to_path(
-                    source_path,
-                    title_override,
-                    local_path,
-                )
-                if update_error:
-                    raise FloppyImageError(update_error)
+                try:
+                    write_midi_title_to_path(source_path, title_override, local_path)
+                except MidiTitleFormatError as exc:
+                    if not source_metadata.song_catalog:
+                        raise
+                    # A catalog can carry the title without rewriting a MIDI
+                    # event stream that the title editor cannot safely parse.
+                    shutil.copy2(source_path, local_path)
+                    preserved_midi = True
+                    warning = (
+                        f"Could not update the embedded title: {exc} "
+                        "MIDI bytes were preserved unchanged; "
+                        "the title is stored in PSONG.MNG. Playback may fail."
+                    )
             else:
                 shutil.copy2(source_path, local_path)
+        except FloppyOperationCancelled:
+            raise
         except Exception as exc:
             raise FloppyImageError(
                 f"Could not prepare '{source_name}' as {output_label}: {exc}"
@@ -493,22 +615,39 @@ def _prepare_song_files(
                 f"Preparation did not produce a valid {output_label} file for '{source_name}'."
             )
 
-        # Describe what was actually written, not the source metadata. Native
-        # MIDI titles remain full-length, while an E-SEQ output title reflects
-        # the format's physical 32-byte field.
-        title = (
+        # Preserved files use the title carried by PSONG.MNG. Other entries
+        # describe the title actually embedded in the prepared song.
+        title = (title_override or os.path.splitext(source_name)[0]) if preserved_midi else (
             extract_first_title_from_midi(local_path)
             if output_content == "midi"
             else extract_eseq_title_from_file(local_path)
         )
         if title.startswith("Error"):
             title = ""
+        title = title or os.path.splitext(source_name)[0]
+        catalog_record = b""
+        if include_song_catalog:
+            catalog_song = catalog_songs.get(source_path)
+            with open(local_path, "rb") as handle:
+                midi_format = int.from_bytes(handle.read(10)[8:10], "big")
+            catalog_record = build_smart_pianosoft_song_record(
+                image_path,
+                title,
+                source_record=catalog_song.raw_record if catalog_song is not None else b"",
+                midi_format=midi_format,
+            )
+            if preserved_midi and len(title.encode("cp1252", errors="replace")) > 32:
+                warning += " The PSONG.MNG title is limited to 32 bytes."
         prepared.append(
             _PreparedSong(
                 source_path=source_path,
                 image_path=image_path,
                 local_path=local_path,
-                title=title or os.path.splitext(source_name)[0],
+                title=title,
+                album_title=source_metadata.disk_title,
+                smart_pianosoft=source_metadata,
+                catalog_record=catalog_record,
+                warning=warning,
             )
         )
 
@@ -546,11 +685,24 @@ def _metadata_for_disk(metadata, image_prefix, disk_number):
     )
 
 
+def _metadata_for_songs(metadata, songs, disk_layout):
+    if disk_layout != "folders" or metadata.disk_title or not songs:
+        return metadata
+    return PianodirMetadata(
+        catalog_number=metadata.catalog_number,
+        disk_title=(
+            songs[0].album_title or os.path.basename(os.path.dirname(songs[0].source_path))
+        ),
+        raw_label_bytes=metadata.raw_label_bytes,
+    )
+
+
 def _verify_raw_image(
     raw_path,
     songs,
     *,
     include_pianodir,
+    extra_names=(),
     safety_margin_bytes=0,
 ):
     listing = read_image_listing(raw_path)
@@ -560,6 +712,7 @@ def _verify_raw_image(
         if not entry.directory
     }
     expected_names = {song.image_path.upper() for song in songs}
+    expected_names.update(extra_names)
     if include_pianodir:
         expected_names.add(PIANODIR_FILENAME)
     if actual_names != expected_names:
@@ -582,6 +735,30 @@ def _verify_raw_image(
         )
 
 
+def _midi_catalogs_for_songs(songs, image_stem):
+    """Carry source catalogs into this image with its actual names and order."""
+    catalogs = {}
+    song_template = next(
+        (song.smart_pianosoft.song_catalog for song in songs if song.smart_pianosoft.song_catalog),
+        b"",
+    )
+    disk_template = next(
+        (song.smart_pianosoft.disk_catalog for song in songs if song.smart_pianosoft.disk_catalog),
+        b"",
+    )
+    if song_template:
+        catalogs[SMART_PIANOSOFT_SONG_CATALOG_NAME] = build_smart_pianosoft_song_catalog(
+            song_template, [song.catalog_record for song in songs],
+        )
+    if disk_template:
+        # A pooled image can contain several albums. Give that compilation its
+        # own slot title; the combined song list retains all source albums.
+        if len({os.path.dirname(song.source_path) for song in songs}) > 1:
+            disk_template = update_smart_pianosoft_disk_title(disk_template, image_stem)
+        catalogs[SMART_PIANOSOFT_DISK_CATALOG_NAME] = disk_template
+    return catalogs
+
+
 def _pack_raw_images(
     prepared_songs,
     temp_directory,
@@ -592,6 +769,7 @@ def _pack_raw_images(
     safety_margin_bytes,
     metadata,
     output_content,
+    disk_layout="fill",
     progress_callback=None,
     cancel_callback=None,
     language_code=None,
@@ -611,8 +789,10 @@ def _pack_raw_images(
     current_raw = ""
     current_songs = []
     total = len(prepared_songs)
+    root_entry_limit = 0
 
     def start_image(image_number):
+        nonlocal root_entry_limit
         raw_path = os.path.join(temp_directory, f"raw_{image_number:03d}.img")
         disk_number = starting_number + image_number - 1
         if disk_number > MAX_IMAGE_NUMBER:
@@ -626,6 +806,9 @@ def _pack_raw_images(
             volume_label=_volume_label(image_prefix, disk_number),
             cancel_callback=cancel_callback,
         )
+        with open(raw_path, "rb") as handle:
+            # The generated FAT12 root also contains one volume-label entry.
+            root_entry_limit = _geometry_from_boot_sector(handle.read(512)).root_entries - 1
         if include_pianodir:
             _copy_host_file_into_image(
                 raw_path,
@@ -641,7 +824,20 @@ def _pack_raw_images(
             os.path.getsize(song.local_path),
             listing.cluster_size,
         )
+        if output_content == "midi":
+            catalogs = current_midi_catalogs([*current_songs, song])
+            required_bytes += sum(
+                allocated_size(len(payload), listing.cluster_size)
+                for payload in catalogs.values()
+            )
+            if len(listing.entries) + 1 + len(catalogs) > root_entry_limit:
+                return False
         return listing.free_space - required_bytes >= safety_margin_bytes
+
+    def current_midi_catalogs(songs):
+        return _midi_catalogs_for_songs(
+            songs, _numbered_image_stem(image_prefix, starting_number + len(raw_images)),
+        )
 
     def too_large_message(song):
         preparation_note = (
@@ -666,7 +862,11 @@ def _pack_raw_images(
             directory_path = _directory_path_for_songs(
                 temp_directory,
                 current_songs,
-                _metadata_for_disk(metadata, image_prefix, disk_number),
+                _metadata_for_disk(
+                    _metadata_for_songs(metadata, current_songs, disk_layout),
+                    image_prefix,
+                    disk_number,
+                ),
                 image_number,
             )
             _delete_eseq_directory_entries_from_image(
@@ -679,10 +879,19 @@ def _pack_raw_images(
                 PIANODIR_FILENAME,
                 cancel_callback=cancel_callback,
             )
+        catalogs = current_midi_catalogs(current_songs) if output_content == "midi" else {}
+        for name, payload in catalogs.items():
+            catalog_path = os.path.join(temp_directory, name)
+            with open(catalog_path, "wb") as handle:
+                handle.write(payload)
+            _copy_host_file_into_image(
+                current_raw, catalog_path, name, cancel_callback=cancel_callback,
+            )
         _verify_raw_image(
             current_raw,
             current_songs,
             include_pianodir=include_pianodir,
+            extra_names=catalogs,
             safety_margin_bytes=safety_margin_bytes,
         )
         raw_images.append((current_raw, tuple(current_songs)))
@@ -690,6 +899,15 @@ def _pack_raw_images(
     current_raw = start_image(1)
     for index, song in enumerate(prepared_songs, start=1):
         _raise_if_cancelled(cancel_callback)
+        if (
+            disk_layout == "folders"
+            and current_songs
+            and os.path.dirname(song.source_path)
+            != os.path.dirname(current_songs[0].source_path)
+        ):
+            finish_image()
+            current_songs = []
+            current_raw = start_image(len(raw_images) + 1)
         _notify(
             progress_callback,
             total + index - 1,
@@ -802,7 +1020,18 @@ def _build_emulator_song_lists_text(
     starting_number,
     metadata,
     output_content,
+    disk_layout="fill",
+    source_directory="",
+    warnings=(),
 ):
+    """Describe the whole set in image/playback order, retaining source albums."""
+    def source_album_label(song):
+        folder = os.path.dirname(song.source_path)
+        relative_folder = os.path.relpath(folder, source_directory)
+        return _song_list_display_text(
+            relative_folder if relative_folder != "." else os.path.basename(folder)
+        )
+
     lines = [
         "Emulator Disk Set Song Lists",
         f"Images: {len(final_paths)}",
@@ -816,9 +1045,14 @@ def _build_emulator_song_lists_text(
         lines.append(
             f"Image {image_index} of {len(final_paths)}: {os.path.basename(final_path)}"
         )
+        if disk_layout == "folders":
+            lines.append(f"Folder: {source_album_label(songs[0])}")
+            if output_content == "midi":
+                album = songs[0].album_title or os.path.basename(os.path.dirname(songs[0].source_path))
+                lines.append(f"Album: {_song_list_display_text(album)}")
         if output_content == "eseq":
             disk_metadata = _metadata_for_disk(
-                metadata,
+                _metadata_for_songs(metadata, songs, disk_layout),
                 image_prefix,
                 starting_number + image_index - 1,
             )
@@ -829,12 +1063,26 @@ def _build_emulator_song_lists_text(
             if catalog_number:
                 lines.append(f"Catalog: {catalog_number}")
         lines.append("")
+        previous_folder = None
         for song_index, song in enumerate(songs, start=1):
+            if disk_layout == "fill":
+                folder = os.path.dirname(song.source_path)
+                if folder != previous_folder:
+                    if previous_folder is not None:
+                        lines.append("")
+                    album_label = source_album_label(song)
+                    if song.album_title:
+                        album_label = f"{_song_list_display_text(song.album_title)} ({album_label})"
+                    lines.append(f"Source album: {album_label}")
+                    previous_folder = folder
+            fallback_title = os.path.splitext(os.path.basename(song.source_path))[0]
             lines.append(
-                f"{song_index}. {_song_list_display_text(song.title, 'Untitled')}"
+                f"{song_index}. {_song_list_display_text(song.title, fallback_title)}"
             )
         if image_index < len(final_paths):
             lines.append("")
+    if warnings:
+        lines.extend(["", "Warnings:", *[f"- {warning}" for warning in warnings]])
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -852,6 +1100,7 @@ def build_emulator_disk_images(
     output_ext="hfe",
     output_content="eseq",
     include_subfolders=True,
+    disk_layout="fill",
     shuffle=False,
     include_song_lists=False,
     overwrite_existing=False,
@@ -862,9 +1111,15 @@ def build_emulator_disk_images(
     midi_to_eseq_converter=None,
     eseq_to_midi_converter=None,
 ):
-    """Build numbered emulator-ready images containing only E-SEQ or only MIDI.
+    """Build numbered emulator-ready images with E-SEQ or MIDI songs.
 
     ``set_name`` is retained as a compatibility alias for ``prefix``.
+    ``disk_layout="folders"`` starts a new disk for each folder containing
+    songs. Oversized folders continue on additional disks without mixing
+    albums. Folder layout always scans nested folders; ``include_subfolders``
+    controls discovery only for the automatic-fill layout.
+    MIDI images carry available folder-local MNG catalogs, adapted to each
+    image's songs, while E-SEQ images use PIANODIR.FIL.
     """
     source_directory = os.path.abspath(os.fspath(source_directory))
     output_directory = os.path.abspath(os.fspath(output_directory))
@@ -876,6 +1131,8 @@ def build_emulator_disk_images(
     output_content = str(output_content or "eseq").strip().lower()
     if output_content not in EMULATOR_CONTENT_FORMATS:
         raise FloppyImageError("Disk contents must be Yamaha E-SEQ or Standard MIDI.")
+    if disk_layout not in EMULATOR_DISK_LAYOUTS:
+        raise FloppyImageError("Disk layout must be 'fill' or 'folders'.")
     if disk_format is None:
         disk_format = next(item for item in DISK_FORMATS if item.key == "ibm.720")
     if disk_format not in DISK_FORMATS:
@@ -897,20 +1154,55 @@ def build_emulator_disk_images(
 
     song_paths = discover_song_files(
         source_directory,
-        include_subfolders=include_subfolders,
+        include_subfolders=disk_layout == "folders" or include_subfolders,
     )
     if not song_paths:
         raise FloppyImageError(
             "The selected folder does not contain any MIDI or Yamaha E-SEQ song files."
         )
-    title_overrides = _load_index_title_overrides(
-        source_directory,
-        song_paths,
-        cancel_callback=cancel_callback,
+    folders = {}
+    for song_path in song_paths:
+        _raise_if_cancelled(cancel_callback)
+        folders.setdefault(os.path.dirname(song_path), []).append(song_path)
+    title_overrides = {}
+    folder_metadata = {}
+    catalog_songs = {}
+    for folder, folder_songs in folders.items():
+        _raise_if_cancelled(cancel_callback)
+        folder_metadata[folder] = smart_pianosoft_metadata_from_directory(folder)
+        catalog_songs.update(_catalog_song_matches(
+            folder_metadata[folder].songs, folder_songs, cancel_callback=cancel_callback,
+        ))
+    title_overrides.update({path: song.title for path, song in catalog_songs.items() if song.title})
+
+    # Explicit index edits take precedence over catalog and embedded titles.
+    title_overrides.update(
+        _load_index_title_overrides(
+            source_directory,
+            song_paths,
+            cancel_callback=cancel_callback,
+        )
     )
+    for folder, folder_songs in folders.items():
+        _raise_if_cancelled(cancel_callback)
+        if folder != source_directory:
+            title_overrides.update(
+                _load_index_title_overrides(
+                    folder,
+                    folder_songs,
+                    cancel_callback=cancel_callback,
+                )
+            )
     shuffle = bool(shuffle)
     include_song_lists = bool(include_song_lists)
-    if shuffle:
+    if disk_layout == "folders":
+        # Discovery already supplies natural folder/song order. Keep each
+        # containing directory together, even when shuffling its songs.
+        for folder_songs in folders.values():
+            if shuffle:
+                random.shuffle(folder_songs)
+        song_paths = [path for paths in folders.values() for path in paths]
+    elif shuffle:
         random.shuffle(song_paths)
 
     image_prefix = sanitize_image_prefix(prefix if prefix is not None else set_name)
@@ -936,6 +1228,8 @@ def build_emulator_disk_images(
             temp_directory,
             output_content=output_content,
             title_overrides=title_overrides,
+            folder_metadata=folder_metadata,
+            catalog_songs=catalog_songs,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
             midi_to_eseq_converter=midi_to_eseq_converter,
@@ -951,6 +1245,7 @@ def build_emulator_disk_images(
             safety_margin_bytes=safety_margin_bytes,
             metadata=metadata,
             output_content=output_content,
+            disk_layout=disk_layout,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
             language_code=language_code,
@@ -967,6 +1262,12 @@ def build_emulator_disk_images(
             output_ext,
             len(raw_images),
             starting_number,
+        )
+        warnings = tuple(
+            f"{os.path.basename(final_path)} / {song.image_path} "
+            f"({os.path.relpath(song.source_path, source_directory)}): {song.warning}"
+            for (_raw_path, songs), final_path in zip(raw_images, final_paths)
+            for song in songs if song.warning
         )
         song_list_path = (
             _song_lists_output_path(
@@ -1060,6 +1361,9 @@ def build_emulator_disk_images(
                         starting_number=starting_number,
                         metadata=metadata,
                         output_content=output_content,
+                        disk_layout=disk_layout,
+                        source_directory=source_directory,
+                        warnings=warnings,
                     )
                 )
             staged_outputs.append((staged_song_list_path, song_list_path))
@@ -1101,6 +1405,8 @@ def build_emulator_disk_images(
             safety_margin_bytes=safety_margin_bytes,
             shuffled=shuffle,
             song_list_path=song_list_path,
+            disk_layout=disk_layout,
+            warnings=warnings,
         )
     except Exception:
         for path in reversed(committed_paths):

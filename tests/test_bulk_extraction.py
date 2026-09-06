@@ -123,6 +123,58 @@ def test_bulk_extraction_uses_album_names_and_falls_back_to_image_names(tmp_path
     assert (output / "three" / "README.TXT").read_bytes() == b"fallback"
 
 
+def test_bulk_extraction_reads_pdisk_album_titles_with_pianodir_priority(tmp_path):
+    source = tmp_path / "images"
+    source.mkdir()
+    for name in ["catalog", "pianodir", "invalid"]:
+        (source / f"{name}.img").write_bytes(b"image")
+    pdisk = (
+        b"PDISK   MNG   \r\nP.PLAYER      \r\nVer1.01DMV0.53\r\n"
+        + b"Evening Jazz".ljust(64, b" ") + b"\r\n"
+    )
+    files = {
+        "catalog.img": {"pdisk.mng": pdisk, "FIRST.MID": _minimal_midi_bytes()},
+        "pianodir.img": {"PDISK.MNG": pdisk, "PIANODIR.FIL": _pianodir_bytes("Existing title")},
+        "invalid.img": {"PDISK.MNG": b"truncated", "FIRST.MID": _minimal_midi_bytes()},
+    }
+    result = bulk_extract_images(
+        source, tmp_path / "output", use_album_names=True,
+        session_loader=lambda path, **kwargs: FakeImageSession(path, files[Path(path).name]),
+    )
+    assert {Path(path).name for path in result.output_directories} == {
+        "Evening Jazz", "Existing title", "invalid",
+    }
+    assert result.errors == ()
+
+
+def test_bulk_extraction_reads_lf_only_catalog_titles_and_album_names(tmp_path):
+    source = tmp_path / "images"
+    source.mkdir()
+    (source / "numeric.img").write_bytes(b"image")
+    pdisk = (
+        b"PDISK   MNG   \r\nP.PLAYER      \r\nVer1.01DMV0.54\r\n"
+        + b"Catalog album".ljust(64, b" ") + b"\r\nS           \r\n"
+    ).replace(b"\r\n", b"\n")
+    psong = _psong_bytes([
+        ("01.MID", "First catalog title"), ("02.MID", "Second catalog title"),
+    ]).replace(b"\r\n", b"\n")
+    files = {
+        "PDISK.MNG": pdisk, "PSONG.MNG": psong,
+        "01.MID": _minimal_midi_bytes(), "02.MID": _minimal_midi_bytes(),
+    }
+    result = bulk_extract_images(
+        source, tmp_path / "output", use_album_names=True, long_midi_filenames=True,
+        session_loader=lambda path, **kwargs: FakeImageSession(path, files),
+    )
+    assert result.errors == ()
+    album = tmp_path / "output" / "Catalog album"
+    assert sorted(path.name for path in album.glob("*.mid")) == [
+        "01 - First catalog title.mid", "02 - Second catalog title.mid",
+    ]
+    assert (album / "PDISK.MNG").read_bytes() == pdisk
+    assert (album / "PSONG.MNG").read_bytes() == psong
+
+
 def test_bulk_extraction_conversion_omits_eseq_and_yamaha_directory_files(tmp_path):
     source = tmp_path / "images"
     output = tmp_path / "output"
