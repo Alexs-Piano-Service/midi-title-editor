@@ -47,6 +47,7 @@ def test_emulator_progress_dialog_keeps_a_stable_width_for_long_paths():
     dialog = QProgressDialog("Preparing...", "Cancel", 0, 10)
     window = SimpleNamespace(
         _scaled_int=lambda value, minimum=0: max(int(minimum), int(value)),
+        _lt=lambda text: text,
     )
     window._set_progress_dialog_message = (
         lambda progress_dialog, message: MidiTitleWindow._set_progress_dialog_message(

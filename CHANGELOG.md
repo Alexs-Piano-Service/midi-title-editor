@@ -29,6 +29,8 @@ with release sections grouped by version and date.
 
 ### Changed
 
+- Shortened dialog instructions and reorganized the README around getting started,
+  common tasks, and user needs. Detailed emulator disk-set guidance has its own guide.
 - `Include Song Lists` is a build-wide control outside the individual disk
   settings. One combined overview covers all images, albums, and tracks,
   including nested albums and albums split across images. MIDI lists now name
@@ -48,6 +50,10 @@ with release sections grouped by version and date.
 
 ### Fixed
 
+- Completed missing translations in welcome pages, conversion and disk dialogs,
+  validation errors, and file pickers across all supported languages. Corrected
+  mistranslations, clarified deletion warnings, and preserved specific action
+  button labels when translating dialogs.
 - Extraction and batch disk creation now read MNG catalogs whose CRLF endings
   were converted to LF. Album/song fields retain their correct offsets, and
   generated catalogs use CRLF. Batch creation also recognizes old numeric

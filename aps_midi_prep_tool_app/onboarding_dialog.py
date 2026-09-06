@@ -16,21 +16,89 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .message_catalog import DEFAULT_LANGUAGE, normalize_language_code, translate_text
+from .message_catalog import DEFAULT_LANGUAGE, normalize_language_code, tr, translate_text
+from .onboarding_translations import ONBOARDING_TRANSLATIONS
 from .ui_utils import center_dialog_on_parent
 from .app_info import (
-    APP_COMPACT_LEGAL_NOTICE,
     APP_COMPANY,
     APP_TITLE_WITH_VERSION,
     APP_WEBSITE,
-    COPYRIGHT_HOLDER,
-    COPYRIGHT_YEAR,
     SETTINGS_APP,
     SETTINGS_ORG,
 )
 
 
 SETTING_LANGUAGE = "language"
+
+
+ONBOARDING_PAGES = (
+    ("Overview", "overview"),
+    ("Extract Files From Floppy", "extract"),
+    ("Bulk Extraction", "bulk"),
+    ("Build Emulator Disk Sets", "builder"),
+    ("Format Or Fill A Floppy", "floppy"),
+    ("Save For Nalbantov", "nalbantov"),
+    ("Convert E-SEQ to MIDI", "eseq_to_midi"),
+    ("Convert MIDI to E-SEQ", "midi_to_eseq"),
+    ("Edit Titles", "titles"),
+    ("Convert SMF1 to SMF0", "smf"),
+    ("Save Safely", "safe"),
+)
+
+# @ prefixes identify catalog message IDs; other items are translated labels.
+ONBOARDING_MENU_PATHS = {
+    "next": ("Next",),
+    "read": ("Disk", "Read Floppy..."),
+    "open_image": ("File", "Open", "Open Image..."),
+    "save": ("File", "Save"),
+    "save_as": ("File", "Save As..."),
+    "save_image": ("File", "Save As Image..."),
+    "bulk": ("Utilities", "@bulk.action"),
+    "builder": ("Utilities", "@emulator.action"),
+    "folders": ("One album per folder",),
+    "fill": ("Fill disks automatically",),
+    "song_lists": ("@emulator.include_song_lists",),
+    "format": ("Disk", "Format Floppy Disk..."),
+    "write_image": ("Disk", "Write Current Image to Floppy..."),
+    "eseq_midi": ("Utilities", "Convert", "Convert All E-SEQ to MIDI"),
+    "midi_eseq": ("Utilities", "Convert", "Convert All MIDI to E-SEQ"),
+    "title_column": ("Title",),
+    "smf": ("Utilities", "Convert", "Convert All SMF1 to SMF0"),
+    "write_protect": ("File", "Write Protection", "Write-Protect Original"),
+    "backups": ("File", "Save Options", "Back up before Saving"),
+}
+
+
+def onboarding_text(message_id, language_code, **fields):
+    language_code = normalize_language_code(language_code)
+    return ONBOARDING_TRANSLATIONS[language_code][message_id].format(**fields)
+
+
+def build_onboarding_pages(language_code):
+    """Render translated prose with the same menu labels shown in the app."""
+    language_code = normalize_language_code(language_code)
+    menu_fields = {}
+    for name, labels in ONBOARDING_MENU_PATHS.items():
+        translated_labels = [
+            tr(label[1:], language_code) if label.startswith("@")
+            else translate_text(label, language_code)
+            for label in labels
+        ]
+        menu_fields[name] = "<strong>" + html.escape(" → ".join(translated_labels)) + "</strong>"
+
+    pages = []
+    for title, message_id in ONBOARDING_PAGES:
+        # Escape prose before inserting trusted markup, so translated text is
+        # never interpreted as HTML and menu labels retain their emphasis.
+        paragraphs = ONBOARDING_TRANSLATIONS[language_code][message_id].split("\n\n")
+        body_html = "".join(
+            f"<p>{html.escape(paragraph).format(**menu_fields)}</p>"
+            for paragraph in paragraphs
+        )
+        if message_id == "overview":
+            body_html += f'<p><a href="{html.escape(APP_WEBSITE, quote=True)}">{html.escape(APP_COMPANY)}</a></p>'
+        pages.append((translate_text(title, language_code), body_html))
+    return pages
 
 
 def _settings_language_code(settings):
@@ -94,184 +162,11 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
             dialog.setWindowModality(Qt.WindowModal)
         if app_icon is not None and not app_icon.isNull():
             dialog.setWindowIcon(app_icon)
-        dialog.setWindowTitle(f"{t('Welcome to')} {APP_TITLE_WITH_VERSION}")
+        dialog.setWindowTitle(onboarding_text("welcome", language_code, app=APP_TITLE_WITH_VERSION))
         dialog.setModal(True)
         dialog.setMinimumWidth(560)
 
-        pages = [
-            (
-                "Overview",
-                f"""
-                <p><strong>APS MIDI Prep Tool</strong> is a Disklavier preservation and preparation
-                workstation for MIDI files, Yamaha E-SEQ files, floppy images, and real disks.</p>
-                <p>Pick a workflow above, or use <strong>Next</strong>, to see the path that
-                matches what you are trying to do.</p>
-                <ul>
-                  <li>Edit MIDI and E-SEQ title metadata.</li>
-                  <li>Copy or back up Yamaha floppies and floppy images.</li>
-                  <li>Prepare HFE images for Nalbantov emulators.</li>
-                  <li>Convert E-SEQ to MIDI, MIDI to E-SEQ, and SMF1 to SMF0.</li>
-                  <li>Use <strong>File</strong> for sources and save behavior, <strong>Disk</strong> for floppy/media operations, and <strong>Utilities</strong> for batch tools.</li>
-                  <li>Use <strong>View &gt; View Logs...</strong> for live console output and <strong>Help &gt; Report a Bug...</strong> when you need to send a support report.</li>
-                </ul>
-                <p><a href="{APP_WEBSITE}">{html.escape(APP_COMPANY)}</a></p>
-                """,
-            ),
-            (
-                "Extract Files From Floppy",
-                """
-                <p>Use <strong>Disk &gt; Read Floppy...</strong> for a floppy drive or Greaseweazle, or
-                <strong>File &gt; Open &gt; Open Image...</strong> for IMG, HFE, BIN, and related image files.</p>
-                <ul>
-                  <li><strong>File &gt; Save As...</strong> copies the listed files to a folder.</li>
-                  <li><strong>File &gt; Save As Image...</strong> creates a new floppy image without touching the original.</li>
-                  <li>The app repairs Yamaha copy-protected boot sectors in the working copy.</li>
-                  <li>Use recovery mode when normal reading fails or the disk is physically damaged.</li>
-                  <li>For fragile or difficult disks, use Greaseweazle and choose archival SCP when you want a raw flux capture.</li>
-                  <li>Keep the backup image unchanged, then make edited copies from it when needed.</li>
-                </ul>
-                <p>Related articles: <a href="https://www.alexanderpeppe.com/disklavier-floppy-backups/">Backing up Disklavier floppy disks</a>
-                and <a href="https://www.alexanderpeppe.com/making-archival-copies-of-disks-using-a-greaseweazle-v4/">Backing Up Yamaha Disklavier Floppy Disks with a Greaseweazle</a>.</p>
-                """,
-            ),
-            (
-                "Bulk Extraction",
-                """
-                <p>Use <strong>Utilities &gt; Bulk Extraction...</strong> to extract files from every
-                supported floppy image in a folder in one operation.</p>
-                <ul>
-                  <li>Choose the folder containing the floppy images and a separate output folder.</li>
-                  <li>Each image gets its own output folder, named from the image filename or an available <strong>PIANODIR.FIL</strong> album title.</li>
-                  <li>Optional E-SEQ conversion writes MIDI songs in place of the E-SEQ source files.</li>
-                  <li>When conversion is enabled, Yamaha directory files are omitted by default; enable the source-file option when you also want to retain them.</li>
-                  <li>The progress window tracks the complete batch and the files in the current image.</li>
-                </ul>
-                """,
-            ),
-            (
-                "Build Emulator Disk Sets",
-                """
-                <p>Use <strong>Utilities &gt; Build Emulator Disk Set...</strong> to turn a whole
-                folder of MIDI and Yamaha E-SEQ songs into numbered emulator-ready disks.</p>
-                <ul>
-                  <li><strong>One album per folder</strong> always scans nested folders and starts a new disk for each folder's own songs, using its <strong>PDISK.MNG</strong> album title when available, otherwise its folder name. Empty folders are skipped; large albums continue on extra disks without mixing folders.</li>
-                  <li><strong>Fill disks automatically</strong> combines songs into as many full disks as needed. In this layout, <strong>Include nested folders</strong> is optional; turn it off to use only the selected folder. This choice is remembered when switching layouts.</li>
-                  <li>Expand <strong>Naming and capacity options</strong> to change numbering, the free-space reserve, or the shared album title. The filename example updates as you change settings.</li>
-                  <li>Choose E-SEQ or Standard MIDI for the songs; source songs are converted only when necessary.</li>
-                  <li>E-SEQ disks receive DOS 8.3 <strong>.FIL</strong> names and a <strong>PIANODIR.FIL</strong> containing only that image's songs and album metadata.</li>
-                  <li>MIDI disks contain <strong>.MID</strong> songs plus available <strong>PSONG.MNG</strong> and <strong>PDISK.MNG</strong> catalogs, updated for each image's songs. Catalogs are included independently of <strong>Include Song Lists</strong>.</li>
-                  <li>Each folder's <strong>PSONG.MNG</strong> supplies song titles for original or extraction-renamed files. Matching <strong>INDEX.csv</strong> title edits take precedence; MIDI keeps the full value and E-SEQ uses its 32-character limit.</li>
-                  <li><strong>Include Song Lists</strong> applies to the entire build and writes one combined text overview, organized by image name, with every album and track in playback order. Nested albums and albums spanning several images are included; available song titles are used, with filenames as a fallback.</li>
-                  <li>The usual Disklavier choice is 720K DD; disk capacity and the E-SEQ-only 60-song limit are enforced.</li>
-                  <li>Generated images are verified; if an exact output name exists, the utility lists the affected files and asks before replacing them.</li>
-                </ul>
-                """,
-            ),
-            (
-                "Format Or Fill A Floppy",
-                """
-                <p>Use this path when you want to create a fresh Disklavier floppy or add files to
-                an existing disk.</p>
-                <ul>
-                  <li>For a blank disk, use <strong>Disk &gt; Format Floppy Disk...</strong>; IBM 720K DD is the usual Disklavier choice.</li>
-                  <li>Check the E-SEQ option when preparing a PianoSoft-style disk with a generated directory file.</li>
-                  <li>For an existing disk, use <strong>Disk &gt; Read Floppy...</strong>, then drag new files into the list.</li>
-                  <li>In E-SEQ modes, dropped MIDI files are staged as E-SEQ automatically.</li>
-                  <li><strong>File &gt; Save</strong> writes pending changes back to the current floppy when overwrite is enabled.</li>
-                  <li><strong>File &gt; Write Protection &gt; Write-Protect Original</strong> controls whether Save may overwrite the current floppy or image.</li>
-                  <li><strong>Disk &gt; Save To Floppy...</strong> saves the current listed files to a selected formatted floppy drive.</li>
-                  <li><strong>Disk &gt; Write Current Image to Floppy...</strong> rewrites a whole disk from the current image.</li>
-                </ul>
-                """,
-            ),
-            (
-                "Save For Nalbantov",
-                """
-                <p>For a folder of songs, use <strong>Utilities &gt; Build Emulator Disk Set...</strong>
-                and choose E-SEQ contents with HFE output. For a manually edited image, use <strong>File &gt; Save As Image...</strong>
-                and choose <strong>HFE (Nalbantov)</strong>.</p>
-                <ul>
-                  <li>Copy the finished HFE file to the USB stick prepared for the emulator.</li>
-                  <li>For Nalbantov emulators, keep the setup/configuration files from the original Nalbantov USB stick and use Nalbantov's instructions or software when preparing replacement media.</li>
-                  <li>To replace a virtual disk slot, rename or copy the output over one of the existing <strong>DSKA####.hfe</strong> files on the Nalbantov USB stick.</li>
-                  <li>For older E-SEQ-only Disklaviers, convert MIDI to E-SEQ and let the tool generate PIANODIR.FIL.</li>
-                  <li>Do not mix MIDI files with E-SEQ files and PIANODIR.FIL on the same disk image.</li>
-                </ul>
-                <p>Related article: <a href="https://www.alexanderpeppe.com/eseq-and-pianodir-fil/">Converting MIDI Files and Creating PIANODIR.FIL</a>.</p>
-                """,
-            ),
-            (
-                "Convert E-SEQ to MIDI",
-                """
-                <p>Open an E-SEQ folder, floppy image, or floppy disk, then use
-                <strong>Utilities &gt; Convert &gt; Convert All E-SEQ to MIDI</strong>.</p>
-                <ul>
-                  <li>Conversions are staged in the file list first.</li>
-                  <li>Song titles, timing, and Yamaha PIANODIR information are preserved where possible.</li>
-                  <li>Nothing is written until you choose <strong>File &gt; Save</strong>, <strong>File &gt; Save As...</strong>, or <strong>File &gt; Save As Image...</strong>.</li>
-                </ul>
-                """,
-            ),
-            (
-                "Convert MIDI to E-SEQ",
-                """
-                <p>Open a MIDI folder, or drag MIDI files into the table, then use
-                <strong>Utilities &gt; Convert &gt; Convert All MIDI to E-SEQ</strong> to prepare Yamaha E-SEQ files.</p>
-                <ul>
-                  <li>E-SEQ titles are limited to 32 characters.</li>
-                  <li>In any E-SEQ mode, dropped MIDI files are staged as E-SEQ and Type 1 MIDI is converted to Type 0 first.</li>
-                  <li>The tool can generate or refresh <strong>PIANODIR.FIL</strong>.</li>
-                  <li><strong>File &gt; Save Options &gt; Create Album Subfolder</strong> controls album folders for <strong>File &gt; Save As...</strong> folder exports.</li>
-                  <li>The separate <strong>Create Album Subfolder for Save As Image</strong> option applies the same catalog/album grouping to image exports and is off by default.</li>
-                  <li>E-SEQ disks support up to 60 songs, and floppy/image size limits still apply.</li>
-                </ul>
-                """,
-            ),
-            (
-                "Edit Titles",
-                """
-                <p>Use <strong>File &gt; Open &gt; Open MIDI Folder...</strong>, or drag files into the table, to edit
-                local MIDI or E-SEQ titles.</p>
-                <ul>
-                  <li>Click the <strong>Title</strong> column to edit a song title.</li>
-                  <li>Native MIDI titles may exceed 32 characters and are saved in full; E-SEQ titles are physically limited to 32 characters.</li>
-                  <li>Use <strong>View &gt; Format for Disklavier screen</strong> when you intentionally want two 16-character legacy display rows.</li>
-                  <li>Use <strong>View &gt; Long title warning</strong> to show or hide the legacy title-length warning; it does not truncate MIDI titles.</li>
-                  <li>Use <strong>Save</strong> for the current files, or <strong>Save As</strong> for copies.</li>
-                </ul>
-                """,
-            ),
-            (
-                "Convert SMF1 to SMF0",
-                """
-                <p>Some Yamaha workflows need Standard MIDI File Type 0, also called SMF0.</p>
-                <ul>
-                  <li>Open a MIDI folder, or drag MIDI files directly into the table.</li>
-                  <li>Use <strong>Utilities &gt; Convert &gt; Convert All SMF1 to SMF0</strong> to convert Type 1 files to single-track MIDI.</li>
-                  <li>Files that are already Type 0 are left unchanged.</li>
-                </ul>
-                """,
-            ),
-            (
-                "Save Safely",
-                """
-                <p>The app is cautious with originals, especially floppies and disk images.</p>
-                <ul>
-                  <li><strong>File &gt; Save</strong> writes back to the current source only when overwrite is allowed.</li>
-                  <li><strong>File &gt; Save As...</strong> writes files to a selected folder.</li>
-                  <li><strong>File &gt; Save As Image...</strong> creates a new image file.</li>
-                  <li><strong>File &gt; Write Protection &gt; Write-Protect Original</strong> keeps Save from overwriting images or floppies until you turn protection off.</li>
-                  <li><strong>File &gt; Save Options &gt; Back up before Saving</strong> creates backups before overwriting.</li>
-                  <li><strong>File &gt; Save Options &gt; Create Album Subfolder</strong> creates album folders for <strong>File &gt; Save As...</strong> exports.</li>
-                  <li><strong>Create Album Subfolder for Save As Image</strong> optionally uses the same catalog/album folder for image exports. It is off by default and never changes floppy-write destinations.</li>
-                  <li><strong>File &gt; Save Options &gt; Create Tag Sidecars When Saving</strong> creates optional tag sidecar files only for local folder saves.</li>
-                  <li><strong>File &gt; Save Options &gt; Create Metadata Summary When Saving</strong> creates an optional MIDI metadata summary for folder saves.</li>
-                  <li><strong>View &gt; View Logs...</strong> shows live console output for troubleshooting.</li>
-                  <li><strong>Settings &gt; Keyboard Shortcuts...</strong> lists the default hotkeys and lets you customize them.</li>
-                </ul>
-                """,
-            ),
-        ]
+        pages = build_onboarding_pages(language_code)
 
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(16, 16, 16, 14)
@@ -285,10 +180,10 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
         selector_layout = QHBoxLayout()
         selector_layout.setContentsMargins(0, 0, 0, 0)
         selector_layout.setSpacing(8)
-        selector_label = QLabel(t("Workflow"))
+        selector_label = QLabel(onboarding_text("workflow", language_code))
         workflow_selector = QComboBox(dialog)
         for page_title, _ in pages:
-            workflow_selector.addItem(t(page_title))
+            workflow_selector.addItem(page_title)
         selector_layout.addWidget(selector_label)
         selector_layout.addWidget(workflow_selector, stretch=1)
         layout.addLayout(selector_layout)
@@ -298,10 +193,10 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
         for page_title, page_html in pages:
             page_stack.addWidget(
                 _workflow_page(
-                    t(page_title),
+                    page_title,
                     page_html,
                     body_font_stack,
-                    notice_text=APP_COMPACT_LEGAL_NOTICE,
+                    notice_text=onboarding_text("notice", language_code),
                 )
             )
         layout.addWidget(page_stack)
@@ -332,7 +227,9 @@ def show_first_time_dialog(app_icon: QIcon | None = None, parent=None, *, force_
                 workflow_selector.setCurrentIndex(index)
             back_button.setEnabled(index > 0)
             next_button.setEnabled(index < len(pages) - 1)
-            page_count_label.setText(f"{index + 1} {t('of')} {len(pages)}")
+            page_count_label.setText(onboarding_text(
+                "page_count", language_code, current=index + 1, total=len(pages)
+            ))
             dialog.adjustSize()
             center_dialog_on_parent(dialog, parent)
 

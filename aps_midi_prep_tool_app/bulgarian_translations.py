@@ -16,14 +16,10 @@ BULGARIAN_MESSAGE_TRANSLATIONS = {
     "dialog.confirm_image_save.title": "Потвърждение за запис на образ",
     "dialog.confirm_floppy_save.title": "Потвърждение за запис на дискета",
     "dialog.confirm_save_update.message": (
-        "Записването ще актуализира окончателно {count} {entry_word} в {container}.\n\n"
-        "Файловете, премахнати от списъка, ще бъдат изтрити. Преименуваните "
-        "файлове ще запазят данните на песните си под новото име.\n\n"
-        "Да се продължи ли?"
+        'При запис ще бъдат изтрити окончателно {count} {entry_word} от {container}.\n\nПреименуваните файлове ще запазят данните на песните под новото име.\n\nДа се продължи ли?'
     ),
     "dialog.save_to_floppy.hint": (
-        "Изберете форматирано флопи устройство, което да получи текущия списък "
-        "с файлове във формат {format}."
+        'Изберете устройството с форматирана дискета за текущите файлове във формат {format}.'
     ),
     "dialog.write_image_to_floppy.hint": (
         "Изберете къде да бъде записан текущият образ във формат {format}."
@@ -69,8 +65,7 @@ BULGARIAN_MESSAGE_TRANSLATIONS = {
         "с администраторски права, ако е необходим пряк достъп до устройството."
     ),
     "guidance.cancelled": (
-        "Операцията беше отменена преди завършването ѝ. Не са необходими други "
-        "действия, освен ако не искате да опитате отново."
+        'Операцията беше отменена преди завършването ѝ.'
     ),
     "guidance.greaseweazle_sector_failures": (
         "Проверете устройството, кабела, формата на диска и състоянието на носителя. "
@@ -90,12 +85,12 @@ BULGARIAN_TEXT_TRANSLATIONS = {
     "E-SEQ -> MIDI": "E-SEQ → MIDI",
     "MIDI -> E-SEQ": "MIDI → E-SEQ",
     "For Save As folder exports, create a subfolder from the catalog number and album title. Save As Image and floppy writes are not affected.": (
-        "При експортиране в папка чрез „Запиши като“ създава подпапка от "
-        "каталожния номер и заглавието на албума. „Запиши като образ“ и записването "
+        "При експортиране в папка чрез „Запис като“ създава подпапка от "
+        "каталожния номер и заглавието на албума. „Запис като образ“ и записването "
         "на дискета не се засягат."
     ),
     "Create an album subfolder only for Save As folder exports.": (
-        "Създава подпапка за албума само при експортиране в папка чрез „Запиши като“."
+        "Създава подпапка за албума само при експортиране в папка чрез „Запис като“."
     ),
     "Please wait for the current operation to finish before changing album subfolder output.": (
         "Изчакайте текущата операция да завърши, преди да промените извеждането в "
@@ -115,7 +110,7 @@ BULGARIAN_TEXT_TRANSLATIONS = {
     ".tags.txt sidecar file(s) were written next to the exported files.": (
         "Помощните .tags.txt файлове са записани до експортираните файлове."
     ),
-    "ImagePath": "Път до образа",
+    "ImagePath": 'Път в образа',
     "New Image": "Нов образ",
     "Save To Floppy": "Запис на дискета",
     "Auto Write-Protect": "Автоматична защита от запис",
@@ -158,7 +153,7 @@ BULGARIAN_TEXT_TRANSLATIONS = {
     "Feedback sent.": "Обратната връзка е изпратена.",
     "Feedback Failed": "Неуспешно изпращане на обратната връзка",
     "Feedback failed. See View > View Logs for details.": (
-        "Обратната връзка не беше изпратена. За подробности вижте „Изглед > Преглед на журналите“."
+        "Обратната връзка не беше изпратена. За подробности вижте „Изглед > Преглед на логове“."
     ),
     "The app could not send feedback": "Приложението не можа да изпрати обратната връзка",
     "Error message shown by the app:": "Съобщение за грешка, показано от приложението:",
@@ -207,27 +202,27 @@ BULGARIAN_TEXT_TRANSLATIONS = {
     ),
     "Check your internet connection, then try again. You can also use View > View Logs... to save the log manually.": (
         "Проверете връзката си с интернет и опитайте отново. Можете също да използвате "
-        "„Изглед > Преглед на журналите...“, за да запишете журнала ръчно."
+        "„Изглед > Преглед на логове...“, за да запишете журнала ръчно."
     ),
     "Original floppy write is protected. Turn off File > Write Protection > Write-Protect Original, or use Save As or Save As Image.": (
         "Записът върху оригиналната дискета е защитен. Изключете „Файл > Защита от "
-        "запис > Защита на оригинала от запис“ или използвайте „Запиши като“ или "
-        "„Запиши като образ“."
+        "запис > Защита на оригинала от запис“ или използвайте „Запис като“ или "
+        "„Запис като образ“."
     ),
     "Original image write is protected. Turn off File > Write Protection > Write-Protect Original, or use Save As or Save As Image.": (
         "Записът върху оригиналния образ е защитен. Изключете „Файл > Защита от "
-        "запис > Защита на оригинала от запис“ или използвайте „Запиши като“ или "
-        "„Запиши като образ“."
+        "запис > Защита на оригинала от запис“ или използвайте „Запис като“ или "
+        "„Запис като образ“."
     ),
     "Save To Image Is Off": "Записът в образ е изключен",
     "Save To Floppy Is Off": "Записът на дискета е изключен",
     "Use Save As to export files, use Save As Image to create a separate image, or turn off File > Write Protection > Write-Protect Original.": (
-        "Използвайте „Запиши като“, за да експортирате файловете, „Запиши като образ“, "
+        "Използвайте „Запис като“, за да експортирате файловете, „Запис като образ“, "
         "за да създадете отделен образ, или изключете „Файл > Защита от запис > "
         "Защита на оригинала от запис“."
     ),
     "Use Save As Image to save an image file, or turn off File > Write Protection > Write-Protect Original.": (
-        "Използвайте „Запиши като образ“, за да запишете файл с образ, или изключете "
+        "Използвайте „Запис като образ“, за да запишете файл с образ, или изключете "
         "„Файл > Защита от запис > Защита на оригинала от запис“."
     ),
     "Song List": "Списък с песни",
@@ -268,7 +263,7 @@ BULGARIAN_TEXT_TRANSLATIONS = {
     "Not Now": "Не сега",
     "Read": "Прочитане",
     "Recover": "Възстановяване",
-    "Image": "Образ",
+    "Image": 'Създаване на образ',
     "Read using": "Четене чрез",
     "Floppy Drive": "Флопи устройство",
     "Floppy drive": "Флопи устройство",
@@ -330,7 +325,7 @@ BULGARIAN_TEXT_TRANSLATIONS = {
     "Free": "Свободно",
     "Unallocated": "Неразпределено",
     "Unknown": "Неизвестно",
-    "No readable usage": "Няма четими данни за използването",
+    "No readable usage": 'Няма данни за използваното място',
     "No readable volumes or partitions were detected.": (
         "Не са открити четими томове или дялове."
     ),
@@ -360,8 +355,7 @@ BULGARIAN_TEXT_TRANSLATIONS = {
         "подразбиране на Greaseweazle."
     ),
     "Number of retries per seek-retry. Use 0 for Greaseweazle's default.": (
-        "Брой повторни опити при всяко повторно позициониране. Използвайте 0 за "
-        "стойността по подразбиране на Greaseweazle."
+        'Повторни опити за четене след всяко преместване на главата. Използвайте 0 за стойността по подразбиране на Greaseweazle.'
     ),
     "Choose the image type to offer after the disk opens. SCP reads as raw flux first; other types use the selected disk format.": (
         "Изберете типа образ, който да бъде предложен след отварянето на диска. SCP "
@@ -374,7 +368,7 @@ BULGARIAN_TEXT_TRANSLATIONS = {
     ),
     "Copies a full disk image and tries Yamaha/FAT repair plus raw MIDI/E-SEQ/PIANODIR scanning. The source floppy is not modified.": (
         "Копира пълен образ на диска и опитва поправка на Yamaha/FAT структурата, "
-        "както и сканиране на сурови MIDI/E-SEQ/PIANODIR данни. Изходната дискета "
+        "както и сканиране на сурови MIDI/E-SEQ/PIANODIR данни. Оригиналната дискета "
         "не се променя."
     ),
     "After the floppy opens, queue detected Yamaha E-SEQ songs for Standard MIDI conversion.": (

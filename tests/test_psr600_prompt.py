@@ -3,6 +3,7 @@ import unittest
 from aps_midi_prep_tool_app.main_window import (
     _psr600_conversion_prompt_copy,
 )
+from aps_midi_prep_tool_app.message_catalog import language_options, translate_text
 
 
 class Psr600PromptTests(unittest.TestCase):
@@ -58,6 +59,34 @@ class Psr600PromptTests(unittest.TestCase):
             "1 damaged Melody bank will stop at its last valid event.",
             detail,
         )
+
+    def test_prompt_localizes_templates_before_inserting_counts_and_filenames(self):
+        source_name = "My {archive} – ディスク.hfe"
+        for language in language_options():
+            if language.code == "en":
+                continue
+
+            def translate(template, **values):
+                # A formatted sentence would miss the catalog and stay English.
+                self.assertNotEqual(translate_text(template, language.code), template)
+                return translate_text(template, language.code, **values)
+
+            for count in (1, 2, 5):
+                with self.subTest(language=language.code, count=count):
+                    headline, detail = _psr600_conversion_prompt_copy(
+                        {
+                            "file_count": count,
+                            "melody_bank_count": count,
+                            "apparent_layer_count": count,
+                            "chord_bank_count": count,
+                            "partial_melody_bank_count": count,
+                        },
+                        source_name,
+                        translate=translate,
+                    )
+                    self.assertIn(str(count), headline)
+                    self.assertIn(source_name, detail)
+                    self.assertNotIn("{count}", headline + detail)
 
 
 if __name__ == "__main__":

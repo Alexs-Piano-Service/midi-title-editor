@@ -41,6 +41,8 @@ FILENAME_POLICY_TRANSLATION_SOURCES = (
 
 class FilenamePolicyWindow:
     IMAGE_FILENAME_INVALID_CHARS = MidiTitleWindow.IMAGE_FILENAME_INVALID_CHARS
+    _language_code = MidiTitleWindow._language_code
+    _lt = MidiTitleWindow._lt
 
     def __init__(self, *, use_dos83=False):
         self.use_dos83 = use_dos83

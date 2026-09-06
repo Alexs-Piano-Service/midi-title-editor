@@ -7,11 +7,11 @@
 
 <h1 align="center">APS MIDI Prep Tool</h1>
 
-<p align="center"><strong>Yamaha Disklavier E-SEQ, MIDI, and floppy-image utility</strong></p>
+<p align="center"><strong>Prepare music for your Disklavier and preserve piano disks</strong></p>
 
 <p align="center">
-  Preserve PianoSoft disks, edit song metadata, convert Yamaha E-SEQ and Standard MIDI,
-  prepare MIDI Type 0 files, and build virtual floppy libraries in one desktop app.
+  Edit song titles, convert MIDI and Yamaha E-SEQ, and create disks for your player piano
+  or floppy emulator.
 </p>
 
 <p align="center">
@@ -23,192 +23,150 @@
 
 Current version: `0.8.1`
 
-APS MIDI Prep Tool is a visual Yamaha PianoSoft floppy reader, E-SEQ to MIDI
-converter, MIDI title editor, and IMG/HFE disk builder for Disklavier and other
-legacy player-piano workflows. Changes are staged for review, so you can inspect
-the result before writing a file, disk image, or physical floppy.
+APS MIDI Prep Tool is a desktop app for Yamaha Disklavier and other legacy
+player-piano workflows. Use it to recover songs from old floppies, organize your
+music, and prepare compatible files or disk images. A disk image is a file that
+holds the contents of a floppy disk.
 
-## Read Yamaha PianoSoft floppies and disk images
+## Quick start
 
-Open common IMG/BIN-style raw images and HFE images, read compatible physical
-floppies, or drag MIDI, E-SEQ, and image files directly into the workspace. In
-Image Mode, the app shows song titles, playback order, `PIANODIR.FIL` metadata,
-disk capacity, and the 60-song Disklavier E-SEQ limit in one place.
+1. [Download the latest release](https://github.com/Alexs-Piano-Service/aps-midi-prep-tool/releases/latest)
+   for Windows or Linux and open the app. Packaged releases do not require a
+   separate Python installation.
+2. Choose **Open MIDI Folder** for MIDI or E-SEQ songs, **Open Image** for a disk
+   image, or **Disk → Read Floppy...** for a physical disk. You can also drag
+   files into the main window.
+3. Review song titles, filenames, playback order, and any compatibility warnings.
+   Edit the list or use **Utilities → Convert** to change formats.
+4. Choose **Save As** to export copies to a folder, or **Save As Image** to
+   create IMG/HFE floppy images. **Save** updates the current source where
+   supported.
 
-[![APS MIDI Prep Tool reading a Yamaha E-SEQ floppy image with editable song titles](docs/images/aps-midi-prep-tool-yamaha-eseq-floppy-image-editor.png)](docs/images/aps-midi-prep-tool-yamaha-eseq-floppy-image-editor.png)
+Edits and conversions in the main list wait until you save. Formatting and
+writing a physical floppy require a separate confirmation. If the floppy is
+irreplaceable, make a disk image before working on it.
 
-The original image can remain write-protected while you edit titles, rename or
-reorder songs, convert formats, and export a clean copy. Physical-media tools can
-also create IMG or low-level SCP archives before you make changes.
+Change the interface language under **Settings → Language**. English, Spanish,
+French, German, Italian, Brazilian Portuguese, Bulgarian, Dutch, Polish,
+Japanese, Korean, and Simplified Chinese are available.
 
-## Convert Yamaha E-SEQ and MIDI both ways
+## Recover songs from a floppy or disk image
 
-- Convert Yamaha E-SEQ to Standard MIDI while preserving song titles and order.
-- Convert MIDI to E-SEQ and generate compatible `PIANODIR.FIL` or `MUSIC.DIR`
-  directory data.
-- Convert MIDI Type 1 to Type 0 (SMF1 to SMF0) for legacy player-piano
-  compatibility, with optional instrument merging onto one piano channel.
-- Stage every conversion first; use **Save**, **Save As**, or **Save As Image**
-  only when the list looks right.
+Open common IMG/BIN raw images and HFE images, or read a physical floppy with a
+compatible drive. The app shows song titles, playback order, album information,
+and remaining disk space. Save songs to a folder or ZIP, or create a new image.
+
+[![A Yamaha E-SEQ floppy image with editable song titles](docs/images/aps-midi-prep-tool-yamaha-eseq-floppy-image-editor.png)](docs/images/aps-midi-prep-tool-yamaha-eseq-floppy-image-editor.png)
+
+Recovery tools can retry difficult disks. Greaseweazle hardware also supports
+SCP archives, which capture the disk's magnetic signals for preservation.
+Recovery cannot guarantee that damaged recordings will play correctly.
+
+## Convert and organize your music
+
+- **Yamaha E-SEQ ↔ MIDI:** convert songs while keeping titles and playback
+  order. E-SEQ exports can include the `PIANODIR.FIL` or `MUSIC.DIR` catalog
+  that compatible players use to display songs.
+- **MIDI Type 1 → Type 0:** combine MIDI tracks into the single-track format
+  required by some older players. The app calls these formats SMF1 and SMF0.
+- **Titles and filenames:** clean up title spacing, name files from song titles,
+  or create the short DOS 8.3 filenames required by older hardware.
+- **Playback compatibility:** optionally merge instruments onto one piano
+  channel, adjust pedal behavior, or remove Yamaha XF metadata.
+
+Conversions in the main list are ready for review before you save them. You
+can apply tools to a whole folder of songs.
 
 <table>
   <tr>
     <td width="50%">
       <a href="docs/images/aps-midi-prep-tool-eseq-to-midi-conversion.png">
-        <img src="docs/images/aps-midi-prep-tool-eseq-to-midi-conversion.png" alt="Convert Yamaha E-SEQ to Standard MIDI in APS MIDI Prep Tool">
+        <img src="docs/images/aps-midi-prep-tool-eseq-to-midi-conversion.png" alt="Convert Yamaha E-SEQ songs to Standard MIDI">
       </a>
     </td>
     <td width="50%">
       <a href="docs/images/aps-midi-type-1-to-type-0-conversion.png">
-        <img src="docs/images/aps-midi-type-1-to-type-0-conversion.png" alt="Convert MIDI Type 1 to Type 0, also called SMF1 to SMF0">
+        <img src="docs/images/aps-midi-type-1-to-type-0-conversion.png" alt="Convert MIDI Type 1 songs to Type 0">
       </a>
     </td>
   </tr>
-  <tr>
-    <td><strong>E-SEQ ↔ MIDI</strong><br>Use descriptive filenames and clean title spacing without touching the source set.</td>
-    <td><strong>SMF1 → SMF0</strong><br>Prepare single-track MIDI copies for compatible player-piano hardware.</td>
-  </tr>
 </table>
 
-## Inspect, preview, and render MIDI and E-SEQ
+## Listen to songs and create audio copies
 
-File Inspection turns MIDI or E-SEQ data into a color-coded piano roll with
-channel, instrument, tempo, note, and pedal details. Mute channels, adjust the
-preview mix and tempo, audition through a SoundFont or USB MIDI device, or render
-WAV and MP3 reference audio.
+Open **Utilities → File Inspection...** to view notes, channels, instruments,
+tempo, and pedals on a piano roll. Mute channels, adjust the preview mix or
+tempo, and listen with a basic piano sound, a SoundFont, or a connected MIDI
+device. A SoundFont supplies instrument sounds for playback.
 
-[![Inspect MIDI channels, instruments, tempo, pedals, and piano-roll playback](docs/images/aps-midi-prep-tool-midi-file-inspection-piano-roll.png)](docs/images/aps-midi-prep-tool-midi-file-inspection-piano-roll.png)
+Use **Utilities → Render Audio...** to create WAV or MP3 copies. SoundFont
+playback and rendering need optional tools listed below.
 
-Collection tools can also correct titles and filenames, create DOS 8.3 names,
-strip Yamaha XF data, soften pedal behavior, merge instruments for piano
-playback, and process an entire folder at once.
+[![MIDI notes, channels, tempo, and pedals in File Inspection](docs/images/aps-midi-prep-tool-midi-file-inspection-piano-roll.png)](docs/images/aps-midi-prep-tool-midi-file-inspection-piano-roll.png)
 
-## Build IMG and HFE floppy-emulator disk sets
+## Create disks for a floppy emulator
 
-Turn a folder of MIDI or E-SEQ songs into numbered IMG or HFE images for a
-floppy emulator such as Nalbantov. Choose how to organize the set:
+Open **Utilities → Build Emulator Disk Set...** to turn a folder of MIDI or
+E-SEQ songs into numbered IMG or HFE files for an emulator such as Nalbantov.
+Choose the contents, image format, and capacity supported by your player.
 
-- **One album per folder** starts a separate disk for each folder containing
-  songs. For example, songs in `DSKA001/` go on `DSKA0001.hfe`, and songs in
-  `DSKA002/` start on `DSKA0002.hfe`. Large albums continue on extra disks;
-  different folders never share a disk. Empty folders are skipped.
-- **Fill disks automatically** pools the songs and fills each disk before
-  starting the next, regardless of source folders.
-
-**One album per folder** always scans nested folders. Each folder's own songs
-stay together, including songs directly in the selected folder. In **Fill disks
-automatically**, **Include nested folders** is optional; turn it off to use only
-the selected folder. Its setting is remembered when switching layouts. Album
-folders and songs follow natural number order; shuffle can randomize songs
-within each album.
-
-**Include Song Lists** applies to the entire build. It writes one combined text
-file in the output folder, organized by image (`DSKA0001.hfe`, `DSKA0002.hfe`,
-and so on), with every album and track in playback order. Recursive builds
-include all nested albums, even when an album spans several images. Automatic
-filling identifies each track's source album when folders share an image.
-Tracks use available song titles, falling back to filenames when untitled.
-
-Choose MIDI or Yamaha E-SEQ contents, IMG or HFE output, and disk capacity.
-Expand **Naming and capacity options** to change the
-image prefix, starting number, free-space reserve, or shared album title.
-E-SEQ disks get a `PIANODIR.FIL` automatically. In folder mode, album titles
-come from each folder's `PDISK.MNG` when available, otherwise its folder name;
-your shared album-title override takes precedence. `PSONG.MNG` supplies song
-titles in either layout, matching original filenames and the numbered long
-filenames produced by extraction. Catalogs are read separately in each folder.
-Both original CRLF catalogs and copies with LF-only line endings are supported.
-Older numeric extraction names (such as `01 - 01.mid`) and identical renamed
-copies in the same folder can also be matched to their catalog records.
-Matching song titles from `INDEX.csv` override catalog titles, with a folder's
-own index taking precedence over the collection's index. Embedded titles and
-filenames remain the fallbacks when catalog metadata is missing or invalid.
-The combined list includes these song and album titles.
-MIDI images also include valid `PSONG.MNG` and `PDISK.MNG` files when available
-in their source folders, independently of **Include Song Lists**. Song catalogs
-follow each image's actual filenames and track order, including shuffled songs
-and albums split across disks. Automatic filling combines catalog entries when
-folders share an image; such a compilation's disk title uses its image number.
-If a source MIDI contains bad-sector recovery filler or its embedded title
-cannot be safely updated, the builder can preserve its original bytes and
-store the title in its available `PSONG.MNG` catalog. The completion dialog and
-combined song list identify affected images and files. This preserves damaged
-recordings; it does not repair missing music. E-SEQ conversion still requires
-readable MIDI data.
-Existing users keep their saved automatic-fill and subfolder settings.
-
-[![Build numbered IMG or HFE floppy emulator disks for Nalbantov](docs/images/aps-midi-prep-tool-hfe-emulator-disk-builder.png)](docs/images/aps-midi-prep-tool-hfe-emulator-disk-builder.png)
-
-The builder creates the disk images themselves. Keep the setup files from an
-existing emulator USB stick and follow the emulator manufacturer's instructions
-when preparing replacement media.
-
-<sub>All screenshots show the real application with self-created demonstration files.</sub>
-
-## Quick start
-
-1. Open a MIDI or E-SEQ folder, open a floppy image, or read a physical disk.
-2. Review titles, filenames, song order, formats, and compatibility warnings;
-   apply only the conversions or cleanup tools you need.
-3. Export to a folder, ZIP archive, new IMG/HFE image, or compatible physical
-   floppy.
-
-Edits and conversions in the main list remain staged until you save. Formatting
-and disk-writing commands require a separate confirmation.
-
-## Supported media and formats
-
-| Source | What APS MIDI Prep Tool can do |
+| Layout | Use it when you want to… |
 | --- | --- |
-| Standard MIDI (`.mid`, `.midi`) | Edit titles and filenames, inspect, preview, batch-process, render, and convert to SMF0 or Yamaha E-SEQ. |
-| Yamaha E-SEQ (`.FIL`/`.MDA` with `PIANODIR.FIL`/`MUSIC.DIR`) | Preserve album and song information, edit titles and order, convert to MIDI, and build compatible disks. |
-| Physical 3.5-inch floppies | Read, image, recover, format, and write through a compatible floppy drive or Greaseweazle. |
-| Floppy images | Open common IMG/BIN-style raw images and HFE images; create IMG/HFE disks and SCP flux captures from physical media. |
-| Other legacy music formats | Import or convert supported PianoDisc System 3, Akai MPC, Yamaha V50/SY77, PSR-600, and Electone MDR data. |
-| Exports | Save songs to a folder or ZIP, create IMG/HFE disk images, and render MIDI or E-SEQ to WAV or MP3. |
+| **One album per folder** | Keep each folder's songs together. Large albums continue on extra disks; nested folders are included. |
+| **Fill disks automatically** | Fill each disk before starting the next. Different folders can share a disk. |
 
-The main editing workflow is designed for Standard MIDI, Yamaha E-SEQ, and
-Yamaha-compatible floppy media. Some additional legacy formats are import-only
-or read-only conversion sources. Disklavier E-SEQ uses DOS 8.3 filenames,
-32-character titles, and no more than 60 cataloged songs per disk.
+Enable **Include Song Lists** for one text file listing every image, album, and
+track in playback order. **Naming and capacity options** lets you change disk
+numbering and the amount of space left free.
 
-## Preservation-first safeguards
+[![Options for building a numbered floppy-emulator disk set](docs/images/aps-midi-prep-tool-hfe-emulator-disk-builder.png)](docs/images/aps-midi-prep-tool-hfe-emulator-disk-builder.png)
 
-- Image an irreplaceable floppy before editing it. Recovery mode can retry
-  difficult media, while Greaseweazle can identify weak areas and create an SCP
-  archive.
-- Use **File → Write Protection → Write-Protect Original** to prevent an open
-  image or floppy from being overwritten. Copy-based exports remain available.
-- Enable optional backups under **File → Save Options**, and always test a newly
-  written disk or image before relying on it.
+See the [disk-set guide](docs/emulator-disk-sets.md) for folder organization,
+existing song catalogs, title selection, and damaged-file handling.
+
+The builder creates disk images. Keep the setup files from an existing emulator
+USB stick and follow the manufacturer's instructions to prepare the stick.
+
+<sub>Screenshots show the real app with self-created demonstration files.</sub>
+
+## Protect your originals
+
+- Make an image of an irreplaceable floppy before editing it.
+- Use **File → Write Protection → Write-Protect Original** to prevent **Save**
+  from overwriting the open image or floppy. You can still export copies.
+- Enable backups under **File → Save Options** and test new disks or images on
+  your player before relying on them.
 - If your operating system offers to format an old piano disk, cancel that
   prompt and open the disk through APS MIDI Prep Tool instead.
 
-## Download and requirements
+## Compatibility and optional tools
 
-[Packaged releases](https://github.com/Alexs-Piano-Service/aps-midi-prep-tool/releases/latest)
-are available for Windows and Linux. Running from source requires Python 3.10
-or newer and PySide6.
+The main editing workflow supports Standard MIDI (`.mid`, `.midi`), Yamaha
+E-SEQ (`.FIL`, `.MDA`), and Yamaha-compatible floppy media. Disklavier E-SEQ
+uses DOS 8.3 filenames, titles of up to 32 characters, and no more than 60
+cataloged songs per disk.
 
-Some workflows use optional tools:
+The app also imports or converts supported PianoDisc System 3, Akai MPC,
+Yamaha V50/SY77, PSR-600, and Electone MDR data. Some of these formats are
+import-only or read-only conversion sources.
 
-- `mtools` for FAT floppy-image operations, and the Greaseweazle CLI (`gw`) for
-  Greaseweazle hardware, HFE conversion, and flux-image workflows.
-- FluidSynth plus a compatible SoundFont for SoundFont previews and audio
-  rendering, LAME for MP3 encoding, and `python-rtmidi` for direct MIDI-device
-  playback. Basic piano preview does not require FluidSynth.
-- Operating-system permission to access a physical floppy drive.
+Some tasks need additional software or hardware. Availability varies by release
+package.
 
-Optional-tool availability varies by release package. FluidSynth and a
-SoundFont are not bundled by default.
-
-The interface is available in English, Spanish, French, German, Italian,
-Brazilian Portuguese, Bulgarian, Dutch, Polish, Japanese, Korean, and
-Simplified Chinese.
+| To… | You may need… |
+| --- | --- |
+| Work with FAT floppy images | `mtools`. |
+| Use Greaseweazle hardware, convert HFE images, or capture magnetic disk signals | The Greaseweazle CLI (`gw`), plus hardware for physical disks. |
+| Preview with a SoundFont or render audio | FluidSynth and a compatible SoundFont. Neither is bundled by default; basic piano preview does not need FluidSynth. |
+| Create MP3 files | LAME, in addition to the audio-rendering tools above. |
+| Play through a MIDI device | A connected MIDI device and `python-rtmidi`. |
+| Read or write a physical floppy | A compatible drive and operating-system permission to access it. |
 
 ## Run from source
 
-On Linux:
+Packaged releases are the easiest way to get started. To run from source, use
+Python 3.10 or newer and PySide6. On Linux, run these commands from the project
+folder:
 
 ```bash
 python3 -m venv .venv
@@ -221,6 +179,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and test commands.
 
 ## Guides and support
 
+- [Build a floppy-emulator disk set](docs/emulator-disk-sets.md)
 - [Convert MIDI files and create PIANODIR.FIL](https://www.alexanderpeppe.com/eseq-and-pianodir-fil/)
 - [Extract MIDI files from a Yamaha floppy disk](https://www.alexanderpeppe.com/extracting-midi-files-from-a-yamaha-floppy-disk-with-aps-midi-prep-tool/)
 - [Change MIDI titles on your computer](https://www.alexanderpeppe.com/change-midi-titles-aps-midi-prep-tool/)
@@ -228,20 +187,19 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and test commands.
 - [Convert MIDI files from Type 1 to Type 0](https://www.alexanderpeppe.com/converting-midi-files-type-1-to-type-0-aps-midi-prep-tool/)
 - [Edit titles and songs in Nalbantov virtual disks](https://www.alexanderpeppe.com/adding-removing-or-changing-titles-in-nalbantov-usb-stick-virtual-disks/)
 
-Use **Help → Send Feedback...** or **Help → Report a Bug...** inside the app for
-support. See [CHANGELOG.md](CHANGELOG.md) for release history and
-[SECURITY.md](SECURITY.md) for responsible reporting guidance.
+Use **Help → Send Feedback...** for suggestions or **Help → Report a Bug...**
+for problems. See [CHANGELOG.md](CHANGELOG.md) for release history and
+[SECURITY.md](SECURITY.md) to report a security issue.
 
 ## License and responsible use
 
-Copyright © 2026 Alex's Piano Service LLC. APS MIDI Prep Tool is released under
-the [Apache License 2.0](LICENSE).
+Copyright © 2026 Alex's Piano Service LLC. Released under the
+[Apache License 2.0](LICENSE).
 
-Use the tool only with disks and files you own or are authorized to preserve,
-convert, or modify. Keep backups and test outputs before relying on them. The
-project is an independent compatibility utility and is not affiliated with or
-endorsed by Yamaha, Disklavier, PianoSoft, PianoDisc, Nalbantov, Greaseweazle,
-Akai, or other companies and products named for compatibility purposes.
+Use only disks and files you own or are authorized to preserve, convert, or
+modify. The project is independent and is not affiliated with or endorsed by
+Yamaha, Disklavier, PianoSoft, PianoDisc, Nalbantov, Greaseweazle, Akai, or other
+companies and products named for compatibility purposes.
 
 [Disclaimer](https://www.alexanderpeppe.com/disclaimer/) ·
 [Privacy Policy](https://www.alexanderpeppe.com/privacy-policy/) ·

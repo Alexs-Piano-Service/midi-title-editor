@@ -1,6 +1,8 @@
 import os
 import re
 
+from .message_catalog import translate_text
+
 from .eseq_converter import (
     is_clavinova_mda_eseq_bytes,
     is_eseq_file,
@@ -294,7 +296,7 @@ def _describe_char_for_error(ch):
     return f"'{display}' (U+{code:04X})"
 
 
-def validate_legacy_title_input(title):
+def validate_legacy_title_input(title, language_code="en"):
     """Validate edited titles against a conservative legacy-safe character set."""
     invalid = []
     seen = set()
@@ -313,11 +315,10 @@ def validate_legacy_title_input(title):
     preview = ", ".join(_describe_char_for_error(ch) for ch in invalid[:5])
     if len(invalid) > 5:
         preview += ", ..."
-    return (
-        "Unsupported character(s) for legacy MIDI compatibility. "
-        "Use printable ASCII only (space through ~). "
-        f"Found: {preview}"
-    )
+    return translate_text(
+        "Use printable ASCII only (space through ~). Unsupported characters: {characters}",
+        language_code,
+    ).format(characters=preview)
 
 def _set_first_title_in_midi_bytes(midi_bytes, new_title):
     declared_track_count, chunks = _parse_midi_chunks(midi_bytes)
